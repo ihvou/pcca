@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RedditCollector:
-    max_posts_per_source: int = 20
+    max_items: int = 20
     platform: str = "reddit"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -29,7 +29,7 @@ class RedditCollector:
         else:
             path = f"/r/{source}/new.json"
 
-        url = f"https://www.reddit.com{path}?limit={self.max_posts_per_source}"
+        url = f"https://www.reddit.com{path}?limit={self.max_items}"
         headers = {"User-Agent": "pcca/0.1 (+local agent)"}
         try:
             async with httpx.AsyncClient(timeout=20.0, headers=headers, follow_redirects=True) as client:

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
+from pcca.collectors.errors import SessionChallengedError
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class XCollector:
     session_manager: BrowserSessionManager
-    max_posts_per_source: int = 20
+    max_items: int = 20
     platform: str = "x"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -26,6 +27,14 @@ class XCollector:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3500)
+            current_url = page.url
+            if "/i/flow/login" in current_url or "/login" in current_url:
+                raise SessionChallengedError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=current_url,
+                    challenge_kind="login_redirect",
+                )
             raw_items = await page.evaluate(
                 """
                 (maxItems) => {
@@ -61,7 +70,7 @@ class XCollector:
                   return out;
                 }
                 """,
-                self.max_posts_per_source,
+                self.max_items,
             )
         except Exception:
             logger.exception("X collection failed for source=%s", source_id)

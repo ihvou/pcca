@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
+from pcca.collectors.errors import SessionChallengedError
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class LinkedInCollector:
     session_manager: BrowserSessionManager
-    max_posts_per_source: int = 20
+    max_items: int = 20
     platform: str = "linkedin"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -28,6 +29,14 @@ class LinkedInCollector:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3500)
+            current_url = page.url
+            if "linkedin.com/login" in current_url or "linkedin.com/uas/login" in current_url:
+                raise SessionChallengedError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=current_url,
+                    challenge_kind="login_redirect",
+                )
             raw_items = await page.evaluate(
                 """
                 (maxItems) => {
@@ -47,20 +56,22 @@ class LinkedInCollector:
 
                     const textNode = node.querySelector("span.break-words, div.update-components-text");
                     const text = textNode ? textNode.innerText.trim() : node.innerText.slice(0, 1200);
+                    const timeEl = node.querySelector("time");
+                    const publishedAt = timeEl ? timeEl.getAttribute("datetime") : null;
 
                     out.push({
                       external_id: extId,
                       author: author,
                       url: absUrl,
                       text: text,
-                      published_at: null
+                      published_at: publishedAt
                     });
                     if (out.length >= maxItems) break;
                   }
                   return out;
                 }
                 """,
-                self.max_posts_per_source,
+                self.max_items,
             )
         except Exception:
             logger.exception("LinkedIn collection failed for source=%s", source_id)

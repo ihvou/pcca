@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class YouTubeCollector:
     session_manager: BrowserSessionManager
     transcript_service: YouTubeTranscriptService = field(default_factory=YouTubeTranscriptService)
-    max_videos_per_source: int = 8
+    max_items: int = 8
     platform: str = "youtube"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -28,19 +28,25 @@ class YouTubeCollector:
                 """
                 (maxItems) => {
                   const out = [];
+                  const channelName =
+                    (document.querySelector("ytd-channel-name yt-formatted-string")?.textContent || "").trim() ||
+                    (document.querySelector("meta[itemprop='name']")?.getAttribute("content") || "").trim() ||
+                    null;
                   const links = Array.from(document.querySelectorAll("a#video-title-link, a#video-title"));
                   for (const link of links) {
                     const href = link.getAttribute("href");
                     if (!href || !href.includes("watch")) continue;
                     const absUrl = href.startsWith("http") ? href : `https://www.youtube.com${href}`;
                     const title = (link.textContent || "").trim();
-                    out.push({ url: absUrl, title });
+                    const container = link.closest("ytd-rich-item-renderer, ytd-grid-video-renderer, ytd-video-renderer");
+                    const metaText = container ? (container.innerText || "") : "";
+                    out.push({ url: absUrl, title, channel_name: channelName, meta_text: metaText.slice(0, 500) });
                     if (out.length >= maxItems) break;
                   }
                   return out;
                 }
                 """,
-                self.max_videos_per_source,
+                self.max_items,
             )
         except Exception:
             logger.exception("YouTube collection failed for source=%s", source_id)
@@ -63,12 +69,12 @@ class YouTubeCollector:
                 CollectedItem(
                     platform=self.platform,
                     external_id=video_id,
-                    author=source_id,
+                    author=row.get("channel_name") or source_id,
                     url=video_url,
                     text=text,
                     transcript_text=transcript_text,
                     published_at=None,
-                    metadata={"source_id": source_id, "title": row.get("title")},
+                    metadata={"source_id": source_id, "title": row.get("title"), "meta_text": row.get("meta_text")},
                 )
             )
         return results

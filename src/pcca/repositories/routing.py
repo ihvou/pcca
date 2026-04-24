@@ -31,6 +31,7 @@ class RoutingRepository:
         await self.conn.commit()
 
     async def link_subject_route(self, subject_id: int, chat_id: int, thread_id: str | None = None) -> None:
+        thread_key = thread_id or ""
         await self.conn.execute(
             """
             INSERT INTO subject_routes(subject_id, chat_id, thread_id)
@@ -38,7 +39,7 @@ class RoutingRepository:
             ON CONFLICT(subject_id, chat_id, thread_id)
             DO NOTHING
             """,
-            (subject_id, chat_id, thread_id),
+            (subject_id, chat_id, thread_key),
         )
         await self.conn.commit()
 
@@ -53,7 +54,14 @@ class RoutingRepository:
                 (subject_id,),
             )
         ).fetchall()
-        return [SubjectRoute(subject_id=row["subject_id"], chat_id=row["chat_id"], thread_id=row["thread_id"]) for row in rows]
+        return [
+            SubjectRoute(
+                subject_id=row["subject_id"],
+                chat_id=row["chat_id"],
+                thread_id=row["thread_id"] or None,
+            )
+            for row in rows
+        ]
 
     async def resolve_subject_for_chat(
         self,
@@ -61,6 +69,7 @@ class RoutingRepository:
         chat_id: int,
         thread_id: str | None,
     ) -> Subject | None:
+        thread_key = thread_id or ""
         if thread_id is not None:
             row = await (
                 await self.conn.execute(
@@ -72,7 +81,7 @@ class RoutingRepository:
                     ORDER BY sr.id DESC
                     LIMIT 1
                     """,
-                    (chat_id, thread_id),
+                    (chat_id, thread_key),
                 )
             ).fetchone()
             if row is not None:
@@ -91,7 +100,7 @@ class RoutingRepository:
                 SELECT s.id, s.name, s.telegram_thread_id, s.status, s.created_at
                 FROM subject_routes sr
                 JOIN subjects s ON s.id = sr.subject_id
-                WHERE sr.chat_id = ?
+                WHERE sr.chat_id = ? AND sr.thread_id = ''
                 ORDER BY sr.id DESC
                 LIMIT 1
                 """,

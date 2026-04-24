@@ -87,32 +87,44 @@ class TelegramService:
         await app.shutdown()
         logger.info("Telegram service stopped.")
 
-    async def send_digest_message(self, chat_id: int, subject_name: str, items: list[str], thread_id: int | None = None) -> None:
+    async def send_digest_message(
+        self,
+        chat_id: int,
+        subject_name: str,
+        items: list[str],
+        item_actions: list[dict] | None = None,
+        thread_id: int | None = None,
+    ) -> int | None:
         if self.application is None:
             logger.warning("Telegram application not started, skipping digest send.")
-            return
+            return None
         title = f"📌 {subject_name} — {len(items)} items today"
         body = "\n\n".join(items) if items else "No high-signal items passed your quality bar today."
-        keyboard = InlineKeyboardMarkup(
+        keyboard_rows = []
+        for action_row in item_actions or []:
+            rank = action_row.get("rank")
+            tokens = action_row.get("tokens", {})
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(f"{rank} 👍", callback_data=f"fb:{tokens.get('up', '')}"),
+                    InlineKeyboardButton(f"{rank} 👎", callback_data=f"fb:{tokens.get('down', '')}"),
+                    InlineKeyboardButton(f"{rank} 🔖", callback_data=f"fb:{tokens.get('save', '')}"),
+                ]
+            )
+        keyboard_rows.append(
             [
-                [
-                    InlineKeyboardButton("👍", callback_data="fb:up"),
-                    InlineKeyboardButton("👎", callback_data="fb:down"),
-                    InlineKeyboardButton("🔖", callback_data="fb:save"),
-                ],
-                [
-                    InlineKeyboardButton("Read Content Now", callback_data="run:read"),
-                    InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
-                ],
+                InlineKeyboardButton("Read Content Now", callback_data="run:read"),
+                InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
             ]
         )
-        await self.application.bot.send_message(
+        sent = await self.application.bot.send_message(
             chat_id=chat_id,
             text=f"{title}\n\n{body}",
-            reply_markup=keyboard,
+            reply_markup=InlineKeyboardMarkup(keyboard_rows),
             message_thread_id=thread_id,
             disable_web_page_preview=True,
         )
+        return sent.message_id
 
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -131,6 +143,7 @@ class TelegramService:
     async def _on_setup(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        reauth_note = await self._format_reauth_sources()
         await update.message.reply_text(
             "Setup flow:\n"
             "1. Create subject: `Create subject: Agentic PM`\n"
@@ -138,7 +151,9 @@ class TelegramService:
             "3. Optionally refine: `Refine Agentic PM: include claude code, releases; exclude biography`\n"
             "4. Trigger collection now: `/read_content`\n"
             "5. Trigger digest now: `/get_digest`\n\n"
-            "Desktop-only account login/import (X/LinkedIn/YouTube) is available in app controls.",
+            "Desktop-only account login/import is available in app controls "
+            "for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
+            f"{reauth_note}",
         )
 
     async def _on_help(self, update: Update, _context: ContextTypes.DEFAULT_TYPE | None) -> None:
@@ -404,16 +419,16 @@ class TelegramService:
     async def _on_feedback_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is None:
             return
-        action = (update.callback_query.data or "fb:unknown").split(":", 1)[1]
-        message = update.callback_query.message
-        if message is not None:
-            thread_id = str(message.message_thread_id) if message.message_thread_id else None
-            subject = await self.routing_service.resolve_subject_for_chat(chat_id=message.chat.id, thread_id=thread_id)
-            if subject is not None:
-                await self.feedback_service.add_feedback_by_subject_id(
-                    subject_id=subject.id,
-                    feedback_type=f"button_{action}",
-                )
+        token = (update.callback_query.data or "fb:").split(":", 1)[1]
+        button = await self.feedback_service.get_digest_button(token)
+        if button is None:
+            await update.callback_query.answer("This feedback button is no longer available.")
+            return
+        await self.feedback_service.add_feedback_by_subject_id(
+            subject_id=button.subject_id,
+            item_id=button.item_id,
+            feedback_type=f"button_{button.action}",
+        )
         await update.callback_query.answer("Feedback saved.")
 
     async def _on_run_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -451,10 +466,23 @@ class TelegramService:
         try:
             async with self._manual_action_lock:
                 await action()
-            await message.reply_text(f"`{action_name}` completed.", parse_mode="Markdown")
+            reauth_note = ""
+            if action_name == "read content":
+                reauth_note = await self._format_reauth_sources()
+            await message.reply_text(f"{action_name} completed.{reauth_note}")
         except Exception:
             logger.exception("Manual action failed: %s", action_name)
             await message.reply_text(f"`{action_name}` failed. Check logs and try again.", parse_mode="Markdown")
+
+    async def _format_reauth_sources(self) -> str:
+        sources = await self.source_service.list_sources_needing_reauth()
+        if not sources:
+            return ""
+        lines = [
+            f"- [{source.platform}] {source.display_name} ({source.account_or_channel_id})"
+            for source in sources
+        ]
+        return "\n\nNeeds re-login before next collection:\n" + "\n".join(lines)
 
     async def _send_quick_actions(self, message) -> None:
         keyboard = InlineKeyboardMarkup(

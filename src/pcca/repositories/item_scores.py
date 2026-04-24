@@ -12,6 +12,7 @@ class CandidateItem:
     title_or_text: str
     url: str | None
     author: str | None
+    published_at: str | None
     final_score: float
     rationale: str
 
@@ -74,6 +75,7 @@ class ItemScoreRepository:
                   COALESCE(i.raw_text, '') AS title_or_text,
                   i.canonical_url AS url,
                   i.author AS author,
+                  i.published_at AS published_at,
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale
                 FROM item_scores s
@@ -97,9 +99,46 @@ class ItemScoreRepository:
                 title_or_text=row["title_or_text"],
                 url=row["url"],
                 author=row["author"],
+                published_at=row["published_at"],
                 final_score=float(row["final_score"] or 0.0),
                 rationale=str(row["rationale"] or ""),
             )
             for row in rows
         ]
 
+    async def candidates_by_item_ids(self, *, subject_id: int, item_ids: list[int]) -> list[CandidateItem]:
+        if not item_ids:
+            return []
+        placeholders = ",".join("?" for _ in item_ids)
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT
+                  i.id AS item_id,
+                  COALESCE(i.raw_text, '') AS title_or_text,
+                  i.canonical_url AS url,
+                  i.author AS author,
+                  i.published_at AS published_at,
+                  s.final_score AS final_score,
+                  json_extract(s.rationale_json, '$.reason') AS rationale
+                FROM item_scores s
+                JOIN items i ON i.id = s.item_id
+                WHERE s.subject_id = ?
+                  AND i.id IN ({placeholders})
+                """,
+                (subject_id, *item_ids),
+            )
+        ).fetchall()
+        by_id = {
+            int(row["item_id"]): CandidateItem(
+                item_id=row["item_id"],
+                title_or_text=row["title_or_text"],
+                url=row["url"],
+                author=row["author"],
+                published_at=row["published_at"],
+                final_score=float(row["final_score"] or 0.0),
+                rationale=str(row["rationale"] or ""),
+            )
+            for row in rows
+        }
+        return [by_id[item_id] for item_id in item_ids if item_id in by_id]

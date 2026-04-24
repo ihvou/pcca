@@ -25,7 +25,7 @@ def normalize_spotify_show_source(source_id: str) -> str:
 @dataclass
 class SpotifyCollector:
     session_manager: BrowserSessionManager
-    max_episodes_per_source: int = 12
+    max_items: int = 12
     platform: str = "spotify"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -38,6 +38,10 @@ class SpotifyCollector:
                 """
                 (maxItems) => {
                   const out = [];
+                  const showTitle =
+                    (document.querySelector('[data-testid="entityTitle"]')?.textContent || "").trim() ||
+                    (document.querySelector("h1")?.textContent || "").trim() ||
+                    null;
                   const links = Array.from(document.querySelectorAll('a[href*="/episode/"]'));
                   for (const link of links) {
                     const href = link.getAttribute("href") || "";
@@ -47,13 +51,15 @@ class SpotifyCollector:
                     const extId = idMatch ? idMatch[1] : abs;
                     const title = (link.textContent || "").trim();
                     if (!title) continue;
-                    out.push({ external_id: extId, url: abs, title });
+                    const container = link.closest('[data-testid], div');
+                    const description = container ? (container.innerText || "").trim().slice(0, 1200) : title;
+                    out.push({ external_id: extId, url: abs, title, description, show_title: showTitle });
                     if (out.length >= maxItems) break;
                   }
                   return out;
                 }
                 """,
-                self.max_episodes_per_source,
+                self.max_items,
             )
         except Exception:
             logger.exception("Spotify collection failed for source=%s", source_id)
@@ -74,9 +80,9 @@ class SpotifyCollector:
                 CollectedItem(
                     platform=self.platform,
                     external_id=ext_id,
-                    author=None,
+                    author=row.get("show_title"),
                     url=row.get("url"),
-                    text=title,
+                    text=str(row.get("description") or title),
                     transcript_text=None,
                     published_at=None,
                     metadata={"source_id": source_id},

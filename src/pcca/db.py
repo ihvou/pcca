@@ -171,6 +171,75 @@ MIGRATIONS: list[tuple[int, str]] = [
         );
         """,
     ),
+    (
+        3,
+        """
+        ALTER TABLE items ADD COLUMN ingested_at TEXT;
+        ALTER TABLE items ADD COLUMN updated_at TEXT;
+        ALTER TABLE items ADD COLUMN content_hash TEXT;
+
+        UPDATE items
+        SET
+          ingested_at = COALESCE(ingested_at, CURRENT_TIMESTAMP),
+          updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP);
+
+        DELETE FROM subject_routes
+        WHERE id NOT IN (
+          SELECT MIN(id)
+          FROM subject_routes
+          GROUP BY subject_id, chat_id, COALESCE(thread_id, '')
+        );
+
+        UPDATE subject_routes
+        SET thread_id = ''
+        WHERE thread_id IS NULL;
+
+        DELETE FROM digests
+        WHERE id NOT IN (
+          SELECT MIN(id)
+          FROM digests
+          GROUP BY subject_id, run_date
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_digests_subject_run_date
+          ON digests(subject_id, run_date);
+
+        CREATE TABLE IF NOT EXISTS digest_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          digest_id INTEGER NOT NULL,
+          chat_id INTEGER NOT NULL,
+          thread_id TEXT NOT NULL DEFAULT '',
+          message_id INTEGER,
+          sent_at TEXT,
+          status TEXT NOT NULL,
+          error_text TEXT,
+          FOREIGN KEY(digest_id) REFERENCES digests(id),
+          UNIQUE(digest_id, chat_id, thread_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS digest_buttons (
+          token TEXT PRIMARY KEY,
+          digest_id INTEGER NOT NULL,
+          item_id INTEGER NOT NULL,
+          subject_id INTEGER NOT NULL,
+          action TEXT NOT NULL,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(digest_id) REFERENCES digests(id),
+          FOREIGN KEY(item_id) REFERENCES items(id),
+          FOREIGN KEY(subject_id) REFERENCES subjects(id)
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_feedback_subject_item_type
+          ON feedback_events(subject_id, item_id, feedback_type)
+          WHERE item_id IS NOT NULL;
+
+        CREATE INDEX IF NOT EXISTS idx_item_scores_subject_score
+          ON item_scores(subject_id, final_score DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_subject_routes_chat_thread
+          ON subject_routes(chat_id, thread_id);
+        """,
+    ),
 ]
 
 

@@ -1,6 +1,6 @@
 # PCCA
 
-Personal Content Curation Agent (local-first), based on `content-curation-agent-spec-v2.md`.
+Personal Content Curation Agent (local-first), based on `architecture.md`, `scenarios.md`, and `tasks.md`.
 
 ## What Is Implemented
 
@@ -10,6 +10,7 @@ Phase-1 functional foundation is in place:
 - source linking/removal and URL-based source discovery
 - subject preference refinement (include/exclude topics, versioned)
 - feedback event logging from digest buttons
+- detailed run/browser logging for local debugging
 - nightly collection pipeline + scoring + persistence
 - morning digest assembly and Telegram delivery wiring
 - browser-session login and follow import for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts
@@ -185,6 +186,15 @@ pcca import-follows --subject "Vibe Coding" --platform medium --limit 150
 pcca import-follows --subject "Vibe Coding" --platform spotify --limit 150
 pcca import-follows --subject "Vibe Coding" --platform apple_podcasts --limit 150
 ```
+
+For local debugging, set detailed logs in `.env`:
+
+```bash
+PCCA_LOG_LEVEL=DEBUG
+PCCA_BROWSER_HEADFUL_PLATFORMS=x,linkedin
+```
+
+`PCCA_BROWSER_HEADFUL_PLATFORMS` keeps selected browser collectors visible even when the rest run headless.
 
 ## Telegram Commands / Actions
 

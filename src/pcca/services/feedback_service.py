@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pcca.repositories.digests import DigestButtonRow, DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.subjects import SubjectRepository
 
@@ -10,6 +11,7 @@ from pcca.repositories.subjects import SubjectRepository
 class FeedbackService:
     feedback_repo: FeedbackRepository
     subject_repo: SubjectRepository
+    digest_repo: DigestRepository | None = None
 
     async def add_feedback_by_subject_name(
         self,
@@ -43,3 +45,8 @@ class FeedbackService:
             comment_text=comment_text,
             item_id=item_id,
         )
+
+    async def get_digest_button(self, token: str) -> DigestButtonRow | None:
+        if self.digest_repo is None:
+            return None
+        return await self.digest_repo.get_button(token)

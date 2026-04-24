@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class RSSCollector:
-    max_entries_per_source: int = 20
+    max_items: int = 20
     platform: str = "rss"
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
@@ -23,7 +23,7 @@ class RSSCollector:
             return []
 
         feed = await asyncio.to_thread(feedparser.parse, source_id)
-        entries = feed.entries[: self.max_entries_per_source]
+        entries = feed.entries[: self.max_items]
         items: list[CollectedItem] = []
         for entry in entries:
             ext_id = getattr(entry, "id", None) or getattr(entry, "link", None)

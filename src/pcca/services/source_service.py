@@ -53,3 +53,15 @@ class SourceService:
         if source is None:
             return False
         return await self.source_repo.unlink_from_subject(subject.id, source.id)
+
+    async def mark_platform_active_after_login(self, platform: str) -> int:
+        return await self.source_repo.mark_platform_active(platform.strip().lower())
+
+    async def list_sources_needing_reauth(self):
+        return await self.source_repo.list_needs_reauth()
+
+    async def mark_source_crawl_success(self, source_id: int) -> None:
+        await self.source_repo.mark_crawl_success(source_id)
+
+    async def mark_source_needs_reauth(self, source_id: int) -> None:
+        await self.source_repo.mark_needs_reauth(source_id)

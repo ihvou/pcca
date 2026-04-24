@@ -4,6 +4,7 @@ import logging
 from dataclasses import dataclass, field
 
 from pcca.collectors.base import Collector
+from pcca.collectors.errors import SessionChallengedError
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.run_logs import RunLogRepository
@@ -36,6 +37,8 @@ class PipelineOrchestrator:
             "items_collected": 0,
             "items_inserted": 0,
             "items_updated": 0,
+            "sources_crawled": 0,
+            "sources_needing_reauth": 0,
             "collector_errors": 0,
         }
         try:
@@ -60,10 +63,32 @@ class PipelineOrchestrator:
                 for source in subject_sources:
                     collector = self.collectors.get(source.platform)
                     if collector is None:
+                        logger.warning(
+                            "No collector registered for subject=%s source_id=%s platform=%s",
+                            subject.name,
+                            source.source_id,
+                            source.platform,
+                        )
                         continue
                     try:
+                        logger.info(
+                            "Collecting source subject=%s source_id=%s platform=%s identifier=%s",
+                            subject.name,
+                            source.source_id,
+                            source.platform,
+                            source.account_or_channel_id,
+                        )
                         items = await collector.collect_from_source(source.account_or_channel_id)
+                        await self.source_service.mark_source_crawl_success(source.source_id)
+                        stats["sources_crawled"] += 1
                         stats["items_collected"] += len(items)
+                        logger.info(
+                            "Collected source subject=%s source_id=%s platform=%s items=%d",
+                            subject.name,
+                            source.source_id,
+                            source.platform,
+                            len(items),
+                        )
                         if items:
                             upsert_stats = await self.item_repo.upsert_many(items)
                             stats["items_inserted"] += upsert_stats["inserted"]
@@ -99,6 +124,17 @@ class PipelineOrchestrator:
                                     final_score=scored.final_score,
                                     rationale=scored.rationale,
                                 )
+                    except SessionChallengedError as exc:
+                        await self.source_service.mark_source_needs_reauth(source.source_id)
+                        stats["sources_needing_reauth"] += 1
+                        logger.warning(
+                            "Session challenge detected subject=%s source_id=%s platform=%s challenge=%s url=%s",
+                            subject.name,
+                            source.source_id,
+                            exc.platform,
+                            exc.challenge_kind,
+                            exc.current_url,
+                        )
                     except Exception:
                         logger.exception(
                             "Collector failed for subject=%s platform=%s source=%s",

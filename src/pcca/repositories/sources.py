@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import aiosqlite
 
@@ -124,6 +125,63 @@ class SourceRepository:
         await self.conn.commit()
         return (cursor.rowcount or 0) > 0
 
+    async def mark_crawl_success(self, source_id: int) -> None:
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET follow_state = 'active', last_crawled_at = ?
+            WHERE id = ?
+            """,
+            (datetime.now(timezone.utc).isoformat(), source_id),
+        )
+        await self.conn.commit()
+
+    async def mark_needs_reauth(self, source_id: int) -> None:
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET follow_state = 'needs_reauth'
+            WHERE id = ?
+            """,
+            (source_id,),
+        )
+        await self.conn.commit()
+
+    async def mark_platform_active(self, platform: str) -> int:
+        cursor = await self.conn.execute(
+            """
+            UPDATE sources
+            SET follow_state = 'active'
+            WHERE platform = ? AND follow_state = 'needs_reauth'
+            """,
+            (platform,),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+    async def list_needs_reauth(self) -> list[SourceRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                FROM sources
+                WHERE follow_state = 'needs_reauth'
+                ORDER BY platform, display_name
+                """
+            )
+        ).fetchall()
+        return [
+            SourceRow(
+                id=row["id"],
+                platform=row["platform"],
+                account_or_channel_id=row["account_or_channel_id"],
+                display_name=row["display_name"],
+                follow_state=row["follow_state"],
+                last_crawled_at=row["last_crawled_at"],
+            )
+            for row in rows
+        ]
+
     async def list_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
         rows = await (
             await self.conn.execute(
@@ -139,6 +197,7 @@ class SourceRepository:
                 JOIN sources s ON s.id = ss.source_id
                 WHERE ss.subject_id = ?
                   AND ss.status = 'active'
+                  AND s.follow_state = 'active'
                 ORDER BY ss.priority DESC, s.display_name ASC
                 """,
                 (subject_id,),

@@ -67,14 +67,21 @@ class PCCAApp:
         routing_repo = RoutingRepository(conn=self.db.conn)
         preference_repo = SubjectPreferenceRepository(conn=self.db.conn)
         feedback_repo = FeedbackRepository(conn=self.db.conn)
+        digest_repo = DigestRepository(conn=self.db.conn)
+        run_log_repo = RunLogRepository(conn=self.db.conn)
         self.subject_service = SubjectService(repository=subject_repo)
         self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
         self.preference_service = PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo)
-        self.feedback_service = FeedbackService(feedback_repo=feedback_repo, subject_repo=subject_repo)
+        self.feedback_service = FeedbackService(
+            feedback_repo=feedback_repo,
+            subject_repo=subject_repo,
+            digest_repo=digest_repo,
+        )
         self.routing_service = RoutingService(routing_repo=routing_repo, subject_repo=subject_repo)
         self.browser_session_manager = BrowserSessionManager(
             profiles_root=self.settings.browser_profiles_dir,
             headless=self.settings.browser_headless,
+            headful_platforms=self.settings.browser_headful_platforms,
         )
         self.follow_import_service = FollowImportService(
             session_manager=self.browser_session_manager,
@@ -87,7 +94,7 @@ class PCCAApp:
             source_service=self.source_service,
             item_repo=ItemRepository(conn=self.db.conn),
             item_score_repo=ItemScoreRepository(conn=self.db.conn),
-            run_log_repo=RunLogRepository(conn=self.db.conn),
+            run_log_repo=run_log_repo,
             preference_service=self.preference_service,
             model_router=ModelRouter(
                 enabled=self.settings.ollama_enabled,
@@ -130,7 +137,8 @@ class PCCAApp:
                 subject_service=self.subject_service,
                 routing_service=self.routing_service,
                 item_score_repo=ItemScoreRepository(conn=self.db.conn),
-                digest_repo=DigestRepository(conn=self.db.conn),
+                digest_repo=digest_repo,
+                run_log_repo=run_log_repo,
                 pipeline_orchestrator=self.pipeline_orchestrator,
                 telegram_service=self.telegram_service,
             ),
@@ -211,6 +219,7 @@ class PCCAApp:
         manager = BrowserSessionManager(
             profiles_root=self.settings.browser_profiles_dir,
             headless=False,
+            headful_platforms={target_platform},
         )
         await manager.start()
         try:
@@ -222,7 +231,22 @@ class PCCAApp:
                 "Complete login manually, then press Enter here to store session and continue."
             )
             await asyncio.to_thread(input, "")
+            activated = 0
+            db = Database(path=self.settings.db_path)
+            await db.connect()
+            await db.initialize()
+            try:
+                if db.conn is None:
+                    raise RuntimeError("Database connection unavailable.")
+                activated = await SourceService(
+                    source_repo=SourceRepository(conn=db.conn),
+                    subject_repo=SubjectRepository(conn=db.conn),
+                ).mark_platform_active_after_login(target_platform)
+            finally:
+                await db.close()
             print(f"Saved {target_platform} browser profile at: {self.settings.browser_profiles_dir / target_platform}")
+            if activated:
+                print(f"Marked {activated} {target_platform} source(s) active after login.")
             await page.close()
         finally:
             await manager.stop()
