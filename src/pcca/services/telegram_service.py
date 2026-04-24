@@ -147,11 +147,12 @@ class TelegramService:
         await update.message.reply_text(
             "Setup flow:\n"
             "1. Create subject: `Create subject: Agentic PM`\n"
-            "2. Add source URL: `Add source https://newsletter.substack.com to Agentic PM`\n"
-            "3. Optionally refine: `Refine Agentic PM: include claude code, releases; exclude biography`\n"
-            "4. Trigger collection now: `/read_content`\n"
-            "5. Trigger digest now: `/get_digest`\n\n"
-            "Desktop-only account login/import is available in app controls "
+            "2. In the desktop app, open browser login flows for the platforms you use.\n"
+            "3. In the desktop app, import follows/subscriptions into the subject.\n"
+            "4. Optionally refine: `Refine Agentic PM: include claude code, releases; exclude biography`\n"
+            "5. Trigger collection now: `/read_content`\n"
+            "6. Trigger digest now: `/get_digest`\n\n"
+            "Connected-account login/import is available in app controls "
             "for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
             f"{reauth_note}",
         )
@@ -162,7 +163,7 @@ class TelegramService:
         await update.message.reply_text(
             "I can:\n"
             "- create/list subjects\n"
-            "- add/remove sources by platform or URL\n"
+            "- list/remove imported sources\n"
             "- show/refine preferences per subject\n"
             "- run collection now (`/read_content`)\n"
             "- run digest now (`/get_digest`)\n"
@@ -252,15 +253,14 @@ class TelegramService:
         if intent.action is IntentAction.ADD_SOURCE_URL:
             if not intent.subject_name or not intent.source_url:
                 await update.message.reply_text(
-                    "Please include URL and subject, for example:\n"
-                    "Add source https://newsletter.substack.com to Vibe Coding"
+                    "Please connect account follows in the desktop app for Scenario 1 testing."
                 )
                 return
             discovered = await self.source_discovery.discover(intent.source_url)
             if not discovered:
                 await update.message.reply_text(
                     "I could not discover a supported source from that URL yet.\n"
-                    "Try another URL or add source manually (for example: add source rss:https://... to ...)."
+                    "For Scenario 1, use the desktop app to connect accounts and import follows/subscriptions."
                 )
                 return
 

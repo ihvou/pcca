@@ -28,9 +28,9 @@ def test_parse_list_sources() -> None:
 
 
 def test_parse_add_source_url() -> None:
-    parsed = parse_intent("Add source https://newsletter.substack.com to Vibe Coding")
+    parsed = parse_intent("Track https://example.com/feed.xml for Vibe Coding")
     assert parsed.action is IntentAction.ADD_SOURCE_URL
-    assert parsed.source_url == "https://newsletter.substack.com"
+    assert parsed.source_url == "https://example.com/feed.xml"
     assert parsed.subject_name == "Vibe Coding"
 
 

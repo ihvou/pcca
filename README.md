@@ -7,7 +7,7 @@ Personal Content Curation Agent (local-first), based on `architecture.md`, `scen
 Phase-1 functional foundation is in place:
 - SQLite schema + migrations
 - subject creation/listing
-- source linking/removal and URL-based source discovery
+- source linking/removal and connected-account follow import
 - subject preference refinement (include/exclude topics, versioned)
 - feedback event logging from digest buttons
 - detailed run/browser logging for local debugging
@@ -30,28 +30,20 @@ playwright install chromium
 cp .env.example .env
 ```
 
-Initialize DB and create your first subject:
+Initialize DB and launch the desktop shell:
 
 ```bash
 pcca init-db
-pcca create-subject --name "Vibe Coding"
+pcca run-desktop
 ```
 
-Add sources:
+Use the desktop shell to:
+- start the agent
+- open browser login flows
+- import follows/subscriptions into a subject
+- trigger read/digest runs
 
-```bash
-# direct platform source
-pcca add-source --subject "Vibe Coding" --platform x --source-id borischerny
-pcca add-source --subject "Vibe Coding" --platform youtube --source-id UCxxxx
-pcca add-source --subject "Vibe Coding" --platform spotify --source-id https://open.spotify.com/show/2MAi0BvDc6GTFvKFPXnkCL
-pcca add-source --subject "Vibe Coding" --platform apple_podcasts --source-id https://podcasts.apple.com/us/podcast/example/id123456789
-
-# URL discovery/import
-pcca add-source-url --subject "Vibe Coding" --url "https://newsletter.substack.com"
-pcca add-source-url --subject "Vibe Coding" --url "https://medium.com/@openai"
-```
-
-Run one-shot jobs:
+CLI one-shot jobs are available for developer/debug use:
 
 ```bash
 pcca run-nightly-once
@@ -82,21 +74,21 @@ PCCA_TELEGRAM_BOT_TOKEN=<your_bot_token>
 pcca run-agent
 ```
 
-2. In Telegram test real usage:
+2. In Telegram create the subject:
 - `/setup`
 - `Create subject: Agentic PM`
-- `Create subject: Vibe Coding`
-- `Add source https://newsletter.substack.com to Agentic PM`
-- `Add source x:borischerny to Vibe Coding`
 - `Refine Agentic PM: include claude code, releases; exclude biography`
 - `Show preferences for Agentic PM`
+
+3. In the desktop shell:
+- open login flow for X, LinkedIn, YouTube, or another platform you want to test
+- complete login in the browser window
+- import follows/subscriptions into `Agentic PM`
+
+4. Back in Telegram:
 - `/read_content` (same as nightly read now)
 - `/get_digest` (same as scheduled digest now)
-- Use `👍 / 👎 / 🔖` on digest messages
-
-3. Optional desktop-driven setup instead of terminal:
-- run `pcca run-desktop`
-- use tabs to init DB, create subjects, add sources, login/import follows, run on-demand actions
+- use `👍 / 👎 / 🔖` on digest messages
 
 ## Scenario 1 Walkthrough (Install / Launch / Initial Config)
 
@@ -126,35 +118,23 @@ pcca run-agent
   - `/start`
   - `Create subject: Agentic PM`
 
-4. Connect account sessions (browser login once per platform)
-
-```bash
-pcca login --platform x
-pcca login --platform linkedin
-pcca login --platform youtube
-pcca login --platform substack
-pcca login --platform medium
-pcca login --platform spotify
-pcca login --platform apple_podcasts
-```
+4. Connect account sessions in the desktop shell
+- Open the `Actions` tab.
+- Choose a platform (for example `x`, `linkedin`, or `youtube`).
+- Click `Open Login Flow`.
+- Complete login in the browser window.
+- Repeat for each platform you want included in the smoke test.
 
 5. Import follows/subscriptions from connected accounts
+- In the `Actions` tab, enter subject `Agentic PM`.
+- Choose the platform you just logged into.
+- Click `Import Follows`.
+- Repeat for each connected platform.
 
-```bash
-pcca import-follows --subject "Agentic PM" --platform x --limit 150
-pcca import-follows --subject "Agentic PM" --platform linkedin --limit 150
-pcca import-follows --subject "Agentic PM" --platform youtube --limit 150
-pcca import-follows --subject "Agentic PM" --platform substack --limit 150
-pcca import-follows --subject "Agentic PM" --platform medium --limit 150
-pcca import-follows --subject "Agentic PM" --platform spotify --limit 150
-pcca import-follows --subject "Agentic PM" --platform apple_podcasts --limit 150
-```
-
-6. Add extra sources by URL (optional but recommended)
-- In Telegram (or CLI), add sources directly:
-  - `Add source https://newsletter.substack.com to Agentic PM`
-  - `Add source https://medium.com/@openai to Agentic PM`
-  - `Add source https://open.spotify.com/show/<show_id> to Agentic PM`
+6. Review imported sources
+- Open the `Sources` tab.
+- List sources for `Agentic PM`.
+- Remove obvious noise if needed.
 
 7. Trigger first read + first digest immediately
 - In Telegram:
@@ -203,20 +183,9 @@ PCCA_BROWSER_HEADFUL_PLATFORMS=x,linkedin
 - `/get_digest` manual on-demand digest run
 - free-form examples:
   - `Create subject: Agentic PM`
-  - `Add source https://newsletter.substack.com to Agentic PM`
   - `Unsubscribe x:borischerny from Vibe Coding`
   - `Refine Vibe Coding: include release notes; exclude motivation`
   - `Show preferences for Vibe Coding`
-
-## URL Discovery Coverage
-
-`add-source-url` currently supports:
-- Substack publication URLs -> Substack source (feed-backed)
-- Medium URLs -> Medium source (feed-backed)
-- Apple Podcasts URLs -> Apple Podcasts source via iTunes feed lookup
-- Spotify show URLs -> Spotify source
-- Google Podcasts feed URLs -> decoded RSS feed URL
-- any page exposing RSS/Atom `<link rel="alternate">`
 
 ## Multilingual Analytics (EN/UK/RU)
 

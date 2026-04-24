@@ -100,7 +100,7 @@ def run_desktop_shell() -> None:
             "Typical first-run flow:\n"
             "1) Init DB\n"
             "2) Create subject(s)\n"
-            "3) Add source URLs or connect account follows\n"
+            "3) Connect account follows/subscriptions\n"
             "4) Start agent\n"
             "5) In Telegram use /read_content and /get_digest for on-demand tests"
         ),
@@ -143,7 +143,6 @@ def run_desktop_shell() -> None:
     source_subject_var = tk.StringVar()
     source_platform_var = tk.StringVar(value="x")
     source_id_var = tk.StringVar()
-    source_url_var = tk.StringVar()
 
     ttk.Label(sources_tab, text="Subject").grid(row=0, column=0, sticky="w")
     ttk.Entry(sources_tab, textvariable=source_subject_var, width=30).grid(row=0, column=1, sticky="ew", padx=6)
@@ -159,19 +158,6 @@ def run_desktop_shell() -> None:
     ttk.Entry(sources_tab, textvariable=source_id_var, width=24).grid(row=0, column=5, sticky="ew", padx=6)
     ttk.Button(
         sources_tab,
-        text="Add Source",
-        command=lambda: state.run_cli(
-            "add-source",
-            "--subject",
-            source_subject_var.get().strip(),
-            "--platform",
-            source_platform_var.get().strip(),
-            "--source-id",
-            source_id_var.get().strip(),
-        ),
-    ).grid(row=0, column=6, padx=6)
-    ttk.Button(
-        sources_tab,
         text="Remove Source",
         command=lambda: state.run_cli(
             "remove-source",
@@ -182,28 +168,12 @@ def run_desktop_shell() -> None:
             "--source-id",
             source_id_var.get().strip(),
         ),
-    ).grid(row=0, column=7, padx=6)
-
-    ttk.Separator(sources_tab, orient=tk.HORIZONTAL).grid(row=1, column=0, columnspan=8, sticky="ew", pady=12)
-
-    ttk.Label(sources_tab, text="Source URL").grid(row=2, column=0, sticky="w")
-    ttk.Entry(sources_tab, textvariable=source_url_var, width=80).grid(row=2, column=1, columnspan=5, sticky="ew", padx=6)
-    ttk.Button(
-        sources_tab,
-        text="Add Source URL",
-        command=lambda: state.run_cli(
-            "add-source-url",
-            "--subject",
-            source_subject_var.get().strip(),
-            "--url",
-            source_url_var.get().strip(),
-        ),
-    ).grid(row=2, column=6, padx=6)
+    ).grid(row=0, column=6, padx=6)
     ttk.Button(
         sources_tab,
         text="List Sources",
         command=lambda: state.run_cli("list-sources", "--subject", source_subject_var.get().strip()),
-    ).grid(row=2, column=7, padx=6)
+    ).grid(row=0, column=7, padx=6)
     sources_tab.columnconfigure(1, weight=1)
     sources_tab.columnconfigure(5, weight=1)
 

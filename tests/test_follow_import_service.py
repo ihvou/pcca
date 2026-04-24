@@ -40,7 +40,7 @@ class FakeFollowImportService(FollowImportService):
 
     async def import_substack_subscriptions(self, *, limit: int = 200) -> list[str]:
         _ = limit
-        return ["https://newsletter.substack.com"]
+        return ["https://example.substack.com"]
 
 
 @dataclass
@@ -50,8 +50,8 @@ class FakeDiscovery:
         return [
             DiscoveredSource(
                 platform="substack",
-                source_id="https://newsletter.substack.com/feed",
-                display_name="newsletter",
+                source_id="https://example.substack.com/feed",
+                display_name="example",
                 confidence=1.0,
                 reason="test",
             )
@@ -96,4 +96,4 @@ async def test_import_substack_to_subject_uses_discovery() -> None:
 
     count = await service.import_to_subject(subject_name="Vibe Coding", platform="substack", limit=10)
     assert count == 1
-    assert ("Vibe Coding", "substack", "https://newsletter.substack.com/feed") in fake_source_service.calls
+    assert ("Vibe Coding", "substack", "https://example.substack.com/feed") in fake_source_service.calls

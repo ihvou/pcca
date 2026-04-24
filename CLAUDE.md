@@ -59,7 +59,7 @@ Known spec-compliance and reliability gaps are tracked in [tasks.md](./tasks.md)
 
 **Adding a new collector** requires four coordinated changes, in this order:
 1. Implement the collector under `src/pcca/collectors/` and register it in `app.py::PCCAApp.start`'s `collectors` dict.
-2. Add URL discovery rules to `SourceDiscoveryService`.
+2. Add source normalization and account-import rules where the platform supports them.
 3. Add the `platform:id` alias to `intent_parser.PLATFORMS`.
 4. If follow-import is feasible, extend `FollowImportService.supported_platforms()` and add the import method.
 5. Update `/help` and `/setup` copy in `telegram_service.py` and the platform list in `README.md`.

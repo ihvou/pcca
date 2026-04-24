@@ -27,10 +27,10 @@ async def test_discover_prefixed_source() -> None:
 @pytest.mark.asyncio
 async def test_discover_substack_url_to_feed() -> None:
     service = SourceDiscoveryService()
-    discovered = await service.discover("https://newsletter.substack.com")
+    discovered = await service.discover("https://example.substack.com")
     assert len(discovered) == 1
     assert discovered[0].platform == "substack"
-    assert discovered[0].source_id == "https://newsletter.substack.com/feed"
+    assert discovered[0].source_id == "https://example.substack.com/feed"
 
 
 @pytest.mark.asyncio

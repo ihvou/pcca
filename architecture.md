@@ -119,7 +119,7 @@ SQLite access, migrations, repositories, event logs. Single shared `aiosqlite.Co
 Today: `run_logs.stats_json` blob. Target: per-collector extraction success %, model latency, digest delivery success, session-challenge counters (task T-20).
 
 ### 4.14 Discovery Service (`services/source_discovery_service.py`)
-URL → canonical source resolution (Substack, Medium, Apple Podcasts, Spotify, Google Podcasts, generic RSS/Atom `<link rel="alternate">`). Also handles `platform:id` prefixed inputs. Passive + active account discovery is planned.
+Canonical source normalization for imported follows/subscriptions and platform-specific source identities. Passive + active account discovery is planned.
 
 ### 4.15 Voice Transcription Service (`services/voice_transcription_service.py`)
 Converts Telegram voice notes to text for intent parsing. v1 placeholder (always returns `None`). Local-first path planned (task T-23).
@@ -306,7 +306,7 @@ This section defines where new code should attach. Anything outside these seams 
 ### Add a new source platform
 Five coordinated changes — all required, in this order:
 1. Implement a collector under `src/pcca/collectors/` matching the `Collector` Protocol. Register it in `app.py::PCCAApp.start.collectors`.
-2. Add URL resolution in `SourceDiscoveryService`.
+2. Add source normalization in `SourceDiscoveryService`.
 3. Add the platform tag to `intent_parser.PLATFORMS`.
 4. If follow-import is feasible, extend `FollowImportService.supported_platforms()` and add the scraping method.
 5. Update `/help`, `/setup`, and `README.md` copy.
