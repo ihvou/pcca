@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pcca"
+version = "0.1.0"
+description = "Personal Content Curation Agent (local-first)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "ihvou" }]
+dependencies = [
+  "aiosqlite>=0.20.0",
+  "apscheduler>=3.10.4,<4",
+  "httpx>=0.27,<0.29",
+  "playwright>=1.44.0",
+  "feedparser>=6.0.11",
+  "python-telegram-bot>=21.0,<23",
+  "youtube-transcript-api>=0.6.2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+pcca = "pcca.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

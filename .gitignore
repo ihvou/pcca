@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+
+# Virtual envs
+.venv/
+venv/
+
+# Local runtime data
+.env
+.env.*
+.pcca/
+data/
+*.db
+*.sqlite3
+
+
+# Build metadata
+*.egg-info/

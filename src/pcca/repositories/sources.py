@@ -1,0 +1,123 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import aiosqlite
+
+
+@dataclass
+class SourceRow:
+    id: int
+    platform: str
+    account_or_channel_id: str
+    display_name: str
+    follow_state: str
+    last_crawled_at: str | None
+
+
+@dataclass
+class SubjectSourceRow:
+    source_id: int
+    platform: str
+    account_or_channel_id: str
+    display_name: str
+    priority: int
+    status: str
+
+
+@dataclass
+class SourceRepository:
+    conn: aiosqlite.Connection
+
+    async def create_or_get(self, platform: str, account_or_channel_id: str, display_name: str) -> SourceRow:
+        existing = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                FROM sources
+                WHERE platform = ? AND account_or_channel_id = ?
+                """,
+                (platform, account_or_channel_id),
+            )
+        ).fetchone()
+        if existing:
+            return SourceRow(
+                id=existing["id"],
+                platform=existing["platform"],
+                account_or_channel_id=existing["account_or_channel_id"],
+                display_name=existing["display_name"],
+                follow_state=existing["follow_state"],
+                last_crawled_at=existing["last_crawled_at"],
+            )
+
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO sources(platform, account_or_channel_id, display_name, follow_state)
+            VALUES (?, ?, ?, 'active')
+            """,
+            (platform, account_or_channel_id, display_name),
+        )
+        await self.conn.commit()
+        source_id = cursor.lastrowid
+        created = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                FROM sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            )
+        ).fetchone()
+        return SourceRow(
+            id=created["id"],
+            platform=created["platform"],
+            account_or_channel_id=created["account_or_channel_id"],
+            display_name=created["display_name"],
+            follow_state=created["follow_state"],
+            last_crawled_at=created["last_crawled_at"],
+        )
+
+    async def link_to_subject(self, subject_id: int, source_id: int, priority: int = 0) -> None:
+        await self.conn.execute(
+            """
+            INSERT INTO subject_sources(subject_id, source_id, priority, status)
+            VALUES (?, ?, ?, 'active')
+            ON CONFLICT(subject_id, source_id)
+            DO UPDATE SET priority = excluded.priority, status = 'active'
+            """,
+            (subject_id, source_id, priority),
+        )
+        await self.conn.commit()
+
+    async def list_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT
+                  s.id AS source_id,
+                  s.platform,
+                  s.account_or_channel_id,
+                  s.display_name,
+                  ss.priority,
+                  ss.status
+                FROM subject_sources ss
+                JOIN sources s ON s.id = ss.source_id
+                WHERE ss.subject_id = ?
+                ORDER BY ss.priority DESC, s.display_name ASC
+                """,
+                (subject_id,),
+            )
+        ).fetchall()
+        return [
+            SubjectSourceRow(
+                source_id=row["source_id"],
+                platform=row["platform"],
+                account_or_channel_id=row["account_or_channel_id"],
+                display_name=row["display_name"],
+                priority=row["priority"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+

@@ -1,0 +1,196 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+from dataclasses import dataclass, field
+
+from pcca.collectors.linkedin_collector import LinkedInCollector
+from pcca.collectors.reddit_collector import RedditCollector
+from pcca.collectors.rss_collector import RSSCollector
+from pcca.collectors.x_collector import XCollector
+from pcca.collectors.youtube_collector import YouTubeCollector
+from pcca.browser.session_manager import BrowserSessionManager
+from pcca.config import Settings
+from pcca.db import Database
+from pcca.pipeline.orchestrator import PipelineOrchestrator
+from pcca.repositories.digests import DigestRepository
+from pcca.repositories.item_scores import ItemScoreRepository
+from pcca.repositories.items import ItemRepository
+from pcca.repositories.routing import RoutingRepository
+from pcca.repositories.run_logs import RunLogRepository
+from pcca.repositories.sources import SourceRepository
+from pcca.repositories.subjects import SubjectRepository
+from pcca.scheduler import AgentScheduler, JobRunner
+from pcca.services.follow_import_service import FollowImportService
+from pcca.services.model_router import ModelRouter
+from pcca.services.routing_service import RoutingService
+from pcca.services.source_discovery_service import SourceDiscoveryService
+from pcca.services.source_service import SourceService
+from pcca.services.subject_service import SubjectService
+from pcca.services.telegram_service import TelegramService
+from pcca.services.voice_transcription_service import VoiceTranscriptionService
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PCCAApp:
+    settings: Settings
+    db: Database = field(init=False)
+    subject_service: SubjectService = field(init=False)
+    source_service: SourceService = field(init=False)
+    follow_import_service: FollowImportService = field(init=False)
+    routing_service: RoutingService = field(init=False)
+    pipeline_orchestrator: PipelineOrchestrator = field(init=False)
+    browser_session_manager: BrowserSessionManager = field(init=False)
+    scheduler: AgentScheduler = field(init=False)
+    telegram_service: TelegramService | None = field(default=None, init=False)
+
+    async def start(self, *, with_scheduler: bool = True, with_telegram: bool = True) -> None:
+        self.settings.ensure_dirs()
+        self.db = Database(path=self.settings.db_path)
+        await self.db.connect()
+        await self.db.initialize()
+
+        if self.db.conn is None:
+            raise RuntimeError("Database connection unavailable after startup.")
+
+        subject_repo = SubjectRepository(conn=self.db.conn)
+        source_repo = SourceRepository(conn=self.db.conn)
+        routing_repo = RoutingRepository(conn=self.db.conn)
+        self.subject_service = SubjectService(repository=subject_repo)
+        self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+        self.routing_service = RoutingService(routing_repo=routing_repo, subject_repo=subject_repo)
+        self.browser_session_manager = BrowserSessionManager(
+            profiles_root=self.settings.browser_profiles_dir,
+            headless=self.settings.browser_headless,
+        )
+        self.follow_import_service = FollowImportService(
+            session_manager=self.browser_session_manager,
+            source_service=self.source_service,
+        )
+
+        self.pipeline_orchestrator = PipelineOrchestrator(
+            subject_service=self.subject_service,
+            source_service=self.source_service,
+            item_repo=ItemRepository(conn=self.db.conn),
+            item_score_repo=ItemScoreRepository(conn=self.db.conn),
+            run_log_repo=RunLogRepository(conn=self.db.conn),
+            model_router=ModelRouter(
+                enabled=self.settings.ollama_enabled,
+                ollama_base_url=self.settings.ollama_base_url,
+                ollama_model=self.settings.ollama_model,
+            ),
+            collectors={
+                "x": XCollector(session_manager=self.browser_session_manager),
+                "linkedin": LinkedInCollector(session_manager=self.browser_session_manager),
+                "youtube": YouTubeCollector(session_manager=self.browser_session_manager),
+                "reddit": RedditCollector(),
+                "rss": RSSCollector(),
+            },
+        )
+
+        if with_telegram and self.settings.telegram_bot_token:
+            self.telegram_service = TelegramService(
+                bot_token=self.settings.telegram_bot_token,
+                subject_service=self.subject_service,
+                source_service=self.source_service,
+                source_discovery=SourceDiscoveryService(),
+                routing_service=self.routing_service,
+                voice_transcriber=VoiceTranscriptionService(),
+            )
+            await self.telegram_service.start()
+        elif with_telegram:
+            logger.warning("PCCA_TELEGRAM_BOT_TOKEN is not set. Telegram service will be disabled.")
+
+        self.scheduler = AgentScheduler(
+            nightly_cron=self.settings.nightly_cron,
+            morning_cron=self.settings.morning_cron,
+            timezone=self.settings.timezone,
+            job_runner=JobRunner(
+                subject_service=self.subject_service,
+                routing_service=self.routing_service,
+                item_score_repo=ItemScoreRepository(conn=self.db.conn),
+                digest_repo=DigestRepository(conn=self.db.conn),
+                pipeline_orchestrator=self.pipeline_orchestrator,
+                telegram_service=self.telegram_service,
+            ),
+        )
+        if with_scheduler:
+            self.scheduler.start()
+
+    async def stop(self) -> None:
+        if hasattr(self, "scheduler"):
+            self.scheduler.shutdown()
+        if hasattr(self, "browser_session_manager"):
+            await self.browser_session_manager.stop()
+        if self.telegram_service is not None:
+            await self.telegram_service.stop()
+        if hasattr(self, "db"):
+            await self.db.close()
+
+    async def run_forever(self) -> None:
+        await self.start()
+        logger.info("PCCA agent is running.")
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        finally:
+            await self.stop()
+
+    async def run_nightly_once(self) -> dict:
+        await self.start(with_scheduler=False, with_telegram=False)
+        try:
+            stats = await self.pipeline_orchestrator.run_nightly_collection()
+            return stats
+        finally:
+            await self.stop()
+
+    async def run_digest_once(self) -> None:
+        await self.start(with_scheduler=False, with_telegram=True)
+        try:
+            await self.scheduler.job_runner.run_morning_digest()
+        finally:
+            await self.stop()
+
+    async def import_follows_once(self, *, subject_name: str, platform: str, limit: int = 200) -> int:
+        await self.start(with_scheduler=False, with_telegram=False)
+        try:
+            return await self.follow_import_service.import_to_subject(
+                subject_name=subject_name,
+                platform=platform,
+                limit=limit,
+            )
+        finally:
+            await self.stop()
+
+    async def login_platform_once(self, *, platform: str, login_url: str | None = None) -> None:
+        self.settings.ensure_dirs()
+        target_platform = platform.strip().lower()
+        default_urls = {
+            "x": "https://x.com/i/flow/login",
+            "linkedin": "https://www.linkedin.com/login",
+            "youtube": "https://accounts.google.com/signin/v2/identifier?service=youtube",
+        }
+        url = login_url or default_urls.get(target_platform)
+        if not url:
+            raise ValueError("Unsupported platform for login flow. Use one of: x, linkedin, youtube")
+
+        manager = BrowserSessionManager(
+            profiles_root=self.settings.browser_profiles_dir,
+            headless=False,
+        )
+        await manager.start()
+        try:
+            page = await manager.new_page(target_platform)
+            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(1000)
+            print(
+                f"Browser opened for {target_platform} login.\n"
+                "Complete login manually, then press Enter here to store session and continue."
+            )
+            await asyncio.to_thread(input, "")
+            print(f"Saved {target_platform} browser profile at: {self.settings.browser_profiles_dir / target_platform}")
+            await page.close()
+        finally:
+            await manager.stop()

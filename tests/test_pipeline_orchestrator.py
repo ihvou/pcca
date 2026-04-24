@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from pcca.collectors.base import CollectedItem
+from pcca.db import Database
+from pcca.pipeline.orchestrator import PipelineOrchestrator
+from pcca.repositories.item_scores import ItemScoreRepository
+from pcca.repositories.items import ItemRepository
+from pcca.repositories.run_logs import RunLogRepository
+from pcca.repositories.sources import SourceRepository
+from pcca.repositories.subjects import SubjectRepository
+from pcca.services.source_service import SourceService
+from pcca.services.subject_service import SubjectService
+
+
+class DummyRSSCollector:
+    platform = "rss"
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        return [
+            CollectedItem(
+                platform="rss",
+                external_id=f"id-{source_id}",
+                author="dummy",
+                url="https://example.com/post",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={"source_id": source_id},
+            )
+        ]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding")
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+        priority=1,
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": DummyRSSCollector()},
+    )
+    stats = await orchestrator.run_nightly_collection()
+    assert stats["subjects_seen"] == 1
+    assert stats["sources_seen"] == 1
+    assert stats["items_collected"] == 1
+    assert stats["items_inserted"] == 1
+
+    row = await (
+        await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")
+    ).fetchone()
+    assert int(row["c"]) == 1
+
+    await db.close()
+
