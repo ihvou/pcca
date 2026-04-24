@@ -9,7 +9,12 @@ class IntentAction(str, Enum):
     LIST_SUBJECTS = "list_subjects"
     ADD_SOURCE = "add_source"
     ADD_SOURCE_URL = "add_source_url"
+    REMOVE_SOURCE = "remove_source"
     LIST_SOURCES = "list_sources"
+    REFINE_PREFERENCES = "refine_preferences"
+    SHOW_PREFERENCES = "show_preferences"
+    RUN_READ_CONTENT = "run_read_content"
+    RUN_GET_DIGEST = "run_get_digest"
     HELP = "help"
     UNKNOWN = "unknown"
 
@@ -22,6 +27,8 @@ class ParsedIntent:
     source_id: str | None = None
     source_url: str | None = None
     display_name: str | None = None
+    include_terms: list[str] | None = None
+    exclude_terms: list[str] | None = None
     raw_text: str = ""
 
 

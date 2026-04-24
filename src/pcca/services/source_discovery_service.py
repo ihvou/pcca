@@ -64,10 +64,16 @@ class SourceDiscoveryService:
             return []
 
     def _discover_platform_prefixed(self, value: str) -> list[DiscoveredSource]:
-        match = re.match(r"^(x|linkedin|youtube|reddit|rss)\s*[:=]\s*(.+)$", value, flags=re.IGNORECASE)
+        match = re.match(
+            r"^(x|linkedin|youtube|reddit|rss|substack|medium|spotify|apple_podcasts|apple|applepodcasts)\s*[:=]\s*(.+)$",
+            value,
+            flags=re.IGNORECASE,
+        )
         if not match:
             return []
         platform = match.group(1).strip().lower()
+        if platform in {"apple", "applepodcasts"}:
+            platform = "apple_podcasts"
         source_id = match.group(2).strip()
         return [
             DiscoveredSource(
@@ -161,7 +167,7 @@ class SourceDiscoveryService:
             feed_url = f"{parsed.scheme or 'https'}://{host}/feed"
             out.append(
                 DiscoveredSource(
-                    platform="rss",
+                    platform="substack",
                     source_id=feed_url,
                     display_name=host.split(".")[0],
                     confidence=0.98,
@@ -176,11 +182,25 @@ class SourceDiscoveryService:
             if medium_feed:
                 out.append(
                     DiscoveredSource(
-                        platform="rss",
+                        platform="medium",
                         source_id=medium_feed,
                         display_name="medium",
                         confidence=0.95,
                         reason="medium feed mapping",
+                    )
+                )
+                return out
+
+        if host == "open.spotify.com":
+            spotify_show = self._parse_spotify_show_source(raw_url)
+            if spotify_show:
+                out.append(
+                    DiscoveredSource(
+                        platform="spotify",
+                        source_id=spotify_show,
+                        display_name="spotify-show",
+                        confidence=0.92,
+                        reason="spotify show URL",
                     )
                 )
                 return out
@@ -204,7 +224,7 @@ class SourceDiscoveryService:
             if feed_url:
                 out.append(
                     DiscoveredSource(
-                        platform="rss",
+                        platform="apple_podcasts",
                         source_id=feed_url,
                         display_name="apple-podcast-feed",
                         confidence=0.92,
@@ -323,6 +343,15 @@ class SourceDiscoveryService:
         if m_custom:
             return m_custom.group(1)
         return None
+
+    def _parse_spotify_show_source(self, raw_url: str) -> str | None:
+        parsed = urlparse(raw_url)
+        path = parsed.path or ""
+        m_show = re.search(r"/show/([A-Za-z0-9]+)", path)
+        if not m_show:
+            return None
+        show_id = m_show.group(1)
+        return f"https://open.spotify.com/show/{show_id}"
 
     def _looks_like_feed_url(self, url: str) -> bool:
         lowered = url.lower()

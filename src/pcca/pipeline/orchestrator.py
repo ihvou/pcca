@@ -9,6 +9,7 @@ from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.pipeline.curation import CurationEngine
 from pcca.services.model_router import ModelRouter
+from pcca.services.preference_service import PreferenceService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 
@@ -22,6 +23,7 @@ class PipelineOrchestrator:
     item_repo: ItemRepository
     item_score_repo: ItemScoreRepository
     run_log_repo: RunLogRepository
+    preference_service: PreferenceService | None = None
     curation_engine: CurationEngine = field(default_factory=CurationEngine)
     model_router: ModelRouter | None = None
     collectors: dict[str, Collector] = field(default_factory=dict)
@@ -40,6 +42,19 @@ class PipelineOrchestrator:
             subjects = await self.subject_service.list_subjects()
             stats["subjects_seen"] = len(subjects)
             for subject in subjects:
+                include_terms: list[str] = []
+                exclude_terms: list[str] = []
+                min_practicality: float | None = None
+                if self.preference_service is not None:
+                    pref = await self.preference_service.get_preferences_by_subject_id(subject.id)
+                    include_terms = [
+                        t for t in pref.include_rules.get("topics", []) if isinstance(t, str) and t.strip()
+                    ]
+                    exclude_terms = [
+                        t for t in pref.exclude_rules.get("topics", []) if isinstance(t, str) and t.strip()
+                    ]
+                    if isinstance(pref.quality_rules.get("min_practicality"), (float, int)):
+                        min_practicality = float(pref.quality_rules["min_practicality"])
                 subject_sources = await self.source_service.list_sources_for_subject(subject.name)
                 stats["sources_seen"] += len(subject_sources)
                 for source in subject_sources:
@@ -55,7 +70,13 @@ class PipelineOrchestrator:
                             stats["items_updated"] += upsert_stats["updated"]
 
                             for item, item_id in zip(items, upsert_stats["item_ids"]):
-                                scored = self.curation_engine.score(subject.name, item)
+                                scored = self.curation_engine.score(
+                                    subject.name,
+                                    item,
+                                    include_terms=include_terms,
+                                    exclude_terms=exclude_terms,
+                                    min_practicality=min_practicality,
+                                )
                                 if self.model_router is not None:
                                     rerank = await self.model_router.rerank(
                                         subject_name=subject.name,

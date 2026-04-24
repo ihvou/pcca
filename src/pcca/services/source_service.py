@@ -36,3 +36,20 @@ class SourceService:
             raise ValueError(f"Subject not found: {subject_name}")
         return await self.source_repo.list_for_subject(subject.id)
 
+    async def remove_source_from_subject(
+        self,
+        *,
+        subject_name: str,
+        platform: str,
+        account_or_channel_id: str,
+    ) -> bool:
+        subject = await self.subject_repo.get_by_name(subject_name)
+        if subject is None:
+            raise ValueError(f"Subject not found: {subject_name}")
+        source = await self.source_repo.get_by_identity(
+            platform=platform.strip().lower(),
+            account_or_channel_id=account_or_channel_id.strip(),
+        )
+        if source is None:
+            return False
+        return await self.source_repo.unlink_from_subject(subject.id, source.id)

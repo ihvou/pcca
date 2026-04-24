@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from pcca.collectors.linkedin_collector import LinkedInCollector
 from pcca.collectors.reddit_collector import RedditCollector
 from pcca.collectors.rss_collector import RSSCollector
+from pcca.collectors.spotify_collector import SpotifyCollector
 from pcca.collectors.x_collector import XCollector
 from pcca.collectors.youtube_collector import YouTubeCollector
 from pcca.browser.session_manager import BrowserSessionManager
@@ -14,15 +15,19 @@ from pcca.config import Settings
 from pcca.db import Database
 from pcca.pipeline.orchestrator import PipelineOrchestrator
 from pcca.repositories.digests import DigestRepository
+from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.items import ItemRepository
+from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
+from pcca.services.feedback_service import FeedbackService
 from pcca.scheduler import AgentScheduler, JobRunner
 from pcca.services.follow_import_service import FollowImportService
 from pcca.services.model_router import ModelRouter
+from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
@@ -39,6 +44,8 @@ class PCCAApp:
     db: Database = field(init=False)
     subject_service: SubjectService = field(init=False)
     source_service: SourceService = field(init=False)
+    preference_service: PreferenceService = field(init=False)
+    feedback_service: FeedbackService = field(init=False)
     follow_import_service: FollowImportService = field(init=False)
     routing_service: RoutingService = field(init=False)
     pipeline_orchestrator: PipelineOrchestrator = field(init=False)
@@ -58,8 +65,12 @@ class PCCAApp:
         subject_repo = SubjectRepository(conn=self.db.conn)
         source_repo = SourceRepository(conn=self.db.conn)
         routing_repo = RoutingRepository(conn=self.db.conn)
+        preference_repo = SubjectPreferenceRepository(conn=self.db.conn)
+        feedback_repo = FeedbackRepository(conn=self.db.conn)
         self.subject_service = SubjectService(repository=subject_repo)
         self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+        self.preference_service = PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo)
+        self.feedback_service = FeedbackService(feedback_repo=feedback_repo, subject_repo=subject_repo)
         self.routing_service = RoutingService(routing_repo=routing_repo, subject_repo=subject_repo)
         self.browser_session_manager = BrowserSessionManager(
             profiles_root=self.settings.browser_profiles_dir,
@@ -68,6 +79,7 @@ class PCCAApp:
         self.follow_import_service = FollowImportService(
             session_manager=self.browser_session_manager,
             source_service=self.source_service,
+            source_discovery=SourceDiscoveryService(),
         )
 
         self.pipeline_orchestrator = PipelineOrchestrator(
@@ -76,6 +88,7 @@ class PCCAApp:
             item_repo=ItemRepository(conn=self.db.conn),
             item_score_repo=ItemScoreRepository(conn=self.db.conn),
             run_log_repo=RunLogRepository(conn=self.db.conn),
+            preference_service=self.preference_service,
             model_router=ModelRouter(
                 enabled=self.settings.ollama_enabled,
                 ollama_base_url=self.settings.ollama_base_url,
@@ -87,6 +100,10 @@ class PCCAApp:
                 "youtube": YouTubeCollector(session_manager=self.browser_session_manager),
                 "reddit": RedditCollector(),
                 "rss": RSSCollector(),
+                "substack": RSSCollector(platform="substack"),
+                "medium": RSSCollector(platform="medium"),
+                "apple_podcasts": RSSCollector(platform="apple_podcasts"),
+                "spotify": SpotifyCollector(session_manager=self.browser_session_manager),
             },
         )
 
@@ -95,6 +112,8 @@ class PCCAApp:
                 bot_token=self.settings.telegram_bot_token,
                 subject_service=self.subject_service,
                 source_service=self.source_service,
+                preference_service=self.preference_service,
+                feedback_service=self.feedback_service,
                 source_discovery=SourceDiscoveryService(),
                 routing_service=self.routing_service,
                 voice_transcriber=VoiceTranscriptionService(),
@@ -118,6 +137,12 @@ class PCCAApp:
         )
         if with_scheduler:
             self.scheduler.start()
+
+        if self.telegram_service is not None:
+            self.telegram_service.attach_manual_actions(
+                read_content_action=self.scheduler.job_runner.run_nightly_collection,
+                get_digest_action=self.scheduler.job_runner.run_morning_digest,
+            )
 
     async def stop(self) -> None:
         if hasattr(self, "scheduler"):
@@ -171,10 +196,17 @@ class PCCAApp:
             "x": "https://x.com/i/flow/login",
             "linkedin": "https://www.linkedin.com/login",
             "youtube": "https://accounts.google.com/signin/v2/identifier?service=youtube",
+            "substack": "https://substack.com/sign-in",
+            "medium": "https://medium.com/m/signin",
+            "spotify": "https://accounts.spotify.com/en/login",
+            "apple_podcasts": "https://podcasts.apple.com/us/library/shows",
         }
         url = login_url or default_urls.get(target_platform)
         if not url:
-            raise ValueError("Unsupported platform for login flow. Use one of: x, linkedin, youtube")
+            raise ValueError(
+                "Unsupported platform for login flow. Use one of: "
+                "x, linkedin, youtube, substack, medium, spotify, apple_podcasts"
+            )
 
         manager = BrowserSessionManager(
             profiles_root=self.settings.browser_profiles_dir,

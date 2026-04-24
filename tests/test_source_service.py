@@ -40,3 +40,35 @@ async def test_add_and_list_sources_for_subject(tmp_path: Path) -> None:
 
     await db.close()
 
+
+@pytest.mark.asyncio
+async def test_remove_source_from_subject(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    source_service = SourceService(
+        source_repo=SourceRepository(conn=db.conn),
+        subject_repo=SubjectRepository(conn=db.conn),
+    )
+
+    await subject_service.create_subject("Vibe Coding")
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="x",
+        account_or_channel_id="borischerny",
+        display_name="Boris Cherny",
+        priority=2,
+    )
+    removed = await source_service.remove_source_from_subject(
+        subject_name="Vibe Coding",
+        platform="x",
+        account_or_channel_id="borischerny",
+    )
+    assert removed is True
+
+    rows = await source_service.list_sources_for_subject("Vibe Coding")
+    assert rows == []
+    await db.close()

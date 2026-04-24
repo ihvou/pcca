@@ -31,6 +31,8 @@ async def test_routing_service_links_subject_to_chat(tmp_path: Path) -> None:
     routes = await routing_service.list_routes_for_subject(subject.id)
     assert len(routes) == 1
     assert routes[0].chat_id == 123
+    resolved = await routing_service.resolve_subject_for_chat(chat_id=123, thread_id=None)
+    assert resolved is not None
+    assert resolved.id == subject.id
 
     await db.close()
-

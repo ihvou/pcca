@@ -12,6 +12,8 @@ from pcca.logging_utils import configure_logging
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
+from pcca.repositories.preferences import SubjectPreferenceRepository
+from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
@@ -80,14 +82,80 @@ async def _add_source(
         subject_repo = SubjectRepository(conn=db.conn)
         source_repo = SourceRepository(conn=db.conn)
         service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+        candidate = source_id.strip()
+        if candidate.startswith(("http://", "https://")):
+            discovery = SourceDiscoveryService()
+            discovered = await discovery.discover(candidate)
+            matched = [row for row in discovered if row.platform == platform]
+            if matched:
+                for row in matched:
+                    await service.add_source_to_subject(
+                        subject_name=subject,
+                        platform=row.platform,
+                        account_or_channel_id=row.source_id,
+                        display_name=display_name or row.display_name,
+                        priority=priority,
+                    )
+                    print(f"Source linked: [{row.platform}] {row.source_id} -> subject '{subject}' ({row.reason})")
+                return
+
         await service.add_source_to_subject(
             subject_name=subject,
             platform=platform,
-            account_or_channel_id=source_id,
+            account_or_channel_id=candidate,
             display_name=display_name,
             priority=priority,
         )
-        print(f"Source linked: [{platform}] {source_id} -> subject '{subject}'")
+        print(f"Source linked: [{platform}] {candidate} -> subject '{subject}'")
+    finally:
+        await db.close()
+
+
+async def _remove_source(
+    settings: Settings,
+    subject: str,
+    platform: str,
+    source_id: str,
+) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        subject_repo = SubjectRepository(conn=db.conn)
+        source_repo = SourceRepository(conn=db.conn)
+        service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+        candidate = source_id.strip()
+        removed_any = False
+        if candidate.startswith(("http://", "https://")):
+            discovery = SourceDiscoveryService()
+            discovered = await discovery.discover(candidate)
+            matched = [row for row in discovered if row.platform == platform]
+            for row in matched:
+                removed = await service.remove_source_from_subject(
+                    subject_name=subject,
+                    platform=row.platform,
+                    account_or_channel_id=row.source_id,
+                )
+                if removed:
+                    print(f"Source removed: [{row.platform}] {row.source_id} from subject '{subject}'")
+                removed_any = removed_any or removed
+            if matched:
+                if not removed_any:
+                    print(f"Source was not active: [{platform}] {candidate} for subject '{subject}'")
+                return
+
+        removed = await service.remove_source_from_subject(
+            subject_name=subject,
+            platform=platform,
+            account_or_channel_id=candidate,
+        )
+        if removed:
+            print(f"Source removed: [{platform}] {candidate} from subject '{subject}'")
+        else:
+            print(f"Source was not active: [{platform}] {candidate} for subject '{subject}'")
     finally:
         await db.close()
 
@@ -112,6 +180,55 @@ async def _list_sources(settings: Settings, subject: str) -> None:
                 f"{row.source_id}\t{row.platform}\t{row.account_or_channel_id}\t"
                 f"{row.display_name}\tpriority={row.priority}\tstatus={row.status}"
             )
+    finally:
+        await db.close()
+
+
+async def _show_preferences(settings: Settings, subject: str) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        service = PreferenceService(
+            preference_repo=SubjectPreferenceRepository(conn=db.conn),
+            subject_repo=SubjectRepository(conn=db.conn),
+        )
+        pref = await service.get_preferences_for_subject(subject)
+        include_terms = pref.include_rules.get("topics", [])
+        exclude_terms = pref.exclude_rules.get("topics", [])
+        print(f"subject={subject} version={pref.version}")
+        print(f"include={include_terms}")
+        print(f"exclude={exclude_terms}")
+    finally:
+        await db.close()
+
+
+async def _refine_preferences(
+    settings: Settings,
+    subject: str,
+    include_terms: list[str],
+    exclude_terms: list[str],
+) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        service = PreferenceService(
+            preference_repo=SubjectPreferenceRepository(conn=db.conn),
+            subject_repo=SubjectRepository(conn=db.conn),
+        )
+        pref = await service.refine_subject_rules(
+            subject_name=subject,
+            include_terms=include_terms,
+            exclude_terms=exclude_terms,
+        )
+        print(f"Updated preferences for {subject} -> version {pref.version}")
     finally:
         await db.close()
 
@@ -188,10 +305,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_source_parser = sub.add_parser("add-source", help="Link a source to a subject")
     add_source_parser.add_argument("--subject", required=True, help="Subject name")
-    add_source_parser.add_argument("--platform", required=True, help="Platform, e.g. x/linkedin/youtube/reddit/rss")
+    add_source_parser.add_argument(
+        "--platform",
+        required=True,
+        help=(
+            "Platform, e.g. x/linkedin/youtube/substack/reddit/spotify/"
+            "apple_podcasts/medium/rss"
+        ),
+    )
     add_source_parser.add_argument("--source-id", required=True, help="Handle/channel/feed identifier")
     add_source_parser.add_argument("--display-name", required=False, help="Display name override")
     add_source_parser.add_argument("--priority", type=int, default=0, help="Source priority weight")
+
+    remove_source_parser = sub.add_parser("remove-source", help="Deactivate source for a subject")
+    remove_source_parser.add_argument("--subject", required=True, help="Subject name")
+    remove_source_parser.add_argument("--platform", required=True, help="Platform")
+    remove_source_parser.add_argument("--source-id", required=True, help="Handle/channel/feed identifier")
 
     add_source_url_parser = sub.add_parser(
         "add-source-url",
@@ -205,6 +334,14 @@ def build_parser() -> argparse.ArgumentParser:
     list_sources_parser = sub.add_parser("list-sources", help="List sources for one subject")
     list_sources_parser.add_argument("--subject", required=True, help="Subject name")
 
+    show_preferences_parser = sub.add_parser("show-preferences", help="Show current preferences for a subject")
+    show_preferences_parser.add_argument("--subject", required=True, help="Subject name")
+
+    refine_preferences_parser = sub.add_parser("refine-preferences", help="Append include/exclude terms for a subject")
+    refine_preferences_parser.add_argument("--subject", required=True, help="Subject name")
+    refine_preferences_parser.add_argument("--include", action="append", default=[], help="Include term (repeatable)")
+    refine_preferences_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
+
     link_route_parser = sub.add_parser("link-subject-chat", help="Link subject delivery route to Telegram chat/thread")
     link_route_parser.add_argument("--subject", required=True, help="Subject name")
     link_route_parser.add_argument("--chat-id", required=True, type=int, help="Telegram chat id")
@@ -212,19 +349,33 @@ def build_parser() -> argparse.ArgumentParser:
 
     import_follows_parser = sub.add_parser(
         "import-follows",
-        help="Import follows/subscriptions from logged-in browser session into one subject (x/linkedin/youtube)",
+        help=(
+            "Import follows/subscriptions from logged-in browser session into one subject "
+            "(x/linkedin/youtube/substack/medium/spotify/apple_podcasts)"
+        ),
     )
     import_follows_parser.add_argument("--subject", required=True, help="Subject name")
-    import_follows_parser.add_argument("--platform", required=True, choices=["x", "linkedin", "youtube"], help="Platform")
+    import_follows_parser.add_argument(
+        "--platform",
+        required=True,
+        choices=["x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts"],
+        help="Platform",
+    )
     import_follows_parser.add_argument("--limit", required=False, type=int, default=200, help="Maximum follows to import")
 
     login_parser = sub.add_parser("login", help="Open browser login flow and persist session profile")
-    login_parser.add_argument("--platform", required=True, choices=["x", "linkedin", "youtube"], help="Platform")
+    login_parser.add_argument(
+        "--platform",
+        required=True,
+        choices=["x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts"],
+        help="Platform",
+    )
     login_parser.add_argument("--url", required=False, help="Custom login URL")
 
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
     sub.add_parser("run-digest-once", help="Run digest sending once")
     sub.add_parser("run-agent", help="Run scheduler + Telegram bot")
+    sub.add_parser("run-desktop", help="Run minimal desktop shell for onboarding/control")
 
     return parser
 
@@ -260,6 +411,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         return
 
+    if args.command == "remove-source":
+        asyncio.run(
+            _remove_source(
+                settings,
+                subject=args.subject,
+                platform=args.platform,
+                source_id=args.source_id,
+            )
+        )
+        return
+
     if args.command == "add-source-url":
         asyncio.run(
             _add_source_url(
@@ -274,6 +436,21 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "list-sources":
         asyncio.run(_list_sources(settings, subject=args.subject))
+        return
+
+    if args.command == "show-preferences":
+        asyncio.run(_show_preferences(settings, subject=args.subject))
+        return
+
+    if args.command == "refine-preferences":
+        asyncio.run(
+            _refine_preferences(
+                settings,
+                subject=args.subject,
+                include_terms=args.include,
+                exclude_terms=args.exclude,
+            )
+        )
         return
 
     if args.command == "link-subject-chat":
@@ -315,6 +492,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             asyncio.run(app.run_forever())
         except KeyboardInterrupt:
             logging.getLogger(__name__).info("Agent interrupted by user.")
+        return
+
+    if args.command == "run-desktop":
+        from pcca.desktop_shell import run_desktop_shell
+
+        run_desktop_shell()
         return
 
     raise ValueError(f"Unsupported command: {args.command}")

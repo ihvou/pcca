@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 import aiosqlite
 
+from pcca.models import Subject
+
 
 @dataclass
 class SubjectRoute:
@@ -53,3 +55,55 @@ class RoutingRepository:
         ).fetchall()
         return [SubjectRoute(subject_id=row["subject_id"], chat_id=row["chat_id"], thread_id=row["thread_id"]) for row in rows]
 
+    async def resolve_subject_for_chat(
+        self,
+        *,
+        chat_id: int,
+        thread_id: str | None,
+    ) -> Subject | None:
+        if thread_id is not None:
+            row = await (
+                await self.conn.execute(
+                    """
+                    SELECT s.id, s.name, s.telegram_thread_id, s.status, s.created_at
+                    FROM subject_routes sr
+                    JOIN subjects s ON s.id = sr.subject_id
+                    WHERE sr.chat_id = ? AND sr.thread_id = ?
+                    ORDER BY sr.id DESC
+                    LIMIT 1
+                    """,
+                    (chat_id, thread_id),
+                )
+            ).fetchone()
+            if row is not None:
+                return Subject(
+                    id=row["id"],
+                    name=row["name"],
+                    telegram_thread_id=row["telegram_thread_id"],
+                    status=row["status"],
+                    created_at=row["created_at"],
+                )
+
+        # Fallback to latest route for this chat without thread pin.
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT s.id, s.name, s.telegram_thread_id, s.status, s.created_at
+                FROM subject_routes sr
+                JOIN subjects s ON s.id = sr.subject_id
+                WHERE sr.chat_id = ?
+                ORDER BY sr.id DESC
+                LIMIT 1
+                """,
+                (chat_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return Subject(
+            id=row["id"],
+            name=row["name"],
+            telegram_thread_id=row["telegram_thread_id"],
+            status=row["status"],
+            created_at=row["created_at"],
+        )

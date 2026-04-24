@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pcca.models import Subject
 from pcca.repositories.routing import RoutingRepository, SubjectRoute
 from pcca.repositories.subjects import SubjectRepository
 
@@ -23,3 +24,5 @@ class RoutingService:
     async def list_routes_for_subject(self, subject_id: int) -> list[SubjectRoute]:
         return await self.routing_repo.list_routes_for_subject(subject_id=subject_id)
 
+    async def resolve_subject_for_chat(self, *, chat_id: int, thread_id: str | None) -> Subject | None:
+        return await self.routing_repo.resolve_subject_for_chat(chat_id=chat_id, thread_id=thread_id)

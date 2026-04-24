@@ -23,5 +23,5 @@ setup(
             "pytest-asyncio>=0.23.0",
         ]
     },
-    entry_points={"console_scripts": ["pcca=pcca.cli:main"]},
+    entry_points={"console_scripts": ["pcca=pcca.cli:main", "pcca-desktop=pcca.desktop_shell:run_desktop_shell"]},
 )

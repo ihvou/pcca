@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from typing import Awaitable, Callable
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -15,7 +17,9 @@ from telegram.ext import (
 )
 
 from pcca.models import IntentAction
+from pcca.services.feedback_service import FeedbackService
 from pcca.services.intent_parser import parse_intent
+from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
@@ -25,21 +29,42 @@ from pcca.services.voice_transcription_service import VoiceTranscriptionService
 logger = logging.getLogger(__name__)
 
 
+ManualAction = Callable[[], Awaitable[None]]
+
+
 @dataclass
 class TelegramService:
     bot_token: str
     subject_service: SubjectService
     source_service: SourceService
+    preference_service: PreferenceService
+    feedback_service: FeedbackService
     source_discovery: SourceDiscoveryService
     routing_service: RoutingService
     voice_transcriber: VoiceTranscriptionService
     application: Application | None = None
+    read_content_action: ManualAction | None = None
+    get_digest_action: ManualAction | None = None
+    _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+
+    def attach_manual_actions(
+        self,
+        *,
+        read_content_action: ManualAction,
+        get_digest_action: ManualAction,
+    ) -> None:
+        self.read_content_action = read_content_action
+        self.get_digest_action = get_digest_action
 
     async def start(self) -> None:
         app = ApplicationBuilder().token(self.bot_token).build()
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(CommandHandler("help", self._on_help))
+        app.add_handler(CommandHandler("setup", self._on_setup))
+        app.add_handler(CommandHandler("read_content", self._on_read_content_command))
+        app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
+        app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
         app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
@@ -74,7 +99,11 @@ class TelegramService:
                     InlineKeyboardButton("👍", callback_data="fb:up"),
                     InlineKeyboardButton("👎", callback_data="fb:down"),
                     InlineKeyboardButton("🔖", callback_data="fb:save"),
-                ]
+                ],
+                [
+                    InlineKeyboardButton("Read Content Now", callback_data="run:read"),
+                    InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
+                ],
             ]
         )
         await self.application.bot.send_message(
@@ -93,26 +122,50 @@ class TelegramService:
             title=update.effective_chat.title or update.effective_chat.full_name,
         )
         await update.message.reply_text(
-            "PCCA is connected. Send messages in free form, for example:\n"
-            "- Create subject: Vibe Coding\n"
-            "- I want a new topic for Agentic PM\n"
-            "- Add source x:borischerny to Vibe Coding\n"
-            "- Add source https://newsletter.substack.com to Vibe Coding\n"
-            "- List sources for Vibe Coding\n"
-            "- List subjects"
+            "PCCA is connected.\n"
+            "Use /setup for guided onboarding, or send free-form commands.",
+            reply_markup=self._quick_actions_reply_keyboard(),
+        )
+        await self._send_quick_actions(update.message)
+
+    async def _on_setup(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await update.message.reply_text(
+            "Setup flow:\n"
+            "1. Create subject: `Create subject: Agentic PM`\n"
+            "2. Add source URL: `Add source https://newsletter.substack.com to Agentic PM`\n"
+            "3. Optionally refine: `Refine Agentic PM: include claude code, releases; exclude biography`\n"
+            "4. Trigger collection now: `/read_content`\n"
+            "5. Trigger digest now: `/get_digest`\n\n"
+            "Desktop-only account login/import (X/LinkedIn/YouTube) is available in app controls.",
         )
 
     async def _on_help(self, update: Update, _context: ContextTypes.DEFAULT_TYPE | None) -> None:
         if update.message is None:
             return
         await update.message.reply_text(
-            "I can currently:\n"
-            "- create subjects from free-form text\n"
-            "- link and list sources per subject\n"
-            "- discover sources from URLs (Substack/Medium/podcast/blog links)\n"
-            "- list configured subjects\n"
-            "- accept voice notes (transcription backend is pending)"
+            "I can:\n"
+            "- create/list subjects\n"
+            "- add/remove sources by platform or URL\n"
+            "- show/refine preferences per subject\n"
+            "- run collection now (`/read_content`)\n"
+            "- run digest now (`/get_digest`)\n"
+            "- collect feedback (👍 👎 🔖)\n"
+            "- accept voice notes (transcription backend pending)",
+            reply_markup=self._quick_actions_reply_keyboard(),
         )
+        await self._send_quick_actions(update.message)
+
+    async def _on_read_content_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_manual_action_from_message(update.message, action_name="read content", action=self.read_content_action)
+
+    async def _on_get_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_manual_action_from_message(update.message, action_name="get digest", action=self.get_digest_action)
 
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
@@ -162,10 +215,10 @@ class TelegramService:
                 )
                 return
             try:
-                await self.source_service.add_source_to_subject(
+                linked_rows = await self._link_source(
                     subject_name=intent.subject_name,
                     platform=intent.platform,
-                    account_or_channel_id=intent.source_id,
+                    source_value=intent.source_id,
                 )
                 await self.routing_service.link_subject(
                     subject_name=intent.subject_name,
@@ -175,10 +228,10 @@ class TelegramService:
             except ValueError as exc:
                 await update.message.reply_text(str(exc))
                 return
-
-            await update.message.reply_text(
-                f"Source linked: [{intent.platform}] {intent.source_id} -> {intent.subject_name}"
-            )
+            if not linked_rows:
+                await update.message.reply_text("Could not resolve that source into a supported format.")
+                return
+            await update.message.reply_text("Linked sources:\n" + "\n".join(linked_rows))
             return
 
         if intent.action is IntentAction.ADD_SOURCE_URL:
@@ -211,9 +264,31 @@ class TelegramService:
                 chat_id=update.effective_chat.id,
                 thread_id=thread_id,
             )
-            await update.message.reply_text(
-                "Linked sources:\n" + "\n".join(linked_rows)
-            )
+            await update.message.reply_text("Linked sources:\n" + "\n".join(linked_rows))
+            return
+
+        if intent.action is IntentAction.REMOVE_SOURCE:
+            if not intent.subject_name or not intent.platform or not intent.source_id:
+                await update.message.reply_text(
+                    "Please include all fields, for example:\n"
+                    "Unsubscribe x:borischerny from Vibe Coding"
+                )
+                return
+            try:
+                removed = await self._remove_source(
+                    subject_name=intent.subject_name,
+                    platform=intent.platform,
+                    source_value=intent.source_id,
+                )
+            except ValueError as exc:
+                await update.message.reply_text(str(exc))
+                return
+            if removed:
+                await update.message.reply_text(
+                    f"Source removed: [{intent.platform}] {intent.source_id} from {intent.subject_name}"
+                )
+            else:
+                await update.message.reply_text("Source was not active for that subject.")
             return
 
         if intent.action is IntentAction.LIST_SOURCES:
@@ -227,10 +302,80 @@ class TelegramService:
                 return
 
             if not sources:
-                await update.message.reply_text(f"No sources configured for {intent.subject_name}.")
+                await update.message.reply_text(f"No active sources configured for {intent.subject_name}.")
                 return
             lines = [f"- [{source.platform}] {source.account_or_channel_id}" for source in sources]
             await update.message.reply_text("Sources:\n" + "\n".join(lines))
+            return
+
+        if intent.action is IntentAction.SHOW_PREFERENCES:
+            if not intent.subject_name:
+                await update.message.reply_text("Tell me the subject name, for example: Show preferences for Vibe Coding")
+                return
+            try:
+                pref = await self.preference_service.get_preferences_for_subject(intent.subject_name)
+            except ValueError as exc:
+                await update.message.reply_text(str(exc))
+                return
+            include_topics = pref.include_rules.get("topics", [])
+            exclude_topics = pref.exclude_rules.get("topics", [])
+            await update.message.reply_text(
+                f"Preferences for {intent.subject_name} (v{pref.version}):\n"
+                f"- include: {', '.join(include_topics) if include_topics else '(none)'}\n"
+                f"- exclude: {', '.join(exclude_topics) if exclude_topics else '(none)'}"
+            )
+            return
+
+        if intent.action is IntentAction.REFINE_PREFERENCES:
+            if not intent.subject_name:
+                await update.message.reply_text(
+                    "Tell me the subject name, for example:\n"
+                    "Refine Vibe Coding: include claude code; exclude biography"
+                )
+                return
+            if not intent.include_terms and not intent.exclude_terms:
+                await update.message.reply_text(
+                    "Please include include/exclude terms, for example:\n"
+                    "Refine Vibe Coding: include releases, practical workflow; exclude motivation"
+                )
+                return
+            try:
+                pref = await self.preference_service.refine_subject_rules(
+                    subject_name=intent.subject_name,
+                    include_terms=intent.include_terms,
+                    exclude_terms=intent.exclude_terms,
+                )
+                await self.feedback_service.add_feedback_by_subject_name(
+                    subject_name=intent.subject_name,
+                    feedback_type="refine_text",
+                    comment_text=text,
+                )
+            except ValueError as exc:
+                await update.message.reply_text(str(exc))
+                return
+            include_topics = pref.include_rules.get("topics", [])
+            exclude_topics = pref.exclude_rules.get("topics", [])
+            await update.message.reply_text(
+                f"Updated preferences for {intent.subject_name} (v{pref.version}).\n"
+                f"- include: {', '.join(include_topics) if include_topics else '(none)'}\n"
+                f"- exclude: {', '.join(exclude_topics) if exclude_topics else '(none)'}"
+            )
+            return
+
+        if intent.action is IntentAction.RUN_READ_CONTENT:
+            await self._run_manual_action_from_message(
+                update.message,
+                action_name="read content",
+                action=self.read_content_action,
+            )
+            return
+
+        if intent.action is IntentAction.RUN_GET_DIGEST:
+            await self._run_manual_action_from_message(
+                update.message,
+                action_name="get digest",
+                action=self.get_digest_action,
+            )
             return
 
         if intent.action is IntentAction.HELP:
@@ -238,8 +383,8 @@ class TelegramService:
             return
 
         await update.message.reply_text(
-            "I got that. For now I support free-form subject setup and listing.\n"
-            "Try: Create subject: Agentic PM"
+            "I can handle setup/refinement/actions in free form.\n"
+            "Try: /setup"
         )
 
     async def _on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,11 +399,128 @@ class TelegramService:
                 "Please send the same instruction as text for now."
             )
             return
-
-        # Reuse text flow once transcription is available.
         await self._handle_text_intent(update, transcript)
 
     async def _on_feedback_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is None:
             return
-        await update.callback_query.answer("Feedback logged (placeholder).")
+        action = (update.callback_query.data or "fb:unknown").split(":", 1)[1]
+        message = update.callback_query.message
+        if message is not None:
+            thread_id = str(message.message_thread_id) if message.message_thread_id else None
+            subject = await self.routing_service.resolve_subject_for_chat(chat_id=message.chat.id, thread_id=thread_id)
+            if subject is not None:
+                await self.feedback_service.add_feedback_by_subject_id(
+                    subject_id=subject.id,
+                    feedback_type=f"button_{action}",
+                )
+        await update.callback_query.answer("Feedback saved.")
+
+    async def _on_run_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query is None:
+            return
+        data = update.callback_query.data or ""
+        await update.callback_query.answer()
+        message = update.callback_query.message
+        if message is None:
+            return
+        if data == "run:read":
+            await self._run_manual_action_from_message(message, action_name="read content", action=self.read_content_action)
+            return
+        if data == "run:digest":
+            await self._run_manual_action_from_message(message, action_name="get digest", action=self.get_digest_action)
+            return
+
+    async def _run_manual_action_from_message(
+        self,
+        message,
+        *,
+        action_name: str,
+        action: ManualAction | None,
+    ) -> None:
+        if action is None:
+            await message.reply_text(
+                f"`{action_name}` action is not available yet in this runtime.",
+                parse_mode="Markdown",
+            )
+            return
+        if self._manual_action_lock.locked():
+            await message.reply_text("Another manual run is in progress. Please wait a bit and try again.")
+            return
+        await message.reply_text(f"Running `{action_name}` now...", parse_mode="Markdown")
+        try:
+            async with self._manual_action_lock:
+                await action()
+            await message.reply_text(f"`{action_name}` completed.", parse_mode="Markdown")
+        except Exception:
+            logger.exception("Manual action failed: %s", action_name)
+            await message.reply_text(f"`{action_name}` failed. Check logs and try again.", parse_mode="Markdown")
+
+    async def _send_quick_actions(self, message) -> None:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("Read Content Now", callback_data="run:read"),
+                    InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
+                ]
+            ]
+        )
+        await message.reply_text("Quick actions:", reply_markup=keyboard)
+
+    @staticmethod
+    def _quick_actions_reply_keyboard() -> ReplyKeyboardMarkup:
+        return ReplyKeyboardMarkup(
+            [["Read Content", "Get Digest"], ["List subjects", "Help"]],
+            resize_keyboard=True,
+            one_time_keyboard=False,
+        )
+
+    async def _link_source(self, *, subject_name: str, platform: str, source_value: str) -> list[str]:
+        candidate = source_value.strip()
+        if not candidate:
+            return []
+        rows: list[str] = []
+        if candidate.startswith(("http://", "https://")):
+            discovered = await self.source_discovery.discover(candidate)
+            matched = [d for d in discovered if d.platform == platform]
+            for row in matched:
+                await self.source_service.add_source_to_subject(
+                    subject_name=subject_name,
+                    platform=row.platform,
+                    account_or_channel_id=row.source_id,
+                    display_name=row.display_name,
+                )
+                rows.append(f"- [{row.platform}] {row.source_id} ({row.reason})")
+            if rows:
+                return rows
+
+        await self.source_service.add_source_to_subject(
+            subject_name=subject_name,
+            platform=platform,
+            account_or_channel_id=candidate,
+        )
+        rows.append(f"- [{platform}] {candidate} (explicit platform:id input)")
+        return rows
+
+    async def _remove_source(self, *, subject_name: str, platform: str, source_value: str) -> bool:
+        candidate = source_value.strip()
+        if not candidate:
+            return False
+        if candidate.startswith(("http://", "https://")):
+            discovered = await self.source_discovery.discover(candidate)
+            matched = [d for d in discovered if d.platform == platform]
+            any_removed = False
+            for row in matched:
+                removed = await self.source_service.remove_source_from_subject(
+                    subject_name=subject_name,
+                    platform=row.platform,
+                    account_or_channel_id=row.source_id,
+                )
+                any_removed = any_removed or removed
+            if matched:
+                return any_removed
+        return await self.source_service.remove_source_from_subject(
+            subject_name=subject_name,
+            platform=platform,
+            account_or_channel_id=candidate,
+        )

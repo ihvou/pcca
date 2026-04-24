@@ -28,6 +28,7 @@ dev = [
 
 [project.scripts]
 pcca = "pcca.cli:main"
+pcca-desktop = "pcca.desktop_shell:run_desktop_shell"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -29,6 +29,28 @@ class SubjectSourceRow:
 class SourceRepository:
     conn: aiosqlite.Connection
 
+    async def get_by_identity(self, *, platform: str, account_or_channel_id: str) -> SourceRow | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                FROM sources
+                WHERE platform = ? AND account_or_channel_id = ?
+                """,
+                (platform, account_or_channel_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return SourceRow(
+            id=row["id"],
+            platform=row["platform"],
+            account_or_channel_id=row["account_or_channel_id"],
+            display_name=row["display_name"],
+            follow_state=row["follow_state"],
+            last_crawled_at=row["last_crawled_at"],
+        )
+
     async def create_or_get(self, platform: str, account_or_channel_id: str, display_name: str) -> SourceRow:
         existing = await (
             await self.conn.execute(
@@ -90,6 +112,18 @@ class SourceRepository:
         )
         await self.conn.commit()
 
+    async def unlink_from_subject(self, subject_id: int, source_id: int) -> bool:
+        cursor = await self.conn.execute(
+            """
+            UPDATE subject_sources
+            SET status = 'inactive'
+            WHERE subject_id = ? AND source_id = ? AND status = 'active'
+            """,
+            (subject_id, source_id),
+        )
+        await self.conn.commit()
+        return (cursor.rowcount or 0) > 0
+
     async def list_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
         rows = await (
             await self.conn.execute(
@@ -104,6 +138,7 @@ class SourceRepository:
                 FROM subject_sources ss
                 JOIN sources s ON s.id = ss.source_id
                 WHERE ss.subject_id = ?
+                  AND ss.status = 'active'
                 ORDER BY ss.priority DESC, s.display_name ASC
                 """,
                 (subject_id,),
@@ -120,4 +155,3 @@ class SourceRepository:
             )
             for row in rows
         ]
-

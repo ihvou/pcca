@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from pcca.browser.session_manager import BrowserSessionManager
+from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 
 logger = logging.getLogger(__name__)
@@ -35,10 +36,11 @@ def normalize_youtube_subscription_href(href: str) -> str | None:
 class FollowImportService:
     session_manager: BrowserSessionManager
     source_service: SourceService
+    source_discovery: SourceDiscoveryService = field(default_factory=SourceDiscoveryService)
 
     @staticmethod
     def supported_platforms() -> tuple[str, ...]:
-        return ("x", "linkedin", "youtube")
+        return ("x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts")
 
     async def import_x_follows(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("x")
@@ -168,6 +170,141 @@ class FollowImportService:
         finally:
             await page.close()
 
+    async def import_substack_subscriptions(self, *, limit: int = 200) -> list[str]:
+        page = await self.session_manager.new_page("substack")
+        try:
+            await page.goto("https://substack.com/settings", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3000)
+            urls: set[str] = set()
+            for _ in range(18):
+                batch = await page.evaluate(
+                    """
+                    () => {
+                      const out = [];
+                      const links = Array.from(document.querySelectorAll('a[href*=".substack.com"]'));
+                      for (const link of links) {
+                        const href = link.getAttribute("href") || "";
+                        if (!href) continue;
+                        if (!href.includes(".substack.com")) continue;
+                        if (href.includes("/publish")) continue;
+                        out.push(href);
+                      }
+                      return out;
+                    }
+                    """
+                )
+                for href in batch:
+                    normalized = self._normalize_substack_url(str(href))
+                    if normalized:
+                        urls.add(normalized)
+                if len(urls) >= limit:
+                    break
+                await page.mouse.wheel(0, 2600)
+                await page.wait_for_timeout(700)
+            return sorted(urls)[:limit]
+        finally:
+            await page.close()
+
+    async def import_medium_following(self, *, limit: int = 200) -> list[str]:
+        page = await self.session_manager.new_page("medium")
+        try:
+            await page.goto("https://medium.com/me/following", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3200)
+            urls: set[str] = set()
+            for _ in range(20):
+                batch = await page.evaluate(
+                    """
+                    () => {
+                      const out = [];
+                      const links = Array.from(document.querySelectorAll('a[href*="medium.com/"]'));
+                      for (const link of links) {
+                        const href = link.getAttribute("href") || "";
+                        if (!href.includes("medium.com/")) continue;
+                        if (href.includes("/m/signin")) continue;
+                        out.push(href);
+                      }
+                      return out;
+                    }
+                    """
+                )
+                for href in batch:
+                    normalized = self._normalize_medium_url(str(href))
+                    if normalized:
+                        urls.add(normalized)
+                if len(urls) >= limit:
+                    break
+                await page.mouse.wheel(0, 2400)
+                await page.wait_for_timeout(700)
+            return sorted(urls)[:limit]
+        finally:
+            await page.close()
+
+    async def import_spotify_podcast_follows(self, *, limit: int = 200) -> list[str]:
+        page = await self.session_manager.new_page("spotify")
+        try:
+            await page.goto("https://open.spotify.com/collection/podcasts", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3200)
+            urls: set[str] = set()
+            for _ in range(22):
+                batch = await page.evaluate(
+                    """
+                    () => {
+                      const out = [];
+                      const links = Array.from(document.querySelectorAll('a[href*="/show/"]'));
+                      for (const link of links) {
+                        const href = link.getAttribute("href") || "";
+                        if (!href.includes("/show/")) continue;
+                        out.push(href);
+                      }
+                      return out;
+                    }
+                    """
+                )
+                for href in batch:
+                    normalized = self._normalize_spotify_show_url(str(href))
+                    if normalized:
+                        urls.add(normalized)
+                if len(urls) >= limit:
+                    break
+                await page.mouse.wheel(0, 2600)
+                await page.wait_for_timeout(700)
+            return sorted(urls)[:limit]
+        finally:
+            await page.close()
+
+    async def import_apple_podcast_subscriptions(self, *, limit: int = 200) -> list[str]:
+        page = await self.session_manager.new_page("apple_podcasts")
+        try:
+            await page.goto("https://podcasts.apple.com/us/library/shows", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3200)
+            urls: set[str] = set()
+            for _ in range(20):
+                batch = await page.evaluate(
+                    """
+                    () => {
+                      const out = [];
+                      const links = Array.from(document.querySelectorAll('a[href*="/podcast/"]'));
+                      for (const link of links) {
+                        const href = link.getAttribute("href") || "";
+                        if (!href.includes("/podcast/")) continue;
+                        out.push(href);
+                      }
+                      return out;
+                    }
+                    """
+                )
+                for href in batch:
+                    normalized = self._normalize_apple_podcast_url(str(href))
+                    if normalized:
+                        urls.add(normalized)
+                if len(urls) >= limit:
+                    break
+                await page.mouse.wheel(0, 2200)
+                await page.wait_for_timeout(700)
+            return sorted(urls)[:limit]
+        finally:
+            await page.close()
+
     async def import_to_subject(self, *, subject_name: str, platform: str, limit: int = 200) -> int:
         normalized_platform = platform.strip().lower()
         if normalized_platform == "x":
@@ -176,22 +313,108 @@ class FollowImportService:
             imported = await self.import_linkedin_follows(limit=limit)
         elif normalized_platform == "youtube":
             imported = await self.import_youtube_subscriptions(limit=limit)
+        elif normalized_platform == "substack":
+            imported = await self.import_substack_subscriptions(limit=limit)
+        elif normalized_platform == "medium":
+            imported = await self.import_medium_following(limit=limit)
+        elif normalized_platform == "spotify":
+            imported = await self.import_spotify_podcast_follows(limit=limit)
+        elif normalized_platform == "apple_podcasts":
+            imported = await self.import_apple_podcast_subscriptions(limit=limit)
         else:
             supported = ", ".join(self.supported_platforms())
             raise ValueError(f"Supported platforms for follow import: {supported}")
 
         linked = 0
-        for source_id in imported:
-            display = source_id
-            if normalized_platform == "linkedin":
-                display = re.sub(r"^(in|company)/", "", source_id)
-            await self.source_service.add_source_to_subject(
+        for raw_source in imported:
+            linked += await self._link_imported_source(
                 subject_name=subject_name,
                 platform=normalized_platform,
-                account_or_channel_id=source_id,
-                display_name=display,
-                priority=0,
+                raw_source=raw_source,
             )
-            linked += 1
         logger.info("Imported %d %s follows into subject=%s", linked, normalized_platform, subject_name)
         return linked
+
+    async def _link_imported_source(self, *, subject_name: str, platform: str, raw_source: str) -> int:
+        source_value = raw_source.strip()
+        if not source_value:
+            return 0
+
+        # URL-backed platforms resolve into canonical source IDs (feed URLs for some platforms).
+        if platform in {"substack", "medium", "apple_podcasts", "spotify"} and source_value.startswith(("http://", "https://")):
+            discovered = await self.source_discovery.discover(source_value)
+            linked = 0
+            for row in discovered:
+                if row.platform != platform:
+                    continue
+                await self.source_service.add_source_to_subject(
+                    subject_name=subject_name,
+                    platform=row.platform,
+                    account_or_channel_id=row.source_id,
+                    display_name=row.display_name,
+                    priority=0,
+                )
+                linked += 1
+            if linked:
+                return linked
+
+        display = source_value
+        if platform == "linkedin":
+            display = re.sub(r"^(in|company)/", "", source_value)
+        await self.source_service.add_source_to_subject(
+            subject_name=subject_name,
+            platform=platform,
+            account_or_channel_id=source_value,
+            display_name=display,
+            priority=0,
+        )
+        return 1
+
+    def _normalize_substack_url(self, href: str) -> str | None:
+        parsed = urlparse(href.strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host.endswith(".substack.com"):
+            return None
+        return f"https://{host}"
+
+    def _normalize_medium_url(self, href: str) -> str | None:
+        parsed = urlparse(href.strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if not host.endswith("medium.com"):
+            return None
+        path = parsed.path or "/"
+        if path.startswith("/@"):
+            handle = path.split("/", 2)[1]
+            return f"https://medium.com/{handle}"
+        # publication-like slug
+        first = path.strip("/").split("/", 1)[0]
+        if not first or first in {"me", "topics"}:
+            return None
+        return f"https://medium.com/{first}"
+
+    def _normalize_spotify_show_url(self, href: str) -> str | None:
+        parsed = urlparse(href.strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "open.spotify.com":
+            return None
+        m_show = re.search(r"/show/([A-Za-z0-9]+)", parsed.path or "")
+        if not m_show:
+            return None
+        return f"https://open.spotify.com/show/{m_show.group(1)}"
+
+    def _normalize_apple_podcast_url(self, href: str) -> str | None:
+        parsed = urlparse(href.strip())
+        host = parsed.netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host != "podcasts.apple.com":
+            return None
+        if "/podcast/" not in (parsed.path or ""):
+            return None
+        return f"https://{host}{parsed.path}"

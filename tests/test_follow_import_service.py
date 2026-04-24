@@ -5,6 +5,7 @@ from dataclasses import dataclass
 import pytest
 
 from pcca.services.follow_import_service import FollowImportService, normalize_youtube_subscription_href
+from pcca.services.source_discovery_service import DiscoveredSource
 
 
 @dataclass
@@ -37,6 +38,25 @@ class FakeFollowImportService(FollowImportService):
         _ = limit
         return ["@openai", "UC1234567890"]
 
+    async def import_substack_subscriptions(self, *, limit: int = 200) -> list[str]:
+        _ = limit
+        return ["https://newsletter.substack.com"]
+
+
+@dataclass
+class FakeDiscovery:
+    async def discover(self, raw_input: str) -> list[DiscoveredSource]:
+        _ = raw_input
+        return [
+            DiscoveredSource(
+                platform="substack",
+                source_id="https://newsletter.substack.com/feed",
+                display_name="newsletter",
+                confidence=1.0,
+                reason="test",
+            )
+        ]
+
 
 @pytest.mark.asyncio
 async def test_import_to_subject_wires_sources() -> None:
@@ -63,3 +83,17 @@ async def test_import_youtube_to_subject_wires_sources() -> None:
 def test_normalize_youtube_subscription_href() -> None:
     assert normalize_youtube_subscription_href("/@openai") == "@openai"
     assert normalize_youtube_subscription_href("https://www.youtube.com/channel/UCabc") == "UCabc"
+
+
+@pytest.mark.asyncio
+async def test_import_substack_to_subject_uses_discovery() -> None:
+    fake_source_service = FakeSourceService(calls=[])
+    service = FakeFollowImportService(
+        session_manager=None,  # type: ignore[arg-type]
+        source_service=fake_source_service,
+        source_discovery=FakeDiscovery(),  # type: ignore[arg-type]
+    )
+
+    count = await service.import_to_subject(subject_name="Vibe Coding", platform="substack", limit=10)
+    assert count == 1
+    assert ("Vibe Coding", "substack", "https://newsletter.substack.com/feed") in fake_source_service.calls

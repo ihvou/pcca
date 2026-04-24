@@ -64,7 +64,15 @@ class CurationEngine:
         "біограф",
     )
 
-    def score(self, subject_name: str, item: CollectedItem) -> ScoredItem:
+    def score(
+        self,
+        subject_name: str,
+        item: CollectedItem,
+        *,
+        include_terms: list[str] | None = None,
+        exclude_terms: list[str] | None = None,
+        min_practicality: float | None = None,
+    ) -> ScoredItem:
         text = (item.text or "").lower()
         if not text and item.transcript_text:
             text = item.transcript_text[:2000].lower()
@@ -93,16 +101,30 @@ class CurationEngine:
         noise_hits = sum(1 for term in self.noise_terms if term in text)
         noise_penalty = min(1.0, noise_hits / 3.0)
 
+        include_hits = 0
+        if include_terms:
+            include_hits = sum(1 for term in include_terms if term and term.lower() in text)
+            relevance = min(1.0, relevance + min(0.35, include_hits * 0.12))
+
+        exclude_hits = 0
+        if exclude_terms:
+            exclude_hits = sum(1 for term in exclude_terms if term and term.lower() in text)
+            noise_penalty = min(1.0, noise_penalty + min(0.5, exclude_hits * 0.2))
+
         pass1_score = 0.6 * relevance + 0.4 * practicality
         pass2_score = 0.4 * relevance + 0.3 * practicality + 0.2 * novelty + 0.1 * trust
         final_score = (
             0.35 * relevance + 0.30 * practicality + 0.20 * novelty + 0.15 * trust - 0.20 * noise_penalty
         )
+        if min_practicality is not None and practicality < min_practicality:
+            # Preference guardrail: demote items that are likely too fluffy for this subject.
+            final_score -= 0.2
         final_score = max(0.0, min(1.0, final_score))
 
         rationale = (
             f"relevance={relevance:.2f}, practicality={practicality:.2f}, "
-            f"novelty={novelty:.2f}, trust={trust:.2f}, noise={noise_penalty:.2f}"
+            f"novelty={novelty:.2f}, trust={trust:.2f}, noise={noise_penalty:.2f}, "
+            f"include_hits={include_hits}, exclude_hits={exclude_hits}"
         )
         return ScoredItem(
             pass1_score=pass1_score,
