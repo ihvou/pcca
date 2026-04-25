@@ -10,6 +10,7 @@ from pcca.config import Settings
 from pcca.db import Database
 from pcca.logging_utils import configure_logging
 from pcca.repositories.routing import RoutingRepository
+from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
@@ -178,7 +179,8 @@ async def _list_sources(settings: Settings, subject: str) -> None:
         for row in rows:
             print(
                 f"{row.source_id}\t{row.platform}\t{row.account_or_channel_id}\t"
-                f"{row.display_name}\tpriority={row.priority}\tstatus={row.status}"
+                f"{row.display_name}\tpriority={row.priority}\tstatus={row.status}\t"
+                f"last_crawled_at={row.last_crawled_at or 'never'}"
             )
     finally:
         await db.close()
@@ -291,6 +293,101 @@ async def _link_subject_chat(settings: Settings, subject: str, chat_id: int, thr
         await db.close()
 
 
+async def _list_staged_sources(settings: Settings) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        repo = OnboardingRepository(conn=db.conn)
+        rows = await repo.list_sources(status="pending")
+        if not rows:
+            print("No staged onboarding sources.")
+            return
+        for row in rows:
+            print(
+                f"{row.id}\t{row.platform}\t{row.account_or_channel_id}\t"
+                f"{row.display_name}\tstatus={row.status}"
+            )
+    finally:
+        await db.close()
+
+
+async def _remove_staged_source(settings: Settings, source_id: int) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        removed = await OnboardingRepository(conn=db.conn).mark_removed(source_id)
+        if removed:
+            print(f"Removed staged source id={source_id}.")
+        else:
+            print(f"No pending staged source found for id={source_id}.")
+    finally:
+        await db.close()
+
+
+async def _confirm_staged_sources(
+    settings: Settings,
+    *,
+    subject: str,
+    include_terms: list[str],
+    exclude_terms: list[str],
+    high_quality_examples: str | None,
+) -> None:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        subject_repo = SubjectRepository(conn=db.conn)
+        subject_service = SubjectService(repository=subject_repo)
+        created = await subject_service.create_subject(subject)
+        source_service = SourceService(
+            source_repo=SourceRepository(conn=db.conn),
+            subject_repo=subject_repo,
+        )
+        onboarding_repo = OnboardingRepository(conn=db.conn)
+        staged = await onboarding_repo.list_sources(status="pending")
+        for row in staged:
+            await source_service.add_source_to_subject(
+                subject_name=created.name,
+                platform=row.platform,
+                account_or_channel_id=row.account_or_channel_id,
+                display_name=row.display_name,
+            )
+        if staged:
+            await onboarding_repo.mark_confirmed([row.id for row in staged])
+        if include_terms or exclude_terms:
+            pref_service = PreferenceService(
+                preference_repo=SubjectPreferenceRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            await pref_service.refine_subject_rules(
+                subject_name=created.name,
+                include_terms=include_terms,
+                exclude_terms=exclude_terms,
+            )
+        await onboarding_repo.update_state(
+            current_step="completed",
+            subject_name=created.name,
+            include_terms=include_terms,
+            exclude_terms=exclude_terms,
+            high_quality_examples=high_quality_examples,
+            completed=True,
+        )
+        print(f"Created subject '{created.name}' and confirmed {len(staged)} staged source(s).")
+    finally:
+        await db.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pcca", description="Personal Content Curation Agent")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -363,6 +460,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     import_follows_parser.add_argument("--limit", required=False, type=int, default=200, help="Maximum follows to import")
 
+    stage_follows_parser = sub.add_parser(
+        "stage-follows",
+        help="Import follows/subscriptions into onboarding review queue before creating the first subject",
+    )
+    stage_follows_parser.add_argument(
+        "--platform",
+        required=True,
+        choices=["x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts"],
+        help="Platform",
+    )
+    stage_follows_parser.add_argument("--limit", required=False, type=int, default=200, help="Maximum follows to stage")
+
+    sub.add_parser("list-staged-sources", help="List pending onboarding sources before subject confirmation")
+
+    remove_staged_parser = sub.add_parser("remove-staged-source", help="Remove one source from onboarding review")
+    remove_staged_parser.add_argument("--id", required=True, type=int, help="Staged source id")
+
+    confirm_staged_parser = sub.add_parser(
+        "confirm-staged-sources",
+        help="Create first subject and attach pending onboarding sources",
+    )
+    confirm_staged_parser.add_argument("--subject", required=True, help="Subject name")
+    confirm_staged_parser.add_argument("--include", action="append", default=[], help="Include term (repeatable)")
+    confirm_staged_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
+    confirm_staged_parser.add_argument("--high-quality", required=False, help="High quality examples/notes")
+
     login_parser = sub.add_parser("login", help="Open browser login flow and persist session profile")
     login_parser.add_argument(
         "--platform",
@@ -371,6 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Platform",
     )
     login_parser.add_argument("--url", required=False, help="Custom login URL")
+    login_parser.add_argument(
+        "--wait-until-closed",
+        action="store_true",
+        help="For desktop onboarding: store session after the user closes the login browser window",
+    )
 
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
     sub.add_parser("run-digest-once", help="Run digest sending once")
@@ -469,9 +597,41 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"Imported {count} follows into subject '{args.subject}' from {args.platform}.")
         return
 
+    if args.command == "stage-follows":
+        app = PCCAApp(settings=settings)
+        count = asyncio.run(app.stage_follows_once(platform=args.platform, limit=args.limit))
+        print(f"Staged {count} source(s) from {args.platform} for onboarding review.")
+        return
+
+    if args.command == "list-staged-sources":
+        asyncio.run(_list_staged_sources(settings))
+        return
+
+    if args.command == "remove-staged-source":
+        asyncio.run(_remove_staged_source(settings, source_id=args.id))
+        return
+
+    if args.command == "confirm-staged-sources":
+        asyncio.run(
+            _confirm_staged_sources(
+                settings,
+                subject=args.subject,
+                include_terms=args.include,
+                exclude_terms=args.exclude,
+                high_quality_examples=args.high_quality,
+            )
+        )
+        return
+
     if args.command == "login":
         app = PCCAApp(settings=settings)
-        asyncio.run(app.login_platform_once(platform=args.platform, login_url=args.url))
+        asyncio.run(
+            app.login_platform_once(
+                platform=args.platform,
+                login_url=args.url,
+                wait_for_enter=not args.wait_until_closed,
+            )
+        )
         return
 
     if args.command == "run-nightly-once":

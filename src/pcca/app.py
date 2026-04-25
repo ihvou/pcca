@@ -18,6 +18,7 @@ from pcca.repositories.digests import DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.items import ItemRepository
+from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.run_logs import RunLogRepository
@@ -197,7 +198,32 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def login_platform_once(self, *, platform: str, login_url: str | None = None) -> None:
+    async def stage_follows_once(self, *, platform: str, limit: int = 200) -> int:
+        await self.start(with_scheduler=False, with_telegram=False)
+        try:
+            if self.db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            imported = await self.follow_import_service.import_sources(platform=platform, limit=limit)
+            onboarding_repo = OnboardingRepository(conn=self.db.conn)
+            for source in imported:
+                await onboarding_repo.stage_source(
+                    platform=source.platform,
+                    account_or_channel_id=source.account_or_channel_id,
+                    display_name=source.display_name,
+                    raw_source=source.raw_source,
+                )
+            await onboarding_repo.update_state(current_step="sources_imported")
+            return len(imported)
+        finally:
+            await self.stop()
+
+    async def login_platform_once(
+        self,
+        *,
+        platform: str,
+        login_url: str | None = None,
+        wait_for_enter: bool = True,
+    ) -> None:
         self.settings.ensure_dirs()
         target_platform = platform.strip().lower()
         default_urls = {
@@ -222,15 +248,24 @@ class PCCAApp:
             headful_platforms={target_platform},
         )
         await manager.start()
+        page_closed = False
         try:
             page = await manager.new_page(target_platform)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(1000)
-            print(
-                f"Browser opened for {target_platform} login.\n"
-                "Complete login manually, then press Enter here to store session and continue."
-            )
-            await asyncio.to_thread(input, "")
+            if wait_for_enter:
+                print(
+                    f"Browser opened for {target_platform} login.\n"
+                    "Complete login manually, then press Enter here to store session and continue."
+                )
+                await asyncio.to_thread(input, "")
+            else:
+                print(
+                    f"Browser opened for {target_platform} login.\n"
+                    "Complete login manually, then close the browser window to store session and continue."
+                )
+                await page.wait_for_event("close", timeout=0)
+                page_closed = True
             activated = 0
             db = Database(path=self.settings.db_path)
             await db.connect()
@@ -247,6 +282,7 @@ class PCCAApp:
             print(f"Saved {target_platform} browser profile at: {self.settings.browser_profiles_dir / target_platform}")
             if activated:
                 print(f"Marked {activated} {target_platform} source(s) active after login.")
-            await page.close()
+            if not page_closed and not page.is_closed():
+                await page.close()
         finally:
             await manager.stop()

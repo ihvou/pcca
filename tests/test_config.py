@@ -20,5 +20,6 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     settings = Settings.from_env()
 
     assert settings.telegram_bot_token == "from-dotenv"
+    assert settings.timezone == "UTC"
     assert settings.browser_headful_platforms == {"x", "linkedin", "spotify"}
     assert settings.ollama_enabled is False

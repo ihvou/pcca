@@ -5,10 +5,22 @@ from dataclasses import dataclass, field
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
+from pcca.collectors.errors import SessionChallengedError
 from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 
 logger = logging.getLogger(__name__)
+
+
+def is_youtube_login_url(url: str) -> bool:
+    lowered = url.lower()
+    return (
+        "accounts.google.com" in lowered
+        or "/signin/" in lowered
+        or "youtube.com/signin" in lowered
+        or "service=youtube" in lowered
+        or "youtube.com/o/oauth" in lowered
+    )
 
 
 @dataclass
@@ -24,6 +36,14 @@ class YouTubeCollector:
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
+            current_url = page.url
+            if is_youtube_login_url(current_url):
+                raise SessionChallengedError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=current_url,
+                    challenge_kind="login_redirect",
+                )
             raw_videos = await page.evaluate(
                 """
                 (maxItems) => {

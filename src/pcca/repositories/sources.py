@@ -24,6 +24,7 @@ class SubjectSourceRow:
     display_name: str
     priority: int
     status: str
+    last_crawled_at: str | None
 
 
 @dataclass
@@ -192,7 +193,8 @@ class SourceRepository:
                   s.account_or_channel_id,
                   s.display_name,
                   ss.priority,
-                  ss.status
+                  ss.status,
+                  s.last_crawled_at
                 FROM subject_sources ss
                 JOIN sources s ON s.id = ss.source_id
                 WHERE ss.subject_id = ?
@@ -211,6 +213,7 @@ class SourceRepository:
                 display_name=row["display_name"],
                 priority=row["priority"],
                 status=row["status"],
+                last_crawled_at=row["last_crawled_at"],
             )
             for row in rows
         ]

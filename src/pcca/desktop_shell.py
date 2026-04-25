@@ -1,10 +1,49 @@
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
 import threading
 from dataclasses import dataclass, field
+from pathlib import Path
+
+
+def _env_value(key: str, default: str = "") -> str:
+    if key in os.environ:
+        return os.environ[key]
+    path = Path(".env")
+    if not path.exists():
+        return default
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#") or "=" not in raw_line:
+            continue
+        candidate_key, value = raw_line.split("=", 1)
+        if candidate_key.strip() == key:
+            return value.strip().strip("\"'")
+    return default
+
+
+def _write_env_values(values: dict[str, str]) -> None:
+    path = Path(".env")
+    existing = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    seen: set[str] = set()
+    output: list[str] = []
+    for raw_line in existing:
+        if not raw_line.strip() or raw_line.lstrip().startswith("#") or "=" not in raw_line:
+            output.append(raw_line)
+            continue
+        key, _ = raw_line.split("=", 1)
+        normalized_key = key.strip()
+        if normalized_key in values:
+            output.append(f"{normalized_key}={values[normalized_key]}")
+            seen.add(normalized_key)
+        else:
+            output.append(raw_line)
+    for key, value in values.items():
+        if key not in seen:
+            output.append(f"{key}={value}")
+    path.write_text("\n".join(output) + "\n", encoding="utf-8")
 
 
 def run_desktop_shell() -> None:
@@ -60,6 +99,39 @@ def run_desktop_shell() -> None:
 
             threading.Thread(target=_reader, daemon=True).start()
 
+        def run_cli_sequence(self, commands: list[tuple[str, ...]]) -> None:
+            def _runner() -> None:
+                for args in commands:
+                    cmd = [sys.executable, "-m", "pcca.cli", *args]
+                    self.write_log("$ " + " ".join(cmd))
+                    proc = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    assert proc.stdout is not None
+                    for line in proc.stdout:
+                        self.write_log(line)
+                    proc.wait()
+                    self.write_log(f"[exit {proc.returncode}] {' '.join(args)}")
+                    if proc.returncode:
+                        break
+
+            threading.Thread(target=_runner, daemon=True).start()
+
+        def save_runtime_settings(self, *, token: str, timezone: str, digest_time: str) -> None:
+            hour, minute = (digest_time.strip() or "08:30").split(":", 1)
+            values = {
+                "PCCA_TELEGRAM_BOT_TOKEN": token.strip(),
+                "PCCA_TIMEZONE": timezone.strip() or "UTC",
+                "PCCA_MORNING_CRON": f"{int(minute)} {int(hour)} * * *",
+            }
+            _write_env_values(values)
+            os.environ.update(values)
+            self.write_log("Saved runtime settings to .env.")
+
         def stop_agent(self) -> None:
             if self.agent_process is None:
                 self.write_log("No running agent process.")
@@ -94,38 +166,130 @@ def run_desktop_shell() -> None:
     state = ShellState(root=root, logs=logs_widget)
 
     # Onboarding tab
+    timezone_var = tk.StringVar(value=_env_value("PCCA_TIMEZONE", "UTC"))
+    digest_time_var = tk.StringVar(value="08:30")
+    telegram_token_var = tk.StringVar(value=_env_value("PCCA_TELEGRAM_BOT_TOKEN", ""))
+    onboard_platform_var = tk.StringVar(value="x")
+    onboard_limit_var = tk.StringVar(value="100")
+    staged_remove_id_var = tk.StringVar()
+    onboard_subject_var = tk.StringVar(value="Vibe Coding")
+    onboard_include_var = tk.StringVar()
+    onboard_exclude_var = tk.StringVar()
+    onboard_examples_var = tk.StringVar()
+
     ttk.Label(
         onboarding_tab,
         text=(
-            "Typical first-run flow:\n"
-            "1) Init DB\n"
-            "2) Create subject(s)\n"
-            "3) Connect account follows/subscriptions\n"
-            "4) Start agent\n"
-            "5) In Telegram use /read_content and /get_digest for on-demand tests"
+            "Scenario 1 first-run wizard\n"
+            "1) Save timezone, digest time, and individual Telegram bot token.\n"
+            "2) Start the local agent and verify Telegram with /start.\n"
+            "3) Open platform login windows and stage follows/subscriptions.\n"
+            "4) Review staged sources, remove noise, then create the first subject.\n"
+            "5) Run smoke crawl and send test digest."
         ),
         justify=tk.LEFT,
-    ).pack(anchor="w", pady=(0, 12))
+    ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 12))
 
-    controls_row = ttk.Frame(onboarding_tab)
-    controls_row.pack(fill=tk.X, pady=(0, 12))
-    ttk.Button(controls_row, text="Init DB", command=lambda: state.run_cli("init-db")).pack(side=tk.LEFT, padx=4)
+    ttk.Label(onboarding_tab, text="Timezone").grid(row=1, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=timezone_var, width=24).grid(row=1, column=1, sticky="ew", padx=6)
+    ttk.Label(onboarding_tab, text="Digest time").grid(row=1, column=2, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=digest_time_var, width=10).grid(row=1, column=3, sticky="w", padx=6)
+    ttk.Label(onboarding_tab, text="Telegram bot token").grid(row=2, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=telegram_token_var, width=72, show="*").grid(row=2, column=1, columnspan=3, sticky="ew", padx=6)
     ttk.Button(
-        controls_row,
+        onboarding_tab,
+        text="Save Runtime Settings",
+        command=lambda: state.save_runtime_settings(
+            token=telegram_token_var.get(),
+            timezone=timezone_var.get(),
+            digest_time=digest_time_var.get(),
+        ),
+    ).grid(row=2, column=4, padx=6, sticky="w")
+
+    ttk.Separator(onboarding_tab, orient=tk.HORIZONTAL).grid(row=3, column=0, columnspan=6, sticky="ew", pady=10)
+    ttk.Button(onboarding_tab, text="Init DB", command=lambda: state.run_cli("init-db")).grid(row=4, column=0, padx=4, sticky="w")
+    ttk.Button(
+        onboarding_tab,
         text="Start Agent",
         command=lambda: state.run_cli("run-agent", keep_process=True),
-    ).pack(side=tk.LEFT, padx=4)
-    ttk.Button(controls_row, text="Stop Agent", command=state.stop_agent).pack(side=tk.LEFT, padx=4)
+    ).grid(row=4, column=1, padx=4, sticky="w")
+    ttk.Button(onboarding_tab, text="Stop Agent", command=state.stop_agent).grid(row=4, column=2, padx=4, sticky="w")
+
+    ttk.Separator(onboarding_tab, orient=tk.HORIZONTAL).grid(row=5, column=0, columnspan=6, sticky="ew", pady=10)
+    ttk.Label(onboarding_tab, text="Platform").grid(row=6, column=0, sticky="w")
+    ttk.Combobox(
+        onboarding_tab,
+        textvariable=onboard_platform_var,
+        values=("x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts"),
+        width=14,
+        state="readonly",
+    ).grid(row=6, column=1, sticky="w", padx=6)
+    ttk.Label(onboarding_tab, text="Limit").grid(row=6, column=2, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=onboard_limit_var, width=8).grid(row=6, column=3, sticky="w", padx=6)
     ttk.Button(
-        controls_row,
-        text="Run Read Content Now",
-        command=lambda: state.run_cli("run-nightly-once"),
-    ).pack(side=tk.LEFT, padx=4)
+        onboarding_tab,
+        text="Open Login Window",
+        command=lambda: state.run_cli(
+            "login",
+            "--platform",
+            onboard_platform_var.get().strip(),
+            "--wait-until-closed",
+        ),
+    ).grid(row=6, column=4, padx=6, sticky="w")
     ttk.Button(
-        controls_row,
-        text="Run Get Digest Now",
-        command=lambda: state.run_cli("run-digest-once"),
-    ).pack(side=tk.LEFT, padx=4)
+        onboarding_tab,
+        text="Stage Follows",
+        command=lambda: state.run_cli(
+            "stage-follows",
+            "--platform",
+            onboard_platform_var.get().strip(),
+            "--limit",
+            onboard_limit_var.get().strip() or "100",
+        ),
+    ).grid(row=6, column=5, padx=6, sticky="w")
+
+    ttk.Separator(onboarding_tab, orient=tk.HORIZONTAL).grid(row=7, column=0, columnspan=6, sticky="ew", pady=10)
+    ttk.Button(onboarding_tab, text="List Staged Sources", command=lambda: state.run_cli("list-staged-sources")).grid(row=8, column=0, padx=4, sticky="w")
+    ttk.Label(onboarding_tab, text="Remove staged id").grid(row=8, column=1, sticky="e")
+    ttk.Entry(onboarding_tab, textvariable=staged_remove_id_var, width=8).grid(row=8, column=2, sticky="w", padx=6)
+    ttk.Button(
+        onboarding_tab,
+        text="Remove",
+        command=lambda: state.run_cli("remove-staged-source", "--id", staged_remove_id_var.get().strip()),
+    ).grid(row=8, column=3, padx=4, sticky="w")
+
+    ttk.Separator(onboarding_tab, orient=tk.HORIZONTAL).grid(row=9, column=0, columnspan=6, sticky="ew", pady=10)
+    ttk.Label(onboarding_tab, text="First subject").grid(row=10, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=onboard_subject_var, width=28).grid(row=10, column=1, sticky="ew", padx=6)
+    ttk.Label(onboarding_tab, text="Include").grid(row=11, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=onboard_include_var, width=60).grid(row=11, column=1, columnspan=4, sticky="ew", padx=6)
+    ttk.Label(onboarding_tab, text="Exclude").grid(row=12, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=onboard_exclude_var, width=60).grid(row=12, column=1, columnspan=4, sticky="ew", padx=6)
+    ttk.Label(onboarding_tab, text="High-quality examples").grid(row=13, column=0, sticky="w")
+    ttk.Entry(onboarding_tab, textvariable=onboard_examples_var, width=60).grid(row=13, column=1, columnspan=4, sticky="ew", padx=6)
+
+    def _confirm_onboarding_sources() -> None:
+        args = ["confirm-staged-sources", "--subject", onboard_subject_var.get().strip()]
+        for term in [t.strip() for t in onboard_include_var.get().split(",") if t.strip()]:
+            args.extend(["--include", term])
+        for term in [t.strip() for t in onboard_exclude_var.get().split(",") if t.strip()]:
+            args.extend(["--exclude", term])
+        if onboard_examples_var.get().strip():
+            args.extend(["--high-quality", onboard_examples_var.get().strip()])
+        state.run_cli(*args)
+
+    ttk.Button(
+        onboarding_tab,
+        text="Create Subject + Confirm Sources",
+        command=_confirm_onboarding_sources,
+    ).grid(row=14, column=1, padx=6, pady=8, sticky="w")
+    ttk.Button(
+        onboarding_tab,
+        text="Smoke Crawl + Test Digest",
+        command=lambda: state.run_cli_sequence([("run-nightly-once",), ("run-digest-once",)]),
+    ).grid(row=14, column=2, padx=6, pady=8, sticky="w")
+    onboarding_tab.columnconfigure(1, weight=1)
+    onboarding_tab.columnconfigure(4, weight=1)
 
     # Subjects tab
     subject_name_var = tk.StringVar()
@@ -223,7 +387,12 @@ def run_desktop_shell() -> None:
     ttk.Button(
         actions_tab,
         text="Open Login Flow",
-        command=lambda: state.run_cli("login", "--platform", login_platform_var.get().strip()),
+        command=lambda: state.run_cli(
+            "login",
+            "--platform",
+            login_platform_var.get().strip(),
+            "--wait-until-closed",
+        ),
     ).grid(row=0, column=2, padx=6)
 
     ttk.Separator(actions_tab, orient=tk.HORIZONTAL).grid(row=1, column=0, columnspan=6, sticky="ew", pady=10)

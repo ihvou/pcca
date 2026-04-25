@@ -6,8 +6,18 @@ from dataclasses import dataclass
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
+from pcca.collectors.errors import SessionChallengedError
 
 logger = logging.getLogger(__name__)
+
+
+def is_spotify_login_url(url: str) -> bool:
+    lowered = url.lower()
+    return (
+        "accounts.spotify.com" in lowered
+        or "open.spotify.com/login" in lowered
+        or "/authorize" in lowered
+    )
 
 
 def normalize_spotify_show_source(source_id: str) -> str:
@@ -34,6 +44,14 @@ class SpotifyCollector:
         try:
             await page.goto(show_url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3200)
+            current_url = page.url
+            if is_spotify_login_url(current_url):
+                raise SessionChallengedError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=current_url,
+                    challenge_kind="login_redirect",
+                )
             raw_items = await page.evaluate(
                 """
                 (maxItems) => {

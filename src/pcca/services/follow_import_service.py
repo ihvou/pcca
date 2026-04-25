@@ -33,6 +33,14 @@ def normalize_youtube_subscription_href(href: str) -> str | None:
 
 
 @dataclass
+class ImportedFollowSource:
+    platform: str
+    account_or_channel_id: str
+    display_name: str
+    raw_source: str
+
+
+@dataclass
 class FollowImportService:
     session_manager: BrowserSessionManager
     source_service: SourceService
@@ -305,7 +313,7 @@ class FollowImportService:
         finally:
             await page.close()
 
-    async def import_to_subject(self, *, subject_name: str, platform: str, limit: int = 200) -> int:
+    async def import_sources(self, *, platform: str, limit: int = 200) -> list[ImportedFollowSource]:
         normalized_platform = platform.strip().lower()
         if normalized_platform == "x":
             imported = await self.import_x_follows(limit=limit)
@@ -325,50 +333,61 @@ class FollowImportService:
             supported = ", ".join(self.supported_platforms())
             raise ValueError(f"Supported platforms for follow import: {supported}")
 
-        linked = 0
+        out: list[ImportedFollowSource] = []
         for raw_source in imported:
-            linked += await self._link_imported_source(
+            out.extend(await self._normalize_imported_source(platform=normalized_platform, raw_source=raw_source))
+        return out
+
+    async def import_to_subject(self, *, subject_name: str, platform: str, limit: int = 200) -> int:
+        normalized_platform = platform.strip().lower()
+        imported = await self.import_sources(platform=normalized_platform, limit=limit)
+        linked = 0
+        for source in imported:
+            await self.source_service.add_source_to_subject(
                 subject_name=subject_name,
-                platform=normalized_platform,
-                raw_source=raw_source,
+                platform=source.platform,
+                account_or_channel_id=source.account_or_channel_id,
+                display_name=source.display_name,
+                priority=0,
             )
+            linked += 1
         logger.info("Imported %d %s follows into subject=%s", linked, normalized_platform, subject_name)
         return linked
 
-    async def _link_imported_source(self, *, subject_name: str, platform: str, raw_source: str) -> int:
+    async def _normalize_imported_source(self, *, platform: str, raw_source: str) -> list[ImportedFollowSource]:
         source_value = raw_source.strip()
         if not source_value:
-            return 0
+            return []
 
         # URL-backed platforms resolve into canonical source IDs (feed URLs for some platforms).
         if platform in {"substack", "medium", "apple_podcasts", "spotify"} and source_value.startswith(("http://", "https://")):
             discovered = await self.source_discovery.discover(source_value)
-            linked = 0
+            normalized: list[ImportedFollowSource] = []
             for row in discovered:
                 if row.platform != platform:
                     continue
-                await self.source_service.add_source_to_subject(
-                    subject_name=subject_name,
-                    platform=row.platform,
-                    account_or_channel_id=row.source_id,
-                    display_name=row.display_name,
-                    priority=0,
+                normalized.append(
+                    ImportedFollowSource(
+                        platform=row.platform,
+                        account_or_channel_id=row.source_id,
+                        display_name=row.display_name,
+                        raw_source=source_value,
+                    )
                 )
-                linked += 1
-            if linked:
-                return linked
+            if normalized:
+                return normalized
 
         display = source_value
         if platform == "linkedin":
             display = re.sub(r"^(in|company)/", "", source_value)
-        await self.source_service.add_source_to_subject(
-            subject_name=subject_name,
-            platform=platform,
-            account_or_channel_id=source_value,
-            display_name=display,
-            priority=0,
-        )
-        return 1
+        return [
+            ImportedFollowSource(
+                platform=platform,
+                account_or_channel_id=source_value,
+                display_name=display,
+                raw_source=source_value,
+            )
+        ]
 
     def _normalize_substack_url(self, href: str) -> str | None:
         parsed = urlparse(href.strip())

@@ -61,6 +61,7 @@ class TelegramService:
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(CommandHandler("help", self._on_help))
         app.add_handler(CommandHandler("setup", self._on_setup))
+        app.add_handler(CommandHandler("onboard", self._on_setup))
         app.add_handler(CommandHandler("read_content", self._on_read_content_command))
         app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
@@ -145,15 +146,15 @@ class TelegramService:
             return
         reauth_note = await self._format_reauth_sources()
         await update.message.reply_text(
-            "Setup flow:\n"
-            "1. Create subject: `Create subject: Agentic PM`\n"
-            "2. In the desktop app, open browser login flows for the platforms you use.\n"
-            "3. In the desktop app, import follows/subscriptions into the subject.\n"
-            "4. Optionally refine: `Refine Agentic PM: include claude code, releases; exclude biography`\n"
-            "5. Trigger collection now: `/read_content`\n"
-            "6. Trigger digest now: `/get_digest`\n\n"
-            "Connected-account login/import is available in app controls "
-            "for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
+            "Scenario 1 setup flow:\n"
+            "1. Open the desktop app and use the Onboarding tab.\n"
+            "2. Set timezone, digest time, and your Telegram bot token.\n"
+            "3. Start the local agent, then send `/start` here to verify Telegram.\n"
+            "4. In the desktop app, open browser login windows for the platforms you use.\n"
+            "5. Stage follows/subscriptions, review them, and create your first subject.\n"
+            "6. Click Smoke Crawl + Test Digest, or use `/read_content` then `/get_digest` here.\n\n"
+            "Connected-account onboarding is available for "
+            "X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
             f"{reauth_note}",
         )
 
@@ -162,6 +163,7 @@ class TelegramService:
             return
         await update.message.reply_text(
             "I can:\n"
+            "- restart guided onboarding (`/onboard`)\n"
             "- create/list subjects\n"
             "- list/remove imported sources\n"
             "- show/refine preferences per subject\n"

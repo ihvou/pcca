@@ -36,13 +36,14 @@ class DummyRSSCollector:
 
 
 class ChallengedCollector:
-    platform = "x"
+    def __init__(self, platform: str = "x") -> None:
+        self.platform = platform
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
         raise SessionChallengedError(
             platform=self.platform,
             source_id=source_id,
-            current_url="https://x.com/i/flow/login",
+            current_url=f"https://example.com/{self.platform}/login",
             challenge_kind="login_redirect",
         )
 
@@ -90,6 +91,54 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
         await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")
     ).fetchone()
     assert int(row["c"]) == 1
+    assert stats["items_scored"] == 1
+
+    second_stats = await orchestrator.run_nightly_collection()
+    assert second_stats["items_inserted"] == 0
+    assert second_stats["items_updated"] == 0
+    assert second_stats["items_scored"] == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["youtube", "spotify"])
+async def test_pipeline_marks_youtube_and_spotify_challenges_for_reauth(tmp_path: Path, platform: str) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding")
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform=platform,
+        account_or_channel_id="demo",
+        display_name="Demo",
+        priority=1,
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={platform: ChallengedCollector(platform)},
+    )
+    stats = await orchestrator.run_nightly_collection()
+    assert stats["sources_needing_reauth"] == 1
+    source = await source_repo.get_by_identity(platform=platform, account_or_channel_id="demo")
+    assert source is not None
+    assert source.follow_state == "needs_reauth"
+
+    activated = await source_service.mark_platform_active_after_login(platform)
+    assert activated == 1
 
     await db.close()
 

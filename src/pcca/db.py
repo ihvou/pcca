@@ -240,6 +240,42 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON subject_routes(chat_id, thread_id);
         """,
     ),
+    (
+        4,
+        """
+        CREATE TABLE IF NOT EXISTS onboarding_state (
+          id INTEGER PRIMARY KEY CHECK (id = 1),
+          current_step TEXT NOT NULL DEFAULT 'start',
+          timezone TEXT,
+          digest_time TEXT,
+          telegram_verified INTEGER NOT NULL DEFAULT 0,
+          subject_name TEXT,
+          include_terms_json TEXT NOT NULL DEFAULT '[]',
+          exclude_terms_json TEXT NOT NULL DEFAULT '[]',
+          high_quality_examples TEXT,
+          completed_at TEXT,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        INSERT INTO onboarding_state(id)
+        VALUES (1)
+        ON CONFLICT(id) DO NOTHING;
+
+        CREATE TABLE IF NOT EXISTS onboarding_imported_sources (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          platform TEXT NOT NULL,
+          account_or_channel_id TEXT NOT NULL,
+          display_name TEXT NOT NULL,
+          raw_source TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(platform, account_or_channel_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_onboarding_imported_sources_status
+          ON onboarding_imported_sources(status, platform);
+        """,
+    ),
 ]
 
 

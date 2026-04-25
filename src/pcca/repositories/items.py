@@ -17,6 +17,7 @@ class ItemRepository:
         inserted = 0
         updated = 0
         item_ids: list[int] = []
+        changed_item_ids: list[int] = []
         for item in items:
             content_hash = self._content_hash(item)
             exists = await (
@@ -51,7 +52,9 @@ class ItemRepository:
                     ),
                 )
                 inserted += 1
-                item_ids.append(int(cursor.lastrowid))
+                item_id = int(cursor.lastrowid)
+                item_ids.append(item_id)
+                changed_item_ids.append(item_id)
             else:
                 effective_text = item.text if item.text and item.text.strip() else exists["raw_text"]
                 effective_transcript = (
@@ -102,10 +105,16 @@ class ItemRepository:
                         ),
                     )
                     updated += 1
+                    changed_item_ids.append(int(exists["id"]))
                 item_ids.append(int(exists["id"]))
 
         await self.conn.commit()
-        return {"inserted": inserted, "updated": updated, "item_ids": item_ids}
+        return {
+            "inserted": inserted,
+            "updated": updated,
+            "item_ids": item_ids,
+            "changed_item_ids": changed_item_ids,
+        }
 
     def _content_hash(self, item: CollectedItem) -> str:
         return self._content_hash_values(

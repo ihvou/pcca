@@ -80,13 +80,14 @@ class ItemScoreRepository:
                   json_extract(s.rationale_json, '$.reason') AS rationale
                 FROM item_scores s
                 JOIN items i ON i.id = s.item_id
+                LEFT JOIN (
+                  SELECT di.item_id
+                  FROM digest_items di
+                  JOIN digests d ON d.id = di.digest_id
+                  WHERE d.subject_id = ?
+                ) sent ON sent.item_id = i.id
                 WHERE s.subject_id = ?
-                  AND i.id NOT IN (
-                    SELECT di.item_id
-                    FROM digest_items di
-                    JOIN digests d ON d.id = di.digest_id
-                    WHERE d.subject_id = ?
-                  )
+                  AND sent.item_id IS NULL
                 ORDER BY s.final_score DESC
                 LIMIT ?
                 """,

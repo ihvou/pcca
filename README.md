@@ -38,9 +38,11 @@ pcca run-desktop
 ```
 
 Use the desktop shell to:
-- start the agent
-- open browser login flows
-- import follows/subscriptions into a subject
+- save timezone, digest time, and Telegram bot token
+- start the local agent
+- open browser login windows
+- stage follows/subscriptions for review
+- create the first subject from staged sources
 - trigger read/digest runs
 
 CLI one-shot jobs are available for developer/debug use:
@@ -66,28 +68,30 @@ pcca-desktop
 
 ## Real Scenario Testing (User Flow)
 
-1. Start agent:
+1. Launch desktop onboarding:
 
 ```bash
-# in .env first
-PCCA_TELEGRAM_BOT_TOKEN=<your_bot_token>
-pcca run-agent
+pcca run-desktop
 ```
 
-2. In Telegram create the subject:
-- `/setup`
-- `Create subject: Agentic PM`
-- `Refine Agentic PM: include claude code, releases; exclude biography`
-- `Show preferences for Agentic PM`
+2. In the Onboarding tab:
+- paste your Telegram bot token and save runtime settings
+- click `Init DB`
+- click `Start Agent`
 
-3. In the desktop shell:
-- open login flow for X, LinkedIn, YouTube, or another platform you want to test
-- complete login in the browser window
-- import follows/subscriptions into `Agentic PM`
+3. In Telegram:
+- open your bot chat and send `/start`
+- optionally send `/setup` or `/onboard` to see the guided checklist
 
-4. Back in Telegram:
-- `/read_content` (same as nightly read now)
-- `/get_digest` (same as scheduled digest now)
+4. Back in the Onboarding tab:
+- open login windows for the platforms you want to test
+- stage follows/subscriptions
+- review staged sources
+- create the first subject with include/exclude/high-quality notes
+- click `Smoke Crawl + Test Digest`
+
+5. In Telegram:
+- confirm the digest arrives
 - use `👍 / 👎 / 🔖` on digest messages
 
 ## Scenario 1 Walkthrough (Install / Launch / Initial Config)
@@ -106,38 +110,36 @@ cp .env.example .env
 # set PCCA_TELEGRAM_BOT_TOKEN in .env
 ```
 
-2. Initialize and start runtime
+2. Launch the desktop onboarding shell
 
 ```bash
-pcca init-db
-pcca run-agent
+pcca run-desktop
 ```
 
-3. Connect Telegram and create first subject
-- Open your bot chat in Telegram and send:
-  - `/start`
-  - `Create subject: Agentic PM`
+3. Complete the Onboarding tab
+- Set timezone and digest time.
+- Paste your individual Telegram bot token and click `Save Runtime Settings`.
+- Click `Init DB`, then `Start Agent`.
+- Open your bot chat in Telegram and send `/start`.
 
-4. Connect account sessions in the desktop shell
-- Open the `Actions` tab.
-- Choose a platform (for example `x`, `linkedin`, or `youtube`).
-- Click `Open Login Flow`.
-- Complete login in the browser window.
+4. Connect account sessions
+- In the Onboarding tab, choose a platform.
+- Click `Open Login Window`.
+- Complete login in the browser window, then close that browser window.
 - Repeat for each platform you want included in the smoke test.
 
-5. Import follows/subscriptions from connected accounts
-- In the `Actions` tab, enter subject `Agentic PM`.
-- Choose the platform you just logged into.
-- Click `Import Follows`.
-- Repeat for each connected platform.
+5. Stage and review follows/subscriptions
+- For each connected platform, click `Stage Follows`.
+- Click `List Staged Sources`.
+- Remove obvious noise by staged source id if needed.
 
-6. Review imported sources
-- Open the `Sources` tab.
-- List sources for `Agentic PM`.
-- Remove obvious noise if needed.
+6. Create the first subject
+- Enter the subject name, include terms, exclude terms, and high-quality examples.
+- Click `Create Subject + Confirm Sources`.
 
 7. Trigger first read + first digest immediately
-- In Telegram:
+- Click `Smoke Crawl + Test Digest`.
+- Or use Telegram:
   - `/read_content`
   - `/get_digest`
 

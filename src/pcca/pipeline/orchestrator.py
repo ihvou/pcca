@@ -40,6 +40,7 @@ class PipelineOrchestrator:
             "sources_crawled": 0,
             "sources_needing_reauth": 0,
             "collector_errors": 0,
+            "items_scored": 0,
         }
         try:
             subjects = await self.subject_service.list_subjects()
@@ -93,8 +94,11 @@ class PipelineOrchestrator:
                             upsert_stats = await self.item_repo.upsert_many(items)
                             stats["items_inserted"] += upsert_stats["inserted"]
                             stats["items_updated"] += upsert_stats["updated"]
+                            changed_item_ids = set(upsert_stats.get("changed_item_ids", []))
 
                             for item, item_id in zip(items, upsert_stats["item_ids"]):
+                                if item_id not in changed_item_ids:
+                                    continue
                                 scored = self.curation_engine.score(
                                     subject.name,
                                     item,
@@ -124,6 +128,7 @@ class PipelineOrchestrator:
                                     final_score=scored.final_score,
                                     rationale=scored.rationale,
                                 )
+                                stats["items_scored"] += 1
                     except SessionChallengedError as exc:
                         await self.source_service.mark_source_needs_reauth(source.source_id)
                         stats["sources_needing_reauth"] += 1

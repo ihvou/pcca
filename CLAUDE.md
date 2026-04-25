@@ -75,7 +75,7 @@ Skipping any of these creates the silent platform-mismatch class of bug that alr
 
 **Tests** live in `tests/`. Async tests use `pytest-asyncio`. Prefer integration tests against an on-disk tmpfile SQLite for repositories; mock only external IO (HTTP, Playwright page).
 
-**Before a PR**: `pytest` must pass. Don't create commits unless the user explicitly asks.
+**Before a PR**: `pytest` from the repo root must pass without setting `PYTHONPATH`. Don't create commits unless the user explicitly asks.
 
 ---
 

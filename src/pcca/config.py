@@ -59,7 +59,7 @@ class Settings:
         ollama_enabled_raw = (_env("PCCA_OLLAMA_ENABLED", "false") or "false").strip().lower()
         ollama_enabled = ollama_enabled_raw in {"1", "true", "yes", "on"}
         return cls(
-            timezone=_env("PCCA_TIMEZONE", "Asia/Makassar") or "Asia/Makassar",
+            timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
             morning_cron=_env("PCCA_MORNING_CRON", "30 8 * * *") or "30 8 * * *",
             data_dir=data_dir,
