@@ -94,6 +94,29 @@ One file per platform:
 
 All implement the `Collector` Protocol in `base.py`.
 
+#### 4.5.1 Platform Matrix
+
+How each supported platform is reached for two distinct operations: importing the user's existing follows / subscriptions, and collecting new content from those follows.
+
+| Platform | Follows / subscriptions import | Content collection |
+|---|---|---|
+| X (Twitter) | Browser scrape — logged-in `/{handle}/following` (`FollowImportService.import_x_follows`) | Browser scrape — logged-in `/{handle}` profile timeline (`XCollector`) |
+| LinkedIn | Browser scrape — logged-in `/feed/following/` (`FollowImportService.import_linkedin_follows`) | Browser scrape — logged-in `/in/{user}/recent-activity/all/` or `/company/{slug}/posts/` (`LinkedInCollector`) |
+| YouTube | Browser scrape — logged-in `/feed/channels` (`FollowImportService.import_youtube_subscriptions`) | Browser scrape — public `/{handle}/videos` list (`YouTubeCollector`) + `youtube-transcript-api` HTTP for captions (`YouTubeTranscriptService`) |
+| Reddit | N/A — user supplies subreddits / users by name | Public JSON API — `https://www.reddit.com/r/{sub}/new.json` and `/user/{u}/submitted.json`, no auth (`RedditCollector` via `httpx`) |
+| Spotify (podcasts) | Browser scrape — logged-in `/collection/podcasts` (`FollowImportService.import_spotify_podcast_follows`) | Browser scrape — `open.spotify.com/show/{id}` (`SpotifyCollector`) |
+| Apple Podcasts | Browser scrape — logged-in `podcasts.apple.com/library/shows` (`FollowImportService.import_apple_podcast_subscriptions`) | RSS — feed URL discovered via iTunes lookup API (`SourceDiscoveryService._lookup_apple_podcast_feed`), parsed by `feedparser` (`RSSCollector` aliased as `apple_podcasts`) |
+| Substack | Browser scrape — logged-in `substack.com/settings` (`FollowImportService.import_substack_subscriptions`) | RSS — `{publication}.substack.com/feed`, parsed by `feedparser` (`RSSCollector` aliased as `substack`) |
+| Medium | Browser scrape — logged-in `medium.com/me/following` (`FollowImportService.import_medium_following`) | RSS — `medium.com/feed/{handle-or-publication}`, parsed by `feedparser` (`RSSCollector` aliased as `medium`) |
+| Generic RSS / Atom | N/A — user supplies feed URLs directly | RSS — `feedparser` invoked via `asyncio.to_thread` (`RSSCollector`) |
+
+Notes:
+- Browser scraping uses persistent Playwright Chromium profiles per platform (see §4.4). Headful mode for X / LinkedIn (`PCCA_BROWSER_HEADFUL_PLATFORMS`); other platforms default to headless.
+- Login state is detected by URL pattern in `is_*_login_url()` helpers per browser collector; on detection the collector raises `SessionChallengedError`, the orchestrator marks `sources.follow_state='needs_reauth'`, and the user is prompted in `/setup`.
+- For RSS-bridged platforms (Apple Podcasts, Substack, Medium) login is required only for the follows import pass; subsequent content collection is unauthenticated RSS.
+- Reddit and Generic RSS are the only platforms with no logged-in dependency in either column; they are the safest first sources for Scenario 1 smoke tests.
+- Adding a platform requires the five coordinated changes in [§13](#13-extension-points).
+
 ### 4.6 Extraction Layer
 Currently inline in each collector. Deterministic DOM extractors first; structured fallback deferred. Normalizes into `CollectedItem` (see [§5](#5-data-model)).
 

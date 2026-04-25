@@ -63,6 +63,51 @@ class RoutingRepository:
             for row in rows
         ]
 
+    async def link_chat_to_all_subjects(self, chat_id: int) -> int:
+        """Insert default-thread routes for every active subject not already routed to this chat.
+
+        Returns the number of new routes created.
+        """
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO subject_routes(subject_id, chat_id, thread_id)
+            SELECT s.id, ?, ''
+            FROM subjects s
+            WHERE s.status = 'active'
+              AND NOT EXISTS (
+                SELECT 1 FROM subject_routes sr
+                WHERE sr.subject_id = s.id
+                  AND sr.chat_id = ?
+                  AND sr.thread_id = ''
+              )
+            """,
+            (chat_id, chat_id),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
+    async def link_subject_to_all_chats(self, subject_id: int) -> int:
+        """Insert default-thread routes for every registered chat not already routed to this subject.
+
+        Returns the number of new routes created.
+        """
+        cursor = await self.conn.execute(
+            """
+            INSERT INTO subject_routes(subject_id, chat_id, thread_id)
+            SELECT ?, t.chat_id, ''
+            FROM telegram_chats t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM subject_routes sr
+                WHERE sr.subject_id = ?
+                  AND sr.chat_id = t.chat_id
+                  AND sr.thread_id = ''
+              )
+            """,
+            (subject_id, subject_id),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
     async def resolve_subject_for_chat(
         self,
         *,

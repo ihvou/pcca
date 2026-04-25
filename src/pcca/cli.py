@@ -39,9 +39,17 @@ async def _create_subject(settings: Settings, name: str, thread_id: str | None) 
     try:
         if db.conn is None:
             raise RuntimeError("Database connection unavailable.")
-        service = SubjectService(repository=SubjectRepository(conn=db.conn))
-        subject = await service.create_subject(name, telegram_thread_id=thread_id)
+        subject_repo = SubjectRepository(conn=db.conn)
+        subject_service = SubjectService(repository=subject_repo)
+        subject = await subject_service.create_subject(name, telegram_thread_id=thread_id)
+        routing_service = RoutingService(
+            routing_repo=RoutingRepository(conn=db.conn),
+            subject_repo=subject_repo,
+        )
+        new_routes = await routing_service.ensure_routes_for_subject(subject_name=subject.name)
         print(f"Subject ready: {subject.name} (id={subject.id})")
+        if new_routes:
+            print(f"Linked subject to {new_routes} registered Telegram chat(s).")
     finally:
         await db.close()
 
@@ -375,6 +383,11 @@ async def _confirm_staged_sources(
                 include_terms=include_terms,
                 exclude_terms=exclude_terms,
             )
+        routing_service = RoutingService(
+            routing_repo=RoutingRepository(conn=db.conn),
+            subject_repo=subject_repo,
+        )
+        new_routes = await routing_service.ensure_routes_for_subject(subject_name=created.name)
         await onboarding_repo.update_state(
             current_step="completed",
             subject_name=created.name,
@@ -384,6 +397,13 @@ async def _confirm_staged_sources(
             completed=True,
         )
         print(f"Created subject '{created.name}' and confirmed {len(staged)} staged source(s).")
+        if new_routes:
+            print(f"Linked subject to {new_routes} registered Telegram chat(s) for digest delivery.")
+        else:
+            print(
+                "No Telegram chat is registered yet. Send /start to your bot in Telegram "
+                "to complete digest routing."
+            )
     finally:
         await db.close()
 

@@ -130,13 +130,19 @@ class TelegramService:
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
-        await self.routing_service.register_chat(
+        new_routes = await self.routing_service.ensure_routes_for_chat(
             chat_id=update.effective_chat.id,
             title=update.effective_chat.title or update.effective_chat.full_name,
         )
+        connect_note = (
+            f"\nLinked {new_routes} existing subject(s) to this chat for digest delivery."
+            if new_routes
+            else ""
+        )
         await update.message.reply_text(
             "PCCA is connected.\n"
-            "Use /setup for guided onboarding, or send free-form commands.",
+            "Use /setup for guided onboarding, or send free-form commands."
+            + connect_note,
             reply_markup=self._quick_actions_reply_keyboard(),
         )
         await self._send_quick_actions(update.message)
@@ -188,7 +194,7 @@ class TelegramService:
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
             return
-        await self.routing_service.register_chat(
+        await self.routing_service.ensure_routes_for_chat(
             chat_id=update.effective_chat.id,
             title=update.effective_chat.title or update.effective_chat.full_name,
         )
