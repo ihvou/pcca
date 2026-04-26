@@ -285,14 +285,55 @@ class BrowserSessionManager:
         return page
 
     async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
-        """Import cookies captured from the user's real browser into PCCA's profile."""
+        """Import cookies captured from the user's real browser into PCCA's profile.
+
+        After `add_cookies` we navigate the context to the primary cookie domain.
+        Without this navigation step, Playwright's persistent-context cookie state
+        does not reliably flush to the on-disk `Cookies` SQLite file when launched
+        with `channel="chrome"` — meaning the next BrowserSessionManager that
+        opens the same profile (e.g. the scraper subprocess) sees no auth cookies
+        and the page lands on the logged-out home view. The visit forces Chrome
+        to commit the in-memory cookie jar to the persistent profile.
+        """
         if not cookies:
             return 0
         context = await self.get_context(platform)
         await context.add_cookies(cookies)
+
+        primary_domain = next(
+            (
+                str(cookie.get("domain", "")).lstrip(".")
+                for cookie in cookies
+                if cookie.get("domain")
+            ),
+            None,
+        )
+        if primary_domain:
+            page = await context.new_page()
+            try:
+                await page.goto(
+                    f"https://{primary_domain}/",
+                    wait_until="domcontentloaded",
+                    timeout=30000,
+                )
+                # Brief settle so Chrome's network process flushes the cookie
+                # jar into Network/Cookies before we close the context.
+                await page.wait_for_timeout(800)
+            except Exception:
+                logger.debug(
+                    "Cookie warm-up navigation to %s failed; cookies may not flush "
+                    "to the persistent profile.",
+                    primary_domain,
+                    exc_info=True,
+                )
+            finally:
+                if not page.is_closed():
+                    await page.close()
+
         logger.info(
-            "Injected %d captured cookie(s) into platform=%s profile.",
+            "Injected %d captured cookie(s) into platform=%s profile (domain=%s).",
             len(cookies),
             platform,
+            primary_domain or "<unknown>",
         )
         return len(cookies)

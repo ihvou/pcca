@@ -58,13 +58,33 @@ class FollowImportService:
             profile_href = await page.evaluate(
                 """
                 () => {
-                  const a = document.querySelector('a[data-testid="AppTabBar_Profile_Link"]');
-                  return a ? a.getAttribute("href") : null;
+                  // Try several selectors X has used over time so a UI tweak
+                  // doesn't immediately break follow import.
+                  const candidates = [
+                    'a[data-testid="AppTabBar_Profile_Link"]',
+                    'a[aria-label="Profile"][href^="/"]',
+                    'nav a[href^="/"][role="link"][data-testid$="Profile_Link"]',
+                  ];
+                  for (const sel of candidates) {
+                    const a = document.querySelector(sel);
+                    if (a && a.getAttribute("href")) return a.getAttribute("href");
+                  }
+                  return null;
                 }
                 """
             )
             if not profile_href:
-                raise RuntimeError("Could not detect own X profile handle. Ensure session is logged in.")
+                landing_url = page.url
+                hint = (
+                    "Capture your X session via the wizard's 'Capture Session' button "
+                    "(not 'Dev Login (Old)') before clicking Stage Follows. If you did "
+                    "capture, your saved cookies may have expired — re-log into x.com in "
+                    "your browser, then run Capture Session again."
+                )
+                raise RuntimeError(
+                    f"Could not detect own X profile handle. Page settled at {landing_url}. "
+                    f"This usually means PCCA's profile is not logged in. {hint}"
+                )
 
             own_handle = profile_href.strip("/").split("/")[-1]
             await page.goto(f"https://x.com/{own_handle}/following", wait_until="domcontentloaded", timeout=60000)
