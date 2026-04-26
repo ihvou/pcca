@@ -71,8 +71,8 @@ The **taste model** (subject preferences + feedback-derived signals) sits across
 
 Each module is one directory under `src/pcca/`. Dependencies flow downward: collectors depend on nothing in this list; `app.py` depends on everything.
 
-### 4.1 Desktop Shell (`desktop_shell.py`)
-Installer-adjacent, tray/menu control, first-run wizard, logs viewer. Minimal in v1.
+### 4.1 Desktop Shell (`desktop_shell.py`, `desktop_web/`)
+Installer-adjacent first-run wizard, logs viewer, and local controls. The shell is a PyWebView native window backed by a token-protected web UI served on `127.0.0.1:<random-port>`. Business actions run through `DesktopCommandService` so CLI and desktop flows share the same implementation.
 
 ### 4.2 Agent Core (`app.py`, `__main__.py`, `__init__.py`)
 Main process runtime, lifecycle management, dependency wiring. `PCCAApp` is the composition root.
@@ -81,7 +81,10 @@ Main process runtime, lifecycle management, dependency wiring. `PCCAApp` is the 
 Nightly crawl, morning digest, weekly reflection, discovery jobs. Wake-aware and catch-up on resume (task T-18). Uses APScheduler `AsyncIOScheduler`.
 
 ### 4.4 Browser Session Manager (`browser/session_manager.py`)
-Playwright persistent profiles per platform. Session health checks. `needs_reauth` flagging (task T-1).
+Playwright persistent profiles per platform. Session cookies are captured from the user's normal browser and injected into these profiles; PCCA does not drive anti-bot-protected login/OAuth flows. Browser-channel stealth/orphan cleanup remains useful for scraping, not login. Session health checks. `needs_reauth` flagging (task T-1).
+
+### 4.4.1 Session Capture Service (`services/session_capture_service.py`)
+Reads platform auth cookies from supported local browser stores with explicit user action, then injects them into the matching PCCA Playwright profile. T-37A implements the first vertical slice: X cookies from macOS Chromium-family browsers (Chrome/Arc/Brave/Edge). Raw cookie values are never logged or written into PCCA's SQLite DB.
 
 ### 4.5 Source Collectors (`collectors/`)
 One file per platform:
@@ -100,7 +103,7 @@ How each supported platform is reached for two distinct operations: importing th
 
 | Platform | Follows / subscriptions import | Content collection |
 |---|---|---|
-| X (Twitter) | Browser scrape — logged-in `/{handle}/following` (`FollowImportService.import_x_follows`) | Browser scrape — logged-in `/{handle}` profile timeline (`XCollector`) |
+| X (Twitter) | Session capture from user's browser, then browser scrape — logged-in `/{handle}/following` (`FollowImportService.import_x_follows`) | Browser scrape — logged-in `/{handle}` profile timeline (`XCollector`) |
 | LinkedIn | Browser scrape — logged-in `/feed/following/` (`FollowImportService.import_linkedin_follows`) | Browser scrape — logged-in `/in/{user}/recent-activity/all/` or `/company/{slug}/posts/` (`LinkedInCollector`) |
 | YouTube | Browser scrape — logged-in `/feed/channels` (`FollowImportService.import_youtube_subscriptions`) | Browser scrape — public `/{handle}/videos` list (`YouTubeCollector`) + `youtube-transcript-api` HTTP for captions (`YouTubeTranscriptService`) |
 | Reddit | N/A — user supplies subreddits / users by name | Public JSON API — `https://www.reddit.com/r/{sub}/new.json` and `/user/{u}/submitted.json`, no auth (`RedditCollector` via `httpx`) |
@@ -111,7 +114,7 @@ How each supported platform is reached for two distinct operations: importing th
 | Generic RSS / Atom | N/A — user supplies feed URLs directly | RSS — `feedparser` invoked via `asyncio.to_thread` (`RSSCollector`) |
 
 Notes:
-- Browser scraping uses persistent Playwright Chromium profiles per platform (see §4.4). Headful mode for X / LinkedIn (`PCCA_BROWSER_HEADFUL_PLATFORMS`); other platforms default to headless.
+- Browser scraping uses persistent Playwright Chromium profiles per platform (see §4.4). Sessions should be imported through `Session Capture Service` where supported; headful login windows are developer escape hatches only.
 - Login state is detected by URL pattern in `is_*_login_url()` helpers per browser collector; on detection the collector raises `SessionChallengedError`, the orchestrator marks `sources.follow_state='needs_reauth'`, and the user is prompted in `/setup`.
 - For RSS-bridged platforms (Apple Podcasts, Substack, Medium) login is required only for the follows import pass; subsequent content collection is unauthenticated RSS.
 - Reddit and Generic RSS are the only platforms with no logged-in dependency in either column; they are the safest first sources for Scenario 1 smoke tests.

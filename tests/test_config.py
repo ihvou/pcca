@@ -22,4 +22,14 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     assert settings.telegram_bot_token == "from-dotenv"
     assert settings.timezone == "UTC"
     assert settings.browser_headful_platforms == {"x", "linkedin", "spotify"}
+    assert settings.browser_channel == "chrome"
     assert settings.ollama_enabled is False
+
+
+def test_browser_channel_can_use_bundled_chromium(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("PCCA_BROWSER_CHANNEL=bundled\n", encoding="utf-8")
+
+    settings = Settings.from_env()
+
+    assert settings.browser_channel == "bundled"

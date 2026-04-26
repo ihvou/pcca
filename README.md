@@ -17,7 +17,7 @@ Phase-1 functional foundation is in place:
 - unified source flow for X/LinkedIn/YouTube/Substack/reddit/Spotify/Apple Podcasts/Medium
 - collectors: X, LinkedIn, YouTube, Substack, Reddit, Spotify, Apple Podcasts, Medium, RSS
 - free-form Telegram commands (+ on-demand run controls)
-- minimal desktop shell for non-terminal onboarding/control
+- PyWebView desktop onboarding wizard for non-terminal setup/control
 
 ## Quick Start
 
@@ -30,17 +30,19 @@ playwright install chromium
 cp .env.example .env
 ```
 
-Initialize DB and launch the desktop shell:
+Install Google Chrome if it is not already installed, or set `PCCA_BROWSER_CHANNEL=bundled` to use Playwright Chromium for PCCA's own scraping profile. PCCA can capture X sessions from Chrome/Arc/Brave/Edge browser stores, then inject cookies into its local Playwright profile; it should not drive X/Google/LinkedIn login flows itself.
+
+Initialize DB and launch the desktop wizard:
 
 ```bash
 pcca init-db
 pcca run-desktop
 ```
 
-Use the desktop shell to:
+Use the desktop wizard to:
 - save timezone, digest time, and Telegram bot token
 - start the local agent
-- open browser login windows
+- capture sessions from your normal browser
 - stage follows/subscriptions for review
 - create the first subject from staged sources
 - trigger read/digest runs
@@ -58,7 +60,7 @@ Run the long-lived agent:
 pcca run-agent
 ```
 
-Run desktop shell (UI):
+Run desktop wizard (UI):
 
 ```bash
 pcca run-desktop
@@ -74,17 +76,17 @@ pcca-desktop
 pcca run-desktop
 ```
 
-2. In the Onboarding tab:
+2. In the desktop wizard:
 - paste your Telegram bot token and save runtime settings
 - click `Init DB`
 - click `Start Agent`
 
 3. In Telegram:
 - open your bot chat and send `/start`
-- optionally send `/setup` or `/onboard` to see the guided checklist
+- optionally send `/setup` to see the guided checklist
 
-4. Back in the Onboarding tab:
-- open login windows for the platforms you want to test
+4. Back in the desktop wizard:
+- capture sessions from the browser where you are already logged in
 - stage follows/subscriptions
 - review staged sources
 - create the first subject with include/exclude/high-quality notes
@@ -107,31 +109,32 @@ pip install -U pip setuptools wheel
 pip install -e ".[dev]"
 playwright install chromium
 cp .env.example .env
-# set PCCA_TELEGRAM_BOT_TOKEN in .env
 ```
 
-2. Launch the desktop onboarding shell
+2. Launch the desktop onboarding wizard
 
 ```bash
 pcca run-desktop
 ```
 
-3. Complete the Onboarding tab
+3. Complete the desktop wizard
 - Set timezone and digest time.
 - Paste your individual Telegram bot token and click `Save Runtime Settings`.
 - Click `Init DB`, then `Start Agent`.
 - Open your bot chat in Telegram and send `/start`.
 
 4. Connect account sessions
-- In the Onboarding tab, choose a platform.
-- Click `Open Login Window`.
-- Complete login in the browser window, then close that browser window.
+- In the desktop wizard, choose a platform.
+- Log into that platform in your normal browser first.
+- Choose the browser in the wizard.
+- Click `Capture Session`.
+- For the current vertical slice, X session capture is implemented first; other platform capture follows in T-37C.
 - Repeat for each platform you want included in the smoke test.
 
 5. Stage and review follows/subscriptions
 - For each connected platform, click `Stage Follows`.
-- Click `List Staged Sources`.
-- Remove obvious noise by staged source id if needed.
+- Click `Refresh Sources` if the review list does not update immediately.
+- Remove obvious noise with the `Remove` buttons if needed.
 
 6. Create the first subject
 - Enter the subject name, include terms, exclude terms, and high-quality examples.
@@ -149,16 +152,23 @@ pcca run-desktop
   - `List sources for Agentic PM`
 - You receive digest in Telegram with action buttons.
 
-## Browser Login + Follow Import
+## Session Capture + Follow Import
+
+PCCA does not ask you to log into X through an automated browser. Instead:
+- log into X in your normal browser
+- run capture from the desktop wizard or CLI
+- PCCA injects the captured cookies into `.pcca/browser_profiles/x`
+- follow import and scraping use that local PCCA profile afterward
+
+Current capture support:
+- X from Chrome / Arc / Brave / Edge on macOS Chromium cookie stores
+- cookies are copied into the PCCA browser profile; raw cookie values are not printed or stored in the PCCA SQLite DB
+- Safari / Firefox and more platforms are tracked in T-38 / T-37C
 
 ```bash
-pcca login --platform x
-pcca login --platform linkedin
-pcca login --platform youtube
-pcca login --platform substack
-pcca login --platform medium
-pcca login --platform spotify
-pcca login --platform apple_podcasts
+pcca capture-session --platform x --browser chrome
+# or
+pcca capture-session --platform x --browser arc
 
 pcca import-follows --subject "Vibe Coding" --platform x --limit 150
 pcca import-follows --subject "Vibe Coding" --platform linkedin --limit 150
@@ -209,4 +219,5 @@ If Ollama rerank is enabled, make sure the model exists locally.
 - X and LinkedIn collection require logged-in browser sessions.
 - YouTube collector fetches list pages and tries transcript extraction.
 - Voice note handler exists, but transcription backend is still placeholder.
-- `pcca run-desktop` requires `tkinter` support in your local Python installation.
+- `pcca run-desktop` uses PyWebView + a token-protected localhost web UI on macOS/Windows.
+- Linux desktop UI is intentionally deferred to T-35; use the CLI commands directly there for now.

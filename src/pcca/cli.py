@@ -19,6 +19,7 @@ from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
+from pcca.services.desktop_command_service import DesktopCommandService
 
 
 async def _init_db(settings: Settings) -> None:
@@ -506,7 +507,10 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_staged_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
     confirm_staged_parser.add_argument("--high-quality", required=False, help="High quality examples/notes")
 
-    login_parser = sub.add_parser("login", help="Open browser login flow and persist session profile")
+    login_parser = sub.add_parser(
+        "login",
+        help="Developer escape hatch: open the old automated browser login flow",
+    )
     login_parser.add_argument(
         "--platform",
         required=True,
@@ -520,10 +524,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="For desktop onboarding: store session after the user closes the login browser window",
     )
 
+    capture_session_parser = sub.add_parser(
+        "capture-session",
+        help="Capture a logged-in session from your normal browser and inject it into PCCA",
+    )
+    capture_session_parser.add_argument(
+        "--platform",
+        required=True,
+        choices=["x"],
+        help="Platform to capture. X is the first supported vertical slice.",
+    )
+    capture_session_parser.add_argument(
+        "--browser",
+        required=False,
+        choices=["chrome", "arc", "brave", "edge"],
+        help="Browser to read from. Defaults to first browser with required cookies.",
+    )
+
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
     sub.add_parser("run-digest-once", help="Run digest sending once")
     sub.add_parser("run-agent", help="Run scheduler + Telegram bot")
-    sub.add_parser("run-desktop", help="Run minimal desktop shell for onboarding/control")
+    sub.add_parser("run-desktop", help="Run desktop webview wizard for onboarding/control")
 
     return parser
 
@@ -534,8 +555,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     settings = Settings.from_env()
 
     if args.command == "init-db":
-        asyncio.run(_init_db(settings))
-        print(f"Database initialized at: {settings.db_path}")
+        result = asyncio.run(DesktopCommandService().init_db())
+        print(result.message)
         return
 
     if args.command == "create-subject":
@@ -618,29 +639,47 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "stage-follows":
-        app = PCCAApp(settings=settings)
-        count = asyncio.run(app.stage_follows_once(platform=args.platform, limit=args.limit))
-        print(f"Staged {count} source(s) from {args.platform} for onboarding review.")
+        result = asyncio.run(
+            DesktopCommandService().stage_follows(platform=args.platform, limit=args.limit)
+        )
+        print(result.message)
         return
 
     if args.command == "list-staged-sources":
-        asyncio.run(_list_staged_sources(settings))
+        result = asyncio.run(DesktopCommandService().list_staged_sources())
+        sources = result.data.get("sources", [])
+        if not sources:
+            print("No staged onboarding sources.")
+            return
+        for row in sources:
+            print(
+                f"{row['id']}\t{row['platform']}\t{row['account_or_channel_id']}\t"
+                f"{row['display_name']}\tstatus={row['status']}"
+            )
         return
 
     if args.command == "remove-staged-source":
-        asyncio.run(_remove_staged_source(settings, source_id=args.id))
+        result = asyncio.run(DesktopCommandService().remove_staged_source(source_id=args.id))
+        print(result.message)
         return
 
     if args.command == "confirm-staged-sources":
-        asyncio.run(
-            _confirm_staged_sources(
-                settings,
+        result = asyncio.run(
+            DesktopCommandService().confirm_staged_sources(
                 subject=args.subject,
                 include_terms=args.include,
                 exclude_terms=args.exclude,
                 high_quality_examples=args.high_quality,
             )
         )
+        print(result.message)
+        if result.data.get("new_routes"):
+            print(f"Linked subject to {result.data['new_routes']} registered Telegram chat(s) for digest delivery.")
+        else:
+            print(
+                "No Telegram chat is registered yet. Send /start to your bot in Telegram "
+                "to complete digest routing."
+            )
         return
 
     if args.command == "login":
@@ -652,6 +691,19 @@ def main(argv: Sequence[str] | None = None) -> None:
                 wait_for_enter=not args.wait_until_closed,
             )
         )
+        return
+
+    if args.command == "capture-session":
+        result = asyncio.run(
+            DesktopCommandService().capture_session(platform=args.platform, browser=args.browser)
+        )
+        print(result.message)
+        summary = result.data.get("session_capture", {})
+        if summary:
+            print(
+                "Captured cookies: "
+                f"{', '.join(summary.get('captured_cookie_names', [])) or '(none)'}"
+            )
         return
 
     if args.command == "run-nightly-once":

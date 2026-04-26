@@ -283,3 +283,16 @@ class BrowserSessionManager:
             ),
         )
         return page
+
+    async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
+        """Import cookies captured from the user's real browser into PCCA's profile."""
+        if not cookies:
+            return 0
+        context = await self.get_context(platform)
+        await context.add_cookies(cookies)
+        logger.info(
+            "Injected %d captured cookie(s) into platform=%s profile.",
+            len(cookies),
+            platform,
+        )
+        return len(cookies)

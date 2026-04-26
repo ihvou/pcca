@@ -153,10 +153,10 @@ class TelegramService:
         reauth_note = await self._format_reauth_sources()
         await update.message.reply_text(
             "Scenario 1 setup flow:\n"
-            "1. Open the desktop app and use the Onboarding tab.\n"
+            "1. Open the desktop app and use the desktop wizard.\n"
             "2. Set timezone, digest time, and your Telegram bot token.\n"
             "3. Start the local agent, then send `/start` here to verify Telegram.\n"
-            "4. In the desktop app, open browser login windows for the platforms you use.\n"
+            "4. Log into platforms in your normal browser, then capture sessions in the desktop app.\n"
             "5. Stage follows/subscriptions, review them, and create your first subject.\n"
             "6. Click Smoke Crawl + Test Digest, or use `/read_content` then `/get_digest` here.\n\n"
             "Connected-account onboarding is available for "
@@ -169,7 +169,7 @@ class TelegramService:
             return
         await update.message.reply_text(
             "I can:\n"
-            "- restart guided onboarding (`/onboard`)\n"
+            "- show the Scenario 1 setup checklist (`/setup`)\n"
             "- create/list subjects\n"
             "- list/remove imported sources\n"
             "- show/refine preferences per subject\n"

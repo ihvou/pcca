@@ -40,7 +40,7 @@ class JobRunner:
             logger.exception("Nightly collection failed.")
             raise
 
-    async def run_morning_digest(self) -> None:
+    async def run_morning_digest(self) -> dict:
         run_id = await self.run_log_repo.start_run("morning_digest") if self.run_log_repo is not None else None
         stats = {
             "subjects_seen": 0,
@@ -63,7 +63,7 @@ class JobRunner:
                 or self.routing_service is None
             ):
                 stats["skipped_missing_dependencies"] = True
-                return
+                return stats
 
             for subject in subjects:
                 routes = await self.routing_service.list_routes_for_subject(subject.id)
@@ -149,6 +149,7 @@ class JobRunner:
                 await self.digest_repo.mark_sent(digest_id=digest.id)
             if run_id is not None and self.run_log_repo is not None:
                 await self.run_log_repo.finish_run(run_id, "success", stats)
+            return stats
         except Exception:
             if run_id is not None and self.run_log_repo is not None:
                 await self.run_log_repo.finish_run(run_id, "failed", stats)

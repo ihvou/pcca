@@ -12,26 +12,27 @@ Related documents:
 ## Scenario 1: User Installation / Launch / Initial Configuration
 
 ### Goal
-User installs app, connects Telegram, logs into sources once, imports follows/subscriptions, and receives first digest.
+User installs app, connects Telegram, authorizes source sessions from their normal browser, imports follows/subscriptions, and receives first digest.
 
 ### User Journey
 1. User installs desktop app and launches it.
 2. App opens first-run wizard.
 3. User sets timezone and digest send window (default: 08:30 local time).
 4. User connects Telegram bot.
-5. User logs in to each source via embedded/automated browser windows (X, LinkedIn, YouTube if used).
-6. App reads follows/subscriptions from connected accounts where available.
-7. User reviews imported sources, removes obvious noise, and confirms source list.
-8. User creates first subject (example: "Vibe Coding").
-9. App runs a smoke crawl and sends a test digest.
+5. User logs in to each source in their normal browser if not already logged in.
+6. App captures/imports the local browser session with explicit user consent.
+7. App reads follows/subscriptions from connected accounts where available.
+8. User reviews imported sources, removes obvious noise, and confirms source list.
+9. User creates first subject (example: "Vibe Coding").
+10. App runs a smoke crawl and sends a test digest.
 
 ### Module Interaction (Under the Hood)
 1. `Desktop Shell` starts `Agent Core`.
 2. `Config Service` creates local config and encryption key material.
 3. `Storage Service` initializes SQLite schema.
 4. `Telegram Service` performs bot handshake and stores `chat_id` and subject-thread mapping.
-5. `Browser Session Manager` creates persistent Playwright profiles per platform.
-6. User login completes in each platform profile; session state is persisted.
+5. `Session Capture Service` reads source cookies from the user's normal browser where supported.
+6. `Browser Session Manager` injects captured cookies into persistent Playwright profiles per platform.
 7. `Follow Import Service` pulls follow/channel/subscription lists from connected accounts when feasible.
 8. `Source Normalizer` maps imported follows into canonical source entities.
 9. `Subject Service` creates default subject profile and rule set.
@@ -45,7 +46,8 @@ User installs app, connects Telegram, logs into sources once, imports follows/su
 - Test digest delivered to Telegram successfully.
 
 ### Failure Handling
-- If login challenge occurs: mark source `NEEDS_REAUTH`, continue setup.
+- If session capture fails: explain the missing browser/cookie/permission and offer manual source add or later browser fallback.
+- If login challenge occurs during scraping: mark source `NEEDS_REAUTH`, continue setup.
 - If Telegram handshake fails: setup pauses with actionable retry.
 - If follow import is limited/unavailable on a platform: fallback to manual source add flow.
 

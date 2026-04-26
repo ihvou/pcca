@@ -83,6 +83,7 @@ class PCCAApp:
             profiles_root=self.settings.browser_profiles_dir,
             headless=self.settings.browser_headless,
             headful_platforms=self.settings.browser_headful_platforms,
+            browser_channel=self.settings.browser_channel,
         )
         self.follow_import_service = FollowImportService(
             session_manager=self.browser_session_manager,
@@ -180,10 +181,10 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def run_digest_once(self) -> None:
+    async def run_digest_once(self) -> dict:
         await self.start(with_scheduler=False, with_telegram=True)
         try:
-            await self.scheduler.job_runner.run_morning_digest()
+            return await self.scheduler.job_runner.run_morning_digest()
         finally:
             await self.stop()
 
@@ -246,6 +247,7 @@ class PCCAApp:
             profiles_root=self.settings.browser_profiles_dir,
             headless=False,
             headful_platforms={target_platform},
+            browser_channel=self.settings.browser_channel,
         )
         await manager.start()
         page_closed = False
