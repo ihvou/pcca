@@ -77,8 +77,8 @@ class FollowImportService:
                 landing_url = page.url
                 hint = (
                     "Capture your X session via the wizard's 'Capture Session' button "
-                    "(not 'Dev Login (Old)') before clicking Stage Follows. If you did "
-                    "capture, your saved cookies may have expired — re-log into x.com in "
+                    "before clicking Stage Follows. If you did capture, your saved cookies "
+                    "may have expired — re-log into x.com in "
                     "your browser, then run Capture Session again."
                 )
                 raise RuntimeError(

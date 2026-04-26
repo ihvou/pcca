@@ -110,17 +110,16 @@ INDEX_HTML = r"""
         </section>
         <section data-step="sources_imported">
           <h2>3. Connect Sources</h2>
-          <p>Log into the platform in your normal browser first, then capture the local session. PCCA does not drive social-login flows.</p>
+          <p>Log into the platform in your normal browser first, then capture the local session. Use Auto unless you know exactly which browser/profile contains the login. PCCA does not drive social-login flows.</p>
           <div class="row">
             <label>Platform <select id="platform"></select></label>
-            <label>Browser for capture <select id="browser"><option value="chrome">Chrome</option><option value="arc">Arc</option><option value="brave">Brave</option><option value="edge">Edge</option></select></label>
+            <label>Browser for capture <select id="browser"><option value="">Auto (all Chromium browsers)</option><option value="chrome">Chrome</option><option value="arc">Arc</option><option value="brave">Brave</option><option value="edge">Edge</option></select></label>
           </div>
           <div class="row" style="margin-top:12px">
             <label>Import limit <input id="limit" type="number" value="100" min="1" max="500" /></label>
           </div>
           <div class="actions">
             <button class="warn" onclick="captureSession()">Capture Session</button>
-            <button class="secondary" onclick="loginPlatform()">Dev Login (Old)</button>
             <button onclick="stageFollows()">Stage Follows</button>
           </div>
         </section>

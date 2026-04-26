@@ -531,8 +531,8 @@ def build_parser() -> argparse.ArgumentParser:
     capture_session_parser.add_argument(
         "--platform",
         required=True,
-        choices=["x"],
-        help="Platform to capture. X is the first supported vertical slice.",
+        choices=["x", "linkedin", "youtube", "substack", "medium", "spotify", "apple_podcasts"],
+        help="Platform to capture from your normal browser session.",
     )
     capture_session_parser.add_argument(
         "--browser",

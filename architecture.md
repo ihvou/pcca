@@ -84,7 +84,7 @@ Nightly crawl, morning digest, weekly reflection, discovery jobs. Wake-aware and
 Playwright persistent profiles per platform. Session cookies are captured from the user's normal browser and injected into these profiles; PCCA does not drive anti-bot-protected login/OAuth flows. Browser-channel stealth/orphan cleanup remains useful for scraping, not login. Session health checks. `needs_reauth` flagging (task T-1).
 
 ### 4.4.1 Session Capture Service (`services/session_capture_service.py`)
-Reads platform auth cookies from supported local browser stores with explicit user action, then injects them into the matching PCCA Playwright profile. T-37A implements the first vertical slice: X cookies from macOS Chromium-family browsers (Chrome/Arc/Brave/Edge). Raw cookie values are never logged or written into PCCA's SQLite DB.
+Reads platform auth cookies from supported local browser stores with explicit user action, then injects them into the matching PCCA Playwright profile. T-37A/T-37C implement macOS Chromium-family browser capture (Chrome/Arc/Brave/Edge) for X, LinkedIn, YouTube, Spotify, Substack, Medium, and best-effort Apple Podcasts. Raw cookie values are never logged or written into PCCA's SQLite DB.
 
 ### 4.5 Source Collectors (`collectors/`)
 One file per platform:
@@ -104,13 +104,13 @@ How each supported platform is reached for two distinct operations: importing th
 | Platform | Follows / subscriptions import | Content collection |
 |---|---|---|
 | X (Twitter) | Session capture from user's browser, then browser scrape — logged-in `/{handle}/following` (`FollowImportService.import_x_follows`) | Browser scrape — logged-in `/{handle}` profile timeline (`XCollector`) |
-| LinkedIn | Browser scrape — logged-in `/feed/following/` (`FollowImportService.import_linkedin_follows`) | Browser scrape — logged-in `/in/{user}/recent-activity/all/` or `/company/{slug}/posts/` (`LinkedInCollector`) |
-| YouTube | Browser scrape — logged-in `/feed/channels` (`FollowImportService.import_youtube_subscriptions`) | Browser scrape — public `/{handle}/videos` list (`YouTubeCollector`) + `youtube-transcript-api` HTTP for captions (`YouTubeTranscriptService`) |
+| LinkedIn | Session capture from user's browser, then browser scrape — logged-in `/feed/following/` (`FollowImportService.import_linkedin_follows`) | Browser scrape — logged-in `/in/{user}/recent-activity/all/` or `/company/{slug}/posts/` (`LinkedInCollector`) |
+| YouTube | Session capture from user's browser, then browser scrape — logged-in `/feed/channels` (`FollowImportService.import_youtube_subscriptions`) | Browser scrape — public `/{handle}/videos` list (`YouTubeCollector`) + `youtube-transcript-api` HTTP for captions (`YouTubeTranscriptService`) |
 | Reddit | N/A — user supplies subreddits / users by name | Public JSON API — `https://www.reddit.com/r/{sub}/new.json` and `/user/{u}/submitted.json`, no auth (`RedditCollector` via `httpx`) |
-| Spotify (podcasts) | Browser scrape — logged-in `/collection/podcasts` (`FollowImportService.import_spotify_podcast_follows`) | Browser scrape — `open.spotify.com/show/{id}` (`SpotifyCollector`) |
-| Apple Podcasts | Browser scrape — logged-in `podcasts.apple.com/library/shows` (`FollowImportService.import_apple_podcast_subscriptions`) | RSS — feed URL discovered via iTunes lookup API (`SourceDiscoveryService._lookup_apple_podcast_feed`), parsed by `feedparser` (`RSSCollector` aliased as `apple_podcasts`) |
-| Substack | Browser scrape — logged-in `substack.com/settings` (`FollowImportService.import_substack_subscriptions`) | RSS — `{publication}.substack.com/feed`, parsed by `feedparser` (`RSSCollector` aliased as `substack`) |
-| Medium | Browser scrape — logged-in `medium.com/me/following` (`FollowImportService.import_medium_following`) | RSS — `medium.com/feed/{handle-or-publication}`, parsed by `feedparser` (`RSSCollector` aliased as `medium`) |
+| Spotify (podcasts) | Session capture from user's browser, then browser scrape — logged-in `/collection/podcasts` (`FollowImportService.import_spotify_podcast_follows`) | Browser scrape — `open.spotify.com/show/{id}` (`SpotifyCollector`) |
+| Apple Podcasts | Best-effort session capture from user's browser, then browser scrape — logged-in `podcasts.apple.com/library/shows` (`FollowImportService.import_apple_podcast_subscriptions`) | RSS — feed URL discovered via iTunes lookup API (`SourceDiscoveryService._lookup_apple_podcast_feed`), parsed by `feedparser` (`RSSCollector` aliased as `apple_podcasts`) |
+| Substack | Session capture from user's browser, then browser scrape — logged-in `substack.com/settings` (`FollowImportService.import_substack_subscriptions`) | RSS — `{publication}.substack.com/feed`, parsed by `feedparser` (`RSSCollector` aliased as `substack`) |
+| Medium | Session capture from user's browser, then browser scrape — logged-in `medium.com/me/following` (`FollowImportService.import_medium_following`) | RSS — `medium.com/feed/{handle-or-publication}`, parsed by `feedparser` (`RSSCollector` aliased as `medium`) |
 | Generic RSS / Atom | N/A — user supplies feed URLs directly | RSS — `feedparser` invoked via `asyncio.to_thread` (`RSSCollector`) |
 
 Notes:

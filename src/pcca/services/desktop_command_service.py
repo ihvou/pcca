@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -20,6 +21,8 @@ from pcca.services.routing_service import RoutingService
 from pcca.services.session_capture_service import SessionCaptureService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
+
+logger = logging.getLogger(__name__)
 
 SUPPORTED_ONBOARDING_PLATFORMS = [
     "x",
@@ -140,6 +143,7 @@ class DesktopCommandService:
 
     def log(self, message: str) -> None:
         self._logs.append(message)
+        logger.info("%s", message)
 
     def settings(self) -> Settings:
         return self._settings_factory()

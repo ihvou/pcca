@@ -10,7 +10,7 @@ Phase-1 functional foundation is in place:
 - source linking/removal and connected-account follow import
 - subject preference refinement (include/exclude topics, versioned)
 - feedback event logging from digest buttons
-- detailed run/browser logging for local debugging
+- detailed run/browser logging to `.pcca/logs/pcca.log` for local debugging
 - nightly collection pipeline + scoring + persistence
 - morning digest assembly and Telegram delivery wiring
 - browser-session login and follow import for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts
@@ -126,9 +126,8 @@ pcca run-desktop
 4. Connect account sessions
 - In the desktop wizard, choose a platform.
 - Log into that platform in your normal browser first.
-- Choose the browser in the wizard.
+- Leave browser capture on `Auto`, or choose the exact browser where you are logged in.
 - Click `Capture Session`.
-- For the current vertical slice, X session capture is implemented first; other platform capture follows in T-37C.
 - Repeat for each platform you want included in the smoke test.
 
 5. Stage and review follows/subscriptions
@@ -154,20 +153,28 @@ pcca run-desktop
 
 ## Session Capture + Follow Import
 
-PCCA does not ask you to log into X through an automated browser. Instead:
-- log into X in your normal browser
+PCCA does not ask you to log into social platforms through an automated browser. Instead:
+- log into the platform in your normal browser
 - run capture from the desktop wizard or CLI
-- PCCA injects the captured cookies into `.pcca/browser_profiles/x`
+- PCCA injects the captured cookies into `.pcca/browser_profiles/<platform>`
 - follow import and scraping use that local PCCA profile afterward
 
 Current capture support:
-- X from Chrome / Arc / Brave / Edge on macOS Chromium cookie stores
+- X, LinkedIn, YouTube, Spotify, Substack, Medium, and Apple Podcasts from Chrome / Arc / Brave / Edge on macOS Chromium cookie stores
+- Apple Podcasts capture is best-effort because Apple web auth cookies vary more by region/account state than the other platforms
 - cookies are copied into the PCCA browser profile; raw cookie values are not printed or stored in the PCCA SQLite DB
-- Safari / Firefox and more platforms are tracked in T-38 / T-37C
+- Safari / Firefox are tracked in T-38; Windows Chromium cookie stores are tracked in T-37D
 
 ```bash
-pcca capture-session --platform x --browser chrome
-# or
+pcca capture-session --platform x
+pcca capture-session --platform linkedin
+pcca capture-session --platform youtube
+pcca capture-session --platform spotify
+pcca capture-session --platform substack
+pcca capture-session --platform medium
+pcca capture-session --platform apple_podcasts
+
+# Arc/Brave/Edge are also supported on macOS Chromium cookie stores:
 pcca capture-session --platform x --browser arc
 
 pcca import-follows --subject "Vibe Coding" --platform x --limit 150
@@ -185,6 +192,8 @@ For local debugging, set detailed logs in `.env`:
 PCCA_LOG_LEVEL=DEBUG
 PCCA_BROWSER_HEADFUL_PLATFORMS=x,linkedin
 ```
+
+Logs are written to `.pcca/logs/pcca.log` by default. Set `PCCA_LOG_FILE=/path/to/pcca.log` to choose another file, or `PCCA_LOG_FILE=off` to disable file logging.
 
 `PCCA_BROWSER_HEADFUL_PLATFORMS` keeps selected browser collectors visible even when the rest run headless.
 

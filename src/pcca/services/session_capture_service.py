@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import shutil
 import sqlite3
 import subprocess
@@ -14,6 +15,7 @@ from pcca.browser.session_manager import BrowserSessionManager
 from pcca.config import Settings
 
 CHROME_EPOCH_OFFSET_SECONDS = 11644473600
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,9 +90,70 @@ PLATFORM_COOKIE_TARGETS = {
     "x": {
         "domains": ["x.com", "twitter.com"],
         "required": ["auth_token", "ct0"],
-        "optional": ["twid"],
-    }
+        "optional": ["twid", "guest_id", "personalization_id"],
+    },
+    "linkedin": {
+        "domains": ["linkedin.com"],
+        "required": ["li_at"],
+        "optional": ["JSESSIONID", "bcookie", "bscookie", "liap", "lidc"],
+    },
+    "youtube": {
+        "domains": ["youtube.com", "google.com", "accounts.google.com"],
+        "required_any": [
+            ["SID", "__Secure-1PSID", "__Secure-3PSID"],
+            ["SAPISID", "APISID", "__Secure-1PAPISID", "__Secure-3PAPISID"],
+        ],
+        "optional": [
+            "HSID",
+            "SSID",
+            "LOGIN_INFO",
+            "VISITOR_INFO1_LIVE",
+            "__Secure-1PSIDTS",
+            "__Secure-3PSIDTS",
+        ],
+    },
+    "spotify": {
+        "domains": ["spotify.com", "open.spotify.com"],
+        "required": ["sp_dc"],
+        "optional": ["sp_key", "sp_t", "sp_landing"],
+    },
+    "substack": {
+        "domains": ["substack.com"],
+        "required": ["substack.sid"],
+        "optional": ["substack.lli", "substack.uis"],
+    },
+    "medium": {
+        "domains": ["medium.com"],
+        "required_any": [["sid", "uid"]],
+        "optional": ["xsrf", "sz"],
+    },
+    "apple_podcasts": {
+        "domains": ["apple.com", "podcasts.apple.com", "idmsa.apple.com"],
+        "required_any": [["myacinfo", "aidsp", "itctx", "itspod"]],
+        "optional": ["dslang", "site", "geo", "acn01"],
+    },
 }
+
+
+def target_cookie_names(target: dict) -> set[str]:
+    names = set(target.get("required", [])) | set(target.get("optional", []))
+    for group in target.get("required_any", []):
+        names.update(group)
+    return names
+
+
+def missing_requirement_descriptions(target: dict, captured_names: set[str]) -> list[str]:
+    missing = [name for name in target.get("required", []) if name not in captured_names]
+    for group in target.get("required_any", []):
+        if not captured_names.intersection(group):
+            missing.append("one of: " + ", ".join(group))
+    return missing
+
+
+def required_requirement_descriptions(target: dict) -> list[str]:
+    required = list(target.get("required", []))
+    required.extend("one of: " + ", ".join(group) for group in target.get("required_any", []))
+    return required
 
 
 def chromium_cookie_sources(home: Path | None = None) -> list[BrowserCookieSource]:
@@ -194,15 +257,28 @@ class ChromiumCookieReader:
         if target is None:
             raise ValueError(f"Session capture is not implemented for platform '{platform}' yet.")
 
-        wanted_names = set(target["required"]) | set(target.get("optional", []))
+        wanted_names = target_cookie_names(target)
         domains = list(target["domains"])
-        required = set(target["required"])
         best: tuple[BrowserProfileCookieDb, list[CapturedCookie]] | None = None
         tried: list[str] = []
         errors: list[str] = []
+        logger.debug(
+            "Searching local browser cookies platform=%s browser=%s domains=%s target_names=%s",
+            platform,
+            browser or "auto",
+            domains,
+            sorted(wanted_names),
+        )
 
         for db in self.cookie_dbs(browser):
             tried.append(str(db.cookie_db_path))
+            logger.debug(
+                "Trying browser cookie DB platform=%s browser=%s profile=%s path=%s",
+                platform,
+                db.source.browser,
+                db.profile_name,
+                db.cookie_db_path,
+            )
             try:
                 password = self._password_cache.get(db.source.keychain_service)
                 if password is None:
@@ -213,21 +289,58 @@ class ChromiumCookieReader:
                     keychain_password=password,
                     wanted_names=wanted_names,
                     domains=domains,
-                )
+            )
             except Exception as exc:
                 errors.append(f"{db.source.browser}/{db.profile_name}: {exc}")
+                logger.debug(
+                    "Cookie DB read failed platform=%s browser=%s profile=%s error=%s",
+                    platform,
+                    db.source.browser,
+                    db.profile_name,
+                    exc,
+                )
                 continue
             captured_names = {cookie.name for cookie in cookies}
-            if best is None or len(captured_names & required) > len({cookie.name for cookie in best[1]} & required):
+            logger.debug(
+                "Cookie DB candidate platform=%s browser=%s profile=%s captured_names=%s missing=%s",
+                platform,
+                db.source.browser,
+                db.profile_name,
+                sorted(captured_names),
+                missing_requirement_descriptions(target, captured_names),
+            )
+            if best is None or len(captured_names & wanted_names) > len({cookie.name for cookie in best[1]} & wanted_names):
                 best = (db, cookies)
-            if required <= captured_names:
+            if not missing_requirement_descriptions(target, captured_names):
+                logger.info(
+                    "Selected browser session platform=%s browser=%s profile=%s captured_names=%s",
+                    platform,
+                    db.source.browser,
+                    db.profile_name,
+                    sorted(captured_names),
+                )
                 return db, cookies
 
         if best is not None and best[1]:
+            logger.info(
+                "Selected partial browser session platform=%s browser=%s profile=%s captured_names=%s missing=%s",
+                platform,
+                best[0].source.browser,
+                best[0].profile_name,
+                sorted({cookie.name for cookie in best[1]}),
+                missing_requirement_descriptions(target, {cookie.name for cookie in best[1]}),
+            )
             return best
         hint = "No Chromium browser cookie DBs were found." if not tried else "Tried: " + ", ".join(tried)
         if errors:
             hint += ". Errors: " + "; ".join(errors)
+        logger.warning(
+            "No usable browser session found platform=%s browser=%s tried=%s errors=%s",
+            platform,
+            browser or "auto",
+            tried,
+            errors,
+        )
         raise RuntimeError(
             f"Could not find required {platform} cookies in the selected browser profiles. {hint}"
         )
@@ -322,6 +435,7 @@ class SessionCaptureService:
         if target is None:
             raise ValueError(f"Session capture is not implemented for platform '{platform}' yet.")
 
+        logger.info("Starting session capture platform=%s browser=%s", platform, browser or "auto")
         profile_db, cookies = self.cookie_reader.read_platform_cookies(platform=platform, browser=browser)
         manager = BrowserSessionManager(
             profiles_root=self.settings.browser_profiles_dir,
@@ -339,14 +453,21 @@ class SessionCaptureService:
             await manager.stop()
 
         captured_names = sorted({cookie.name for cookie in cookies})
-        required = list(target["required"])
-        missing = [name for name in required if name not in captured_names]
+        missing = missing_requirement_descriptions(target, set(captured_names))
+        logger.info(
+            "Session capture complete platform=%s browser=%s profile=%s injected_cookie_count=%d missing=%s",
+            platform,
+            profile_db.source.browser,
+            profile_db.profile_name,
+            len(cookies),
+            missing,
+        )
         return SessionCaptureResult(
             platform=platform,
             browser=profile_db.source.browser,
             profile_name=profile_db.profile_name,
             injected_cookie_count=len(cookies),
-            required_cookie_names=required,
+            required_cookie_names=required_requirement_descriptions(target),
             captured_cookie_names=captured_names,
             missing_cookie_names=missing,
         )
