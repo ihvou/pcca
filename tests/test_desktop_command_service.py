@@ -24,6 +24,7 @@ def make_settings(tmp_path: Path, token: str | None = None) -> Settings:
         timezone="UTC",
         nightly_cron="0 1 * * *",
         morning_cron="30 8 * * *",
+        digest_auto_send=False,
         data_dir=data_dir,
         db_path=data_dir / "pcca.db",
         browser_profiles_dir=data_dir / "browser_profiles",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 
 from pcca.collectors.linkedin_collector import LinkedInCollector
@@ -55,6 +56,14 @@ class PCCAApp:
     telegram_service: TelegramService | None = field(default=None, init=False)
 
     async def start(self, *, with_scheduler: bool = True, with_telegram: bool = True) -> None:
+        started_at = time.monotonic()
+        logger.info(
+            "PCCA app starting scheduler=%s telegram=%s db=%s data_dir=%s",
+            with_scheduler,
+            with_telegram,
+            self.settings.db_path,
+            self.settings.data_dir,
+        )
         self.settings.ensure_dirs()
         self.db = Database(path=self.settings.db_path)
         await self.db.connect()
@@ -135,6 +144,7 @@ class PCCAApp:
             nightly_cron=self.settings.nightly_cron,
             morning_cron=self.settings.morning_cron,
             timezone=self.settings.timezone,
+            digest_auto_send=self.settings.digest_auto_send,
             job_runner=JobRunner(
                 subject_service=self.subject_service,
                 routing_service=self.routing_service,
@@ -153,8 +163,11 @@ class PCCAApp:
                 read_content_action=self.scheduler.job_runner.run_nightly_collection,
                 get_digest_action=self.scheduler.job_runner.run_morning_digest,
             )
+        logger.info("PCCA app started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
     async def stop(self) -> None:
+        started_at = time.monotonic()
+        logger.info("PCCA app stopping.")
         if hasattr(self, "scheduler"):
             self.scheduler.shutdown()
         if hasattr(self, "browser_session_manager"):
@@ -163,6 +176,7 @@ class PCCAApp:
             await self.telegram_service.stop()
         if hasattr(self, "db"):
             await self.db.close()
+        logger.info("PCCA app stopped duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
     async def run_forever(self) -> None:
         await self.start()
@@ -174,17 +188,22 @@ class PCCAApp:
             await self.stop()
 
     async def run_nightly_once(self) -> dict:
+        started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=False)
         try:
             stats = await self.pipeline_orchestrator.run_nightly_collection()
+            logger.info("PCCA one-shot nightly finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
             return stats
         finally:
             await self.stop()
 
     async def run_digest_once(self) -> dict:
+        started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)
         try:
-            return await self.scheduler.job_runner.run_morning_digest()
+            stats = await self.scheduler.job_runner.run_morning_digest()
+            logger.info("PCCA one-shot digest finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
         finally:
             await self.stop()
 

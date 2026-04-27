@@ -6,6 +6,7 @@ import pytest
 
 from pcca.config import Settings
 from pcca.desktop_shell import LINUX_UNSUPPORTED_MESSAGE
+from pcca.services.desktop_command_service import CommandResult
 
 
 def make_settings(tmp_path: Path) -> Settings:
@@ -14,6 +15,7 @@ def make_settings(tmp_path: Path) -> Settings:
         timezone="UTC",
         nightly_cron="0 1 * * *",
         morning_cron="30 8 * * *",
+        digest_auto_send=False,
         data_dir=data_dir,
         db_path=data_dir / "pcca.db",
         browser_profiles_dir=data_dir / "browser_profiles",
@@ -44,8 +46,41 @@ def test_desktop_server_rejects_missing_token(tmp_path) -> None:
 
     from pcca.desktop_web.server import DesktopWebServer
 
-    server = DesktopWebServer(settings=make_settings(tmp_path), token="secret-token", port=8765)
-    client = TestClient(server.create_app())
+    class FakeService:
+        def __init__(self) -> None:
+            self.started = False
+            self.stopped = False
 
-    assert client.get("/api/state").status_code == 401
-    assert client.get("/api/state", headers={"Authorization": "Bearer secret-token"}).status_code == 200
+        async def startup_for_wizard(self):
+            self.started = True
+            return CommandResult(True, "started")
+
+        async def shutdown(self):
+            self.stopped = True
+
+        async def get_state(self):
+            return {
+                "settings": {},
+                "onboarding": {"current_step": "start"},
+                "staged_sources": [],
+                "subjects": [],
+                "platforms": [],
+                "agent_running": True,
+                "logs": [],
+            }
+
+    fake_service = FakeService()
+    server = DesktopWebServer(
+        settings=make_settings(tmp_path),
+        token="secret-token",
+        port=8765,
+        service=fake_service,  # type: ignore[arg-type]
+    )
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        assert fake_service.started is True
+        assert client.get("/api/state").status_code == 401
+        response = client.get("/api/state", headers={"Authorization": "Bearer secret-token"})
+        assert response.status_code == 200
+    assert fake_service.stopped is True

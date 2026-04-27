@@ -32,6 +32,7 @@ class Settings:
     timezone: str
     nightly_cron: str
     morning_cron: str
+    digest_auto_send: bool
     data_dir: Path
     db_path: Path
     browser_profiles_dir: Path
@@ -62,10 +63,16 @@ class Settings:
             browser_channel = browser_channel.strip().lower() or None
         ollama_enabled_raw = (_env("PCCA_OLLAMA_ENABLED", "false") or "false").strip().lower()
         ollama_enabled = ollama_enabled_raw in {"1", "true", "yes", "on"}
+        # Default OFF: in v1 the daily digest is on-demand via the Telegram bot's
+        # "Get Digest" button. Set PCCA_DIGEST_AUTO_SEND=true to re-enable the
+        # morning_cron auto-send for users who have a stable nightly+morning routine.
+        digest_auto_send_raw = (_env("PCCA_DIGEST_AUTO_SEND", "false") or "false").strip().lower()
+        digest_auto_send = digest_auto_send_raw in {"1", "true", "yes", "on"}
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
             morning_cron=_env("PCCA_MORNING_CRON", "30 8 * * *") or "30 8 * * *",
+            digest_auto_send=digest_auto_send,
             data_dir=data_dir,
             db_path=db_path,
             browser_profiles_dir=browser_profiles_dir,

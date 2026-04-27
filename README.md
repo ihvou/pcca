@@ -32,16 +32,14 @@ cp .env.example .env
 
 Install Google Chrome if it is not already installed, or set `PCCA_BROWSER_CHANNEL=bundled` to use Playwright Chromium for PCCA's own scraping profile. PCCA can capture X sessions from Chrome/Arc/Brave/Edge browser stores, then inject cookies into its local Playwright profile; it should not drive X/Google/LinkedIn login flows itself.
 
-Initialize DB and launch the desktop wizard:
+Launch the desktop wizard. It initializes the local DB and starts the local agent automatically:
 
 ```bash
-pcca init-db
 pcca run-desktop
 ```
 
 Use the desktop wizard to:
 - save timezone, digest time, and Telegram bot token
-- start the local agent
 - capture sessions from your normal browser
 - stage follows/subscriptions for review
 - create the first subject from staged sources
@@ -77,9 +75,10 @@ pcca run-desktop
 ```
 
 2. In the desktop wizard:
+- local storage initializes automatically
+- the local agent starts automatically and stops when the wizard closes
 - paste your Telegram bot token and save runtime settings
-- click `Init DB`
-- click `Start Agent`
+- saving/changing the token restarts the agent so Telegram is picked up
 
 3. In Telegram:
 - open your bot chat and send `/start`
@@ -118,9 +117,10 @@ pcca run-desktop
 ```
 
 3. Complete the desktop wizard
+- Local storage and the agent are initialized automatically when the wizard opens.
 - Set timezone and digest time.
 - Paste your individual Telegram bot token and click `Save Runtime Settings`.
-- Click `Init DB`, then `Start Agent`.
+- If the agent was already running, saving settings restarts it with the new token.
 - Open your bot chat in Telegram and send `/start`.
 
 4. Connect account sessions
@@ -195,6 +195,16 @@ PCCA_BROWSER_HEADFUL_PLATFORMS=x,linkedin
 
 Logs are written to `.pcca/logs/pcca.log` by default. Set `PCCA_LOG_FILE=/path/to/pcca.log` to choose another file, or `PCCA_LOG_FILE=off` to disable file logging.
 
+Failed browser extraction/import attempts save a local screenshot plus JSON breadcrumbs under `.pcca/debug/browser/`. These may include visible logged-in page content, so treat them as local private debugging artifacts.
+
+Create a redacted support bundle:
+
+```bash
+pcca debug-bundle
+```
+
+The bundle includes redacted logs, DB summaries, and debug artifacts. It does not include raw browser profiles or raw cookie stores.
+
 `PCCA_BROWSER_HEADFUL_PLATFORMS` keeps selected browser collectors visible even when the rest run headless.
 
 ## Telegram Commands / Actions
@@ -207,6 +217,37 @@ Logs are written to `.pcca/logs/pcca.log` by default. Set `PCCA_LOG_FILE=/path/t
   - `Unsubscribe x:borischerny from Vibe Coding`
   - `Refine Vibe Coding: include release notes; exclude motivation`
   - `Show preferences for Vibe Coding`
+
+### Digest delivery: on-demand by default
+
+In v1 the daily digest is **on-demand only**: click `Get Digest` in the
+Telegram bot whenever you want today's composition. The nightly content
+collection still runs on schedule (`PCCA_NIGHTLY_CRON`, default `0 1 * * *`)
+so the DB has fresh items in the morning. To re-enable the auto-send
+morning cron, set `PCCA_DIGEST_AUTO_SEND=true` in `.env` — the morning
+cron will fire at `PCCA_MORNING_CRON` (default `30 8 * * *`).
+
+`Read Content` is incremental and de-duplicated: each run accumulates
+new items in `items`, refuses to overwrite existing rows whose
+`content_hash` matches, and respects `last_crawled_at` per source.
+Running it multiple times is safe.
+
+### Session lifetime
+
+`Capture Session` reads cookies from your real browser and injects them
+into PCCA's Playwright profile. Cookie lifetimes vary by platform:
+- **X (`auth_token`)** — ~30 days, sliding window if you keep using X.
+- **LinkedIn (`li_at`)** — ~1 year.
+- **Spotify / Substack / Medium** — long-lived.
+- **YouTube / Google (SID family)** — rotates aggressively; can require
+  re-capture every few days. As long as you stay logged into Google in
+  your normal browser, T-40 (planned) will auto-refresh PCCA's cookies
+  before each scrape so manual re-capture is one-time. Until T-40 lands,
+  re-click `Capture Session` for YouTube when scrapes start failing.
+
+When PCCA detects a logged-out scrape (401 / login redirect), it marks
+the source `follow_state='needs_reauth'` and the wizard surfaces it
+under `Sources needing re-auth`.
 
 ## Multilingual Analytics (EN/UK/RU)
 

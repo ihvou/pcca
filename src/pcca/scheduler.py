@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 from datetime import date
 
@@ -29,18 +30,24 @@ class JobRunner:
     telegram_service: TelegramService | None = None
 
     async def run_nightly_collection(self) -> None:
+        started_at = time.monotonic()
         if self.pipeline_orchestrator is None:
             subjects = await self.subject_service.list_subjects()
             logger.info("Nightly collection placeholder: %d subjects.", len(subjects))
             return
         try:
             stats = await self.pipeline_orchestrator.run_nightly_collection()
-            logger.info("Nightly collection finished: %s", stats)
+            logger.info(
+                "Nightly collection finished duration_ms=%d stats=%s",
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
         except Exception:
-            logger.exception("Nightly collection failed.")
+            logger.exception("Nightly collection failed duration_ms=%d", int((time.monotonic() - started_at) * 1000))
             raise
 
     async def run_morning_digest(self) -> dict:
+        started_at = time.monotonic()
         run_id = await self.run_log_repo.start_run("morning_digest") if self.run_log_repo is not None else None
         stats = {
             "subjects_seen": 0,
@@ -54,7 +61,7 @@ class JobRunner:
         try:
             subjects = await self.subject_service.list_subjects()
             stats["subjects_seen"] = len(subjects)
-            logger.info("Morning digest run: %d subjects.", len(subjects))
+            logger.info("Morning digest run started run_id=%s subjects=%d", run_id, len(subjects))
             if (
                 self.telegram_service is None
                 or self.telegram_service.application is None
@@ -66,8 +73,10 @@ class JobRunner:
                 return stats
 
             for subject in subjects:
+                subject_started_at = time.monotonic()
                 routes = await self.routing_service.list_routes_for_subject(subject.id)
                 if not routes:
+                    logger.info("Morning digest subject skipped no_routes run_id=%s subject=%s", run_id, subject.name)
                     continue
                 stats["subjects_with_routes"] += 1
 
@@ -88,6 +97,14 @@ class JobRunner:
                 else:
                     ordered_candidates = await self.item_score_repo.top_unsent_candidates(subject_id=subject.id, limit=5)
                 stats["items_selected"] += len(ordered_candidates)
+                logger.info(
+                    "Morning digest subject selected run_id=%s subject=%s routes=%d items=%d existing=%s",
+                    run_id,
+                    subject.name,
+                    len(routes),
+                    len(ordered_candidates),
+                    bool(existing_items),
+                )
                 lines: list[str] = []
                 item_actions: list[dict] = []
                 for idx, candidate in enumerate(ordered_candidates, start=1):
@@ -147,16 +164,40 @@ class JobRunner:
                         )
                         stats["deliveries_failed"] += 1
                 await self.digest_repo.mark_sent(digest_id=digest.id)
+                logger.info(
+                    "Morning digest subject finished run_id=%s subject=%s duration_ms=%d",
+                    run_id,
+                    subject.name,
+                    int((time.monotonic() - subject_started_at) * 1000),
+                )
             if run_id is not None and self.run_log_repo is not None:
                 await self.run_log_repo.finish_run(run_id, "success", stats)
+            logger.info(
+                "Morning digest run finished run_id=%s duration_ms=%d stats=%s",
+                run_id,
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
             return stats
         except Exception:
             if run_id is not None and self.run_log_repo is not None:
                 await self.run_log_repo.finish_run(run_id, "failed", stats)
+            logger.exception(
+                "Morning digest run failed run_id=%s duration_ms=%d stats=%s",
+                run_id,
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
             raise
         finally:
             if stats["skipped_missing_dependencies"] and run_id is not None and self.run_log_repo is not None:
                 await self.run_log_repo.finish_run(run_id, "skipped", stats)
+                logger.warning(
+                    "Morning digest run skipped missing dependencies run_id=%s duration_ms=%d stats=%s",
+                    run_id,
+                    int((time.monotonic() - started_at) * 1000),
+                    stats,
+                )
 
 
 @dataclass
@@ -165,6 +206,7 @@ class AgentScheduler:
     morning_cron: str
     timezone: str
     job_runner: JobRunner
+    digest_auto_send: bool = False
     scheduler: AsyncIOScheduler = field(init=False)
 
     def __post_init__(self) -> None:
@@ -180,17 +222,23 @@ class AgentScheduler:
             coalesce=True,
             misfire_grace_time=3600,
         )
-        self.scheduler.add_job(
-            self.job_runner.run_morning_digest,
-            trigger=CronTrigger.from_crontab(self.morning_cron, timezone=self.timezone),
-            id="morning_digest",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
+        if self.digest_auto_send:
+            self.scheduler.add_job(
+                self.job_runner.run_morning_digest,
+                trigger=CronTrigger.from_crontab(self.morning_cron, timezone=self.timezone),
+                id="morning_digest",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
         self.scheduler.start()
-        logger.info("Scheduler started. nightly=%s morning=%s", self.nightly_cron, self.morning_cron)
+        logger.info(
+            "Scheduler started. nightly=%s morning=%s digest_auto_send=%s",
+            self.nightly_cron,
+            self.morning_cron if self.digest_auto_send else "(on-demand only)",
+            self.digest_auto_send,
+        )
 
     def shutdown(self) -> None:
         if self.scheduler.running:
