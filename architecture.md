@@ -1,6 +1,6 @@
 # PCCA — Architecture
 
-This document is the authoritative design reference. It describes what the system does, how the modules fit together, and where extension points live. Interaction flows belong in [scenarios.md](./scenarios.md); the refactoring backlog belongs in [tasks.md](./tasks.md).
+This document is the implementation design reference. [scenarios.md](./scenarios.md) is the product-level source of truth for user/stakeholder intent; architecture should support those scenarios without redefining them. Refactoring backlog belongs in [tasks.md](./tasks.md).
 
 ---
 

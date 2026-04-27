@@ -1,6 +1,8 @@
 # PCCA
 
-Personal Content Curation Agent (local-first), based on `architecture.md`, `scenarios.md`, and `tasks.md`.
+Personal Content Curation Agent (local-first).
+
+[scenarios.md](./scenarios.md) is the product-level source of truth for user/stakeholder intent. This README describes the current implementation and how to run/test it locally.
 
 ## What Is Implemented
 
@@ -70,7 +72,9 @@ pcca run-desktop
 pcca-desktop
 ```
 
-## Real Scenario Testing (User Flow)
+## Current Implementation Test Flow
+
+These steps are for testing what the current code can do today. They are not the source of truth for future product behavior; use [scenarios.md](./scenarios.md) for that.
 
 1. Launch desktop onboarding:
 
@@ -100,9 +104,10 @@ pcca run-desktop
 - confirm the digest arrives
 - use `👍 / 👎 / 🔖` on digest messages
 
-## Scenario 1 Walkthrough (Install / Launch / Initial Config)
+## Current First-Run Test Walkthrough
 
-Goal: complete first-run setup in one flow, including connected-account follow import and first digest.
+Goal: test the current implementation's first-run setup flow, including connected-account follow import and first digest.
+This walkthrough is a dogfood checklist, not a future-version product spec.
 
 1. Install and launch
 
@@ -152,7 +157,7 @@ pcca run-desktop
   - `/get_digest`
 - If you added sources after already sending today's digest, use `Rebuild Today's Digest` in the wizard or `/rebuild_digest` in Telegram.
 
-8. Validate Scenario 1 success criteria
+8. Validate current implementation behavior
 - You can list subjects and sources in Telegram:
   - `List subjects`
   - `List sources for Agentic PM`

@@ -11,7 +11,7 @@ Single-user, local deployment. SQLite for storage. Telegram as the only UI. Opti
 Start with the document that matches your question:
 
 - **[architecture.md](./architecture.md)** — system design, module responsibilities, data model, analysis logic, scheduling, reliability, security, extension points. Read first when changing how something works.
-- **[scenarios.md](./scenarios.md)** — normative user + system interaction flows (install, new subject, nightly collection, morning digest, feedback loop). These drive acceptance criteria.
+- **[scenarios.md](./scenarios.md)** — product-level source of truth for user/stakeholder intent. Architecture and tasks should support these scenarios without redefining them.
 - **[tasks.md](./tasks.md)** — prioritized refactoring backlog (P0 → P3) with problem / solution / acceptance / impact per item. **Any non-trivial change should map to a task here; if it doesn't, add one before starting.**
 - **[README.md](./README.md)** — user-facing quick start, CLI commands, Telegram usage examples.
 
