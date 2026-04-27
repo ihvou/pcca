@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import signal
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from pcca.observability import safe_value, sanitize_url, slugify
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +66,14 @@ class BrowserSessionManager:
     headless: bool = True
     headful_platforms: set[str] = field(default_factory=set)
     browser_channel: str | None = "chrome"
+    debug_dir: Path | None = None
+    screenshots_on_failure: bool = True
     _playwright: Any = field(default=None, init=False, repr=False)
     _contexts: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
+
+    @property
+    def effective_debug_dir(self) -> Path:
+        return self.debug_dir or (self.profiles_root.parent / "debug" / "browser")
 
     async def start(self) -> None:
         self.profiles_root.mkdir(parents=True, exist_ok=True)
@@ -154,6 +164,28 @@ class BrowserSessionManager:
             except Exception:
                 logger.exception("Failed to terminate orphan Chrome PID=%d", pid)
 
+        # After killing live processes, remove stale Chromium singleton-lock files.
+        # Chrome refuses to launch with `Failed to create SingletonLock: File exists`
+        # whenever these symlinks are present from a previous run that exited
+        # without cleaning them up (kill -9, OS sleep mid-run, force-quit, or just
+        # macOS Chrome's quirk where the parent process didn't unlink the symlink
+        # before exit). On macOS these are symlinks whose target encodes
+        # `<hostname>-<pid>` — when the pid is dead the lock is stale.
+        # Safe to remove unconditionally here: we only delete locks under the
+        # profile directory we manage, and we just SIGTERMed any live owner above.
+        for filename in ("SingletonLock", "SingletonCookie", "SingletonSocket"):
+            path = profile_dir / filename
+            # `is_symlink()` matters because a *dangling* symlink reports
+            # `exists()` as False even though Chrome still trips on it.
+            if path.is_symlink() or path.exists():
+                try:
+                    path.unlink()
+                    logger.info("Removed stale Chromium lock %s", path)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    logger.exception("Failed to remove stale Chromium lock %s", path)
+
     async def get_context(self, platform: str):
         if self._playwright is None:
             await self.start()
@@ -171,19 +203,24 @@ class BrowserSessionManager:
             self.effective_browser_channel(),
             profile_dir,
         )
-        # Proactive orphan-Chrome sweep — if a previous pcca run exited but Chrome
-        # stayed alive (Playwright + macOS interaction; see notes in `stop()`), the
-        # SingletonLock will block this launch with ProcessSingleton. Killing any
-        # process actively holding our profile is safe: we only target processes
-        # whose --user-data-dir matches the profile we're about to open.
+        # Proactive orphan-Chrome + stale-lock sweep — if a previous pcca run
+        # exited without cleaning up (Playwright + macOS interaction; see notes
+        # in `stop()`), Chrome will refuse to launch with `File exists (17)` for
+        # SingletonLock. Killing any live owner is safe (we only target processes
+        # whose --user-data-dir matches our profile), and `_kill_orphan_chrome`
+        # additionally removes the lock symlinks themselves.
+        # NOTE: SingletonLock is a *symlink* on macOS; a dangling symlink (left
+        # over from a process that's already dead) reports `exists() == False`,
+        # so we must check `is_symlink()` too — otherwise the sweep silently
+        # skips exactly the case it's supposed to fix.
         singleton_lock = profile_dir / "SingletonLock"
-        if singleton_lock.exists():
+        if singleton_lock.is_symlink() or singleton_lock.exists():
             logger.info(
-                "Profile %s has SingletonLock; sweeping orphan Chrome processes before launch.",
+                "Profile %s has stale SingletonLock; sweeping orphan Chrome and lock files.",
                 profile_dir,
             )
             await self._kill_orphan_chrome(profile_dir)
-            # Give the OS a moment to release the lock after the kill.
+            # Give the OS a moment to release any lingering inode references.
             await asyncio.sleep(0.3)
 
         options = self.launch_options(profile_dir=profile_dir, platform=platform)
@@ -259,30 +296,165 @@ class BrowserSessionManager:
     async def new_page(self, platform: str):
         context = await self.get_context(platform)
         page = await context.new_page()
-        logger.debug("Opened browser page platform=%s", platform)
+        page_id = f"{platform}-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}-{id(page):x}"
+        setattr(page, "_pcca_platform", platform)
+        setattr(page, "_pcca_page_id", page_id)
+        setattr(page, "_pcca_debug_events", [])
+        logger.debug("Opened browser page platform=%s page_id=%s", platform, page_id)
+        if not hasattr(page, "on"):
+            return page
         page.on(
             "console",
-            lambda message: logger.debug(
-                "Browser console platform=%s type=%s text=%s",
-                platform,
-                message.type,
-                message.text,
-            ),
+            lambda message: self._on_console(page, platform, page_id, message),
         )
         page.on(
             "pageerror",
-            lambda error: logger.warning("Browser page error platform=%s error=%s", platform, error),
+            lambda error: self._record_page_event(
+                page,
+                {
+                    "event": "pageerror",
+                    "platform": platform,
+                    "page_id": page_id,
+                    "error": safe_value(error),
+                },
+                level=logging.WARNING,
+                message="Browser page error",
+            ),
         )
         page.on(
             "requestfailed",
-            lambda request: logger.debug(
-                "Browser request failed platform=%s url=%s failure=%s",
-                platform,
-                request.url,
-                request.failure,
-            ),
+            lambda request: self._on_request_failed(page, platform, page_id, request),
+        )
+        page.on(
+            "response",
+            lambda response: self._on_response(page, platform, page_id, response),
         )
         return page
+
+    def _on_console(self, page, platform: str, page_id: str, message) -> None:
+        event = {
+            "event": "console",
+            "platform": platform,
+            "page_id": page_id,
+            "type": safe_value(getattr(message, "type", "")),
+            "text": safe_value(getattr(message, "text", "")),
+        }
+        level = logging.WARNING if event["type"] in {"error", "warning"} else logging.DEBUG
+        self._record_page_event(page, event, level=level, message="Browser console")
+
+    def _on_request_failed(self, page, platform: str, page_id: str, request) -> None:
+        event = {
+            "event": "requestfailed",
+            "platform": platform,
+            "page_id": page_id,
+            "url": sanitize_url(getattr(request, "url", "")),
+            "method": safe_value(getattr(request, "method", "")),
+            "failure": safe_value(getattr(request, "failure", "")),
+        }
+        self._record_page_event(page, event, level=logging.WARNING, message="Browser request failed")
+
+    def _on_response(self, page, platform: str, page_id: str, response) -> None:
+        status = int(getattr(response, "status", 0) or 0)
+        if status < 400:
+            return
+        event = {
+            "event": "response",
+            "platform": platform,
+            "page_id": page_id,
+            "url": sanitize_url(getattr(response, "url", "")),
+            "status": status,
+        }
+        level = logging.WARNING if status >= 500 else logging.DEBUG
+        self._record_page_event(page, event, level=level, message="Browser HTTP error")
+
+    def _record_page_event(self, page, event: dict[str, Any], *, level: int, message: str) -> None:
+        events = getattr(page, "_pcca_debug_events", None)
+        if isinstance(events, list):
+            events.append({"ts": datetime.now(timezone.utc).isoformat(), **event})
+            del events[:-80]
+        logger.log(
+            level,
+            "%s platform=%s page_id=%s event=%s detail=%s",
+            message,
+            event.get("platform"),
+            event.get("page_id"),
+            event.get("event"),
+            safe_value(event),
+        )
+
+    async def capture_debug_snapshot(self, page, label: str, *, error: BaseException | None = None) -> Path | None:
+        """Persist failure breadcrumbs for local browser debugging.
+
+        Screenshots may include logged-in account content. They stay local under
+        `.pcca/debug/browser/`; raw cookies/session values are never written.
+        """
+        if page is None or getattr(page, "is_closed", lambda: True)():
+            return None
+        debug_root = self.effective_debug_dir
+        debug_root.mkdir(parents=True, exist_ok=True)
+        platform = getattr(page, "_pcca_platform", "unknown")
+        page_id = getattr(page, "_pcca_page_id", f"{platform}-{id(page):x}")
+        stem = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}_{slugify(str(platform))}_{slugify(label)}_{slugify(str(page_id))}"
+        screenshot_path = debug_root / f"{stem}.png"
+        metadata_path = debug_root / f"{stem}.json"
+
+        title = None
+        dom_summary: dict[str, Any] = {}
+        try:
+            title = await page.title()
+        except Exception:
+            logger.debug("Could not read page title for debug snapshot.", exc_info=True)
+        try:
+            dom_summary = await page.evaluate(
+                """
+                () => ({
+                  readyState: document.readyState,
+                  url: location.href,
+                  bodyTextLength: document.body ? document.body.innerText.length : 0,
+                  articles: document.querySelectorAll('article').length,
+                  anchors: document.querySelectorAll('a[href]').length,
+                  buttons: document.querySelectorAll('button').length,
+                  inputs: document.querySelectorAll('input, textarea, select').length,
+                  h1: Array.from(document.querySelectorAll('h1')).slice(0, 3).map(n => n.innerText.trim()).filter(Boolean),
+                })
+                """
+            )
+        except Exception:
+            logger.debug("Could not read DOM summary for debug snapshot.", exc_info=True)
+
+        screenshot_saved = False
+        if self.screenshots_on_failure:
+            try:
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                screenshot_saved = True
+            except Exception:
+                logger.debug("Could not capture browser failure screenshot.", exc_info=True)
+
+        payload = {
+            "label": label,
+            "platform": platform,
+            "page_id": page_id,
+            "url": sanitize_url(getattr(page, "url", "")),
+            "title": safe_value(title),
+            "error_type": type(error).__name__ if error is not None else None,
+            "error": safe_value(str(error)) if error is not None else None,
+            "screenshot": str(screenshot_path) if screenshot_saved else None,
+            "dom_summary": safe_value(dom_summary),
+            "recent_events": [
+                safe_value(event, max_chars=1000)
+                for event in list(getattr(page, "_pcca_debug_events", []))[-40:]
+            ],
+        }
+        metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        logger.warning(
+            "Browser debug snapshot saved platform=%s label=%s url=%s metadata=%s screenshot=%s",
+            platform,
+            label,
+            payload["url"],
+            metadata_path,
+            screenshot_path if screenshot_saved else "<not captured>",
+        )
+        return metadata_path
 
     async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
         """Import cookies captured from the user's real browser into PCCA's profile.
@@ -309,7 +481,7 @@ class BrowserSessionManager:
             None,
         )
         if primary_domain:
-            page = await context.new_page()
+            page = await self.new_page(platform)
             try:
                 await page.goto(
                     f"https://{primary_domain}/",
@@ -326,6 +498,7 @@ class BrowserSessionManager:
                     primary_domain,
                     exc_info=True,
                 )
+                await self.capture_debug_snapshot(page, "cookie_warmup_failed")
             finally:
                 if not page.is_closed():
                     await page.close()
