@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -148,7 +149,28 @@ class DesktopCommandService:
     def settings(self) -> Settings:
         return self._settings_factory()
 
+    async def startup_for_wizard(self) -> CommandResult:
+        self.log("Wizard startup: initializing local storage and starting local agent.")
+        try:
+            await self.init_db()
+        except Exception as exc:
+            logger.exception("Wizard startup DB initialization failed.")
+            self.log(f"Wizard startup failed during DB initialization: {exc}")
+            return CommandResult(False, f"Wizard startup failed during DB initialization: {exc}")
+
+        try:
+            await self.start_agent()
+        except Exception as exc:
+            # Keep the wizard usable so the user can fix config (most often an
+            # invalid/missing Telegram token) without relaunching the app.
+            logger.exception("Wizard startup agent start failed.")
+            self.log(f"Wizard opened, but auto-starting the agent failed: {exc}")
+            return CommandResult(False, f"Wizard opened, but auto-starting the agent failed: {exc}")
+
+        return CommandResult(True, "Wizard startup complete. Local agent is running.")
+
     async def init_db(self) -> CommandResult:
+        started_at = time.monotonic()
         settings = self.settings()
         settings.ensure_dirs()
         db = Database(path=settings.db_path)
@@ -157,10 +179,13 @@ class DesktopCommandService:
             await db.initialize()
             if db.conn is None:
                 raise RuntimeError("Database connection unavailable.")
-            await OnboardingRepository(conn=db.conn).update_state(current_step="db_initialized")
+            onboarding_repo = OnboardingRepository(conn=db.conn)
+            state = await onboarding_repo.get_state()
+            if state.current_step == "start":
+                await onboarding_repo.update_state(current_step="db_initialized")
         finally:
             await db.close()
-        self.log(f"Database initialized at {settings.db_path}.")
+        self.log(f"Database initialized at {settings.db_path} in {int((time.monotonic() - started_at) * 1000)}ms.")
         return CommandResult(True, f"Database initialized at {settings.db_path}.")
 
     async def get_state(self) -> dict[str, Any]:
@@ -183,6 +208,8 @@ class DesktopCommandService:
                     "telegram_token_configured": bool(settings.telegram_bot_token),
                     "data_dir": str(settings.data_dir),
                     "db_path": str(settings.db_path),
+                    "log_file": str(settings.data_dir / "logs" / "pcca.log"),
+                    "debug_dir": str(settings.data_dir / "debug"),
                     "browser_channel": settings.browser_channel or "bundled",
                 },
                 "onboarding": {
@@ -210,6 +237,7 @@ class DesktopCommandService:
         return self._agent_task is not None and not self._agent_task.done()
 
     async def save_runtime_settings(self, *, token: str, timezone: str, digest_time: str) -> CommandResult:
+        was_running = self.agent_running
         values = {
             "PCCA_TELEGRAM_BOT_TOKEN": token.strip(),
             "PCCA_TIMEZONE": timezone.strip() or "UTC",
@@ -234,11 +262,26 @@ class DesktopCommandService:
         finally:
             await db.close()
         self.log("Runtime settings saved. Telegram token is configured but not printed for safety.")
-        return CommandResult(True, "Runtime settings saved.", {"telegram_token_configured": bool(token.strip())})
+        restart_warning = ""
+        if was_running:
+            self.log("Restarting local agent to apply runtime settings.")
+            try:
+                await self.stop_agent()
+                await self.start_agent()
+            except Exception as exc:
+                logger.exception("Failed to restart local agent after runtime settings update.")
+                restart_warning = f" Runtime settings were saved, but agent restart failed: {exc}"
+                self.log(restart_warning.strip())
+        return CommandResult(
+            True,
+            f"Runtime settings saved.{restart_warning}",
+            {"telegram_token_configured": bool(token.strip()), "agent_running": self.agent_running},
+        )
 
     async def start_agent(self) -> CommandResult:
         if self.agent_running:
             return CommandResult(True, "Agent is already running.", {"agent_running": True})
+        started_at = time.monotonic()
         app = PCCAApp(settings=self.settings())
         task = asyncio.create_task(app.run_forever())
         self._agent_app = app
@@ -247,12 +290,16 @@ class DesktopCommandService:
         await asyncio.sleep(0.2)
         if task.done():
             exc = task.exception()
+            self._agent_task = None
+            self._agent_app = None
             raise RuntimeError(f"Agent failed to start: {exc}")
+        self.log(f"Local agent started in {int((time.monotonic() - started_at) * 1000)}ms.")
         return CommandResult(True, "Agent started.", {"agent_running": True})
 
     async def stop_agent(self) -> CommandResult:
         if self._agent_task is None:
             return CommandResult(True, "Agent is not running.", {"agent_running": False})
+        started_at = time.monotonic()
         self._agent_task.cancel()
         try:
             await self._agent_task
@@ -261,7 +308,7 @@ class DesktopCommandService:
         finally:
             self._agent_task = None
             self._agent_app = None
-        self.log("Local agent stopped.")
+        self.log(f"Local agent stopped in {int((time.monotonic() - started_at) * 1000)}ms.")
         return CommandResult(True, "Agent stopped.", {"agent_running": False})
 
     async def open_login_window(self, *, platform: str) -> CommandResult:
@@ -317,9 +364,11 @@ class DesktopCommandService:
         platform = platform.strip().lower()
         if platform not in SUPPORTED_ONBOARDING_PLATFORMS:
             raise ValueError(f"Unsupported follow-import platform: {platform}")
+        started_at = time.monotonic()
+        self.log(f"Staging follows from {platform} with limit={limit}.")
         app = PCCAApp(settings=self.settings())
         count = await app.stage_follows_once(platform=platform, limit=limit)
-        self.log(f"Staged {count} source(s) from {platform}.")
+        self.log(f"Staged {count} source(s) from {platform} in {int((time.monotonic() - started_at) * 1000)}ms.")
         return CommandResult(True, f"Staged {count} source(s) from {platform}.", {"count": count})
 
     async def list_staged_sources(self) -> CommandResult:
@@ -459,4 +508,5 @@ class DesktopCommandService:
         )
 
     async def shutdown(self) -> None:
+        self.log("Wizard shutdown: stopping local agent.")
         await self.stop_agent()

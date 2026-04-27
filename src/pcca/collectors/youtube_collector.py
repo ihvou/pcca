@@ -68,7 +68,8 @@ class YouTubeCollector:
                 """,
                 self.max_items,
             )
-        except Exception:
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "youtube_collect_failed", error=exc)
             logger.exception("YouTube collection failed for source=%s", source_id)
             raise
         finally:

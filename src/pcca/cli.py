@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+from pathlib import Path
 from typing import Sequence
 
 from pcca.app import PCCAApp
@@ -20,6 +21,7 @@ from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 from pcca.services.desktop_command_service import DesktopCommandService
+from pcca.services.debug_bundle_service import create_debug_bundle
 
 
 async def _init_db(settings: Settings) -> None:
@@ -545,6 +547,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("run-digest-once", help="Run digest sending once")
     sub.add_parser("run-agent", help="Run scheduler + Telegram bot")
     sub.add_parser("run-desktop", help="Run desktop webview wizard for onboarding/control")
+    debug_bundle_parser = sub.add_parser("debug-bundle", help="Create a local redacted debug bundle")
+    debug_bundle_parser.add_argument("--output", required=False, help="Optional output .zip path")
 
     return parser
 
@@ -730,6 +734,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         from pcca.desktop_shell import run_desktop_shell
 
         run_desktop_shell()
+        return
+
+    if args.command == "debug-bundle":
+        bundle = create_debug_bundle(settings, output=Path(args.output) if args.output else None)
+        print(f"Debug bundle created: {bundle}")
         return
 
     raise ValueError(f"Unsupported command: {args.command}")

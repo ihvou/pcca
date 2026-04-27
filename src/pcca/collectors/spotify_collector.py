@@ -79,7 +79,8 @@ class SpotifyCollector:
                 """,
                 self.max_items,
             )
-        except Exception:
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "spotify_collect_failed", error=exc)
             logger.exception("Spotify collection failed for source=%s", source_id)
             raise
         finally:

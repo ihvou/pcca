@@ -73,7 +73,8 @@ class LinkedInCollector:
                 """,
                 self.max_items,
             )
-        except Exception:
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "linkedin_collect_failed", error=exc)
             logger.exception("LinkedIn collection failed for source=%s", source_id)
             raise
         finally:

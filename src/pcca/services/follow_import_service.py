@@ -53,6 +53,7 @@ class FollowImportService:
     async def import_x_follows(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("x")
         try:
+            logger.info("Follow import started platform=x limit=%d", limit)
             await page.goto("https://x.com/home", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
             profile_href = await page.evaluate(
@@ -87,11 +88,12 @@ class FollowImportService:
                 )
 
             own_handle = profile_href.strip("/").split("/")[-1]
+            logger.debug("X follow import detected own_handle=%s", own_handle)
             await page.goto(f"https://x.com/{own_handle}/following", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(2500)
 
             handles: set[str] = set()
-            for _ in range(20):
+            for iteration in range(20):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -107,6 +109,13 @@ class FollowImportService:
                     """
                 )
                 handles.update(str(h) for h in batch)
+                logger.debug(
+                    "Follow import scroll platform=x iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(handles),
+                    page.url,
+                )
                 if len(handles) >= limit:
                     break
                 await page.mouse.wheel(0, 2800)
@@ -114,13 +123,20 @@ class FollowImportService:
 
             # Remove known non-user routes.
             blocked = {"home", "explore", "notifications", "messages", "settings", "i", "compose"}
-            return [h for h in sorted(handles) if h.lower() not in blocked][:limit]
+            out = [h for h in sorted(handles) if h.lower() not in blocked][:limit]
+            logger.info("Follow import finished platform=x count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "x_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=x")
+            raise
         finally:
             await page.close()
 
     async def import_linkedin_follows(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("linkedin")
         try:
+            logger.info("Follow import started platform=linkedin limit=%d", limit)
             await page.goto(
                 "https://www.linkedin.com/feed/following/",
                 wait_until="domcontentloaded",
@@ -128,7 +144,7 @@ class FollowImportService:
             )
             await page.wait_for_timeout(3000)
             ids: set[str] = set()
-            for _ in range(20):
+            for iteration in range(20):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -146,17 +162,31 @@ class FollowImportService:
                     """
                 )
                 ids.update(str(i) for i in batch)
+                logger.debug(
+                    "Follow import scroll platform=linkedin iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(ids),
+                    page.url,
+                )
                 if len(ids) >= limit:
                     break
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(800)
-            return sorted(ids)[:limit]
+            out = sorted(ids)[:limit]
+            logger.info("Follow import finished platform=linkedin count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "linkedin_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=linkedin")
+            raise
         finally:
             await page.close()
 
     async def import_youtube_subscriptions(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("youtube")
         try:
+            logger.info("Follow import started platform=youtube limit=%d", limit)
             await page.goto(
                 "https://www.youtube.com/feed/channels",
                 wait_until="domcontentloaded",
@@ -164,7 +194,7 @@ class FollowImportService:
             )
             await page.wait_for_timeout(3000)
             ids: set[str] = set()
-            for _ in range(20):
+            for iteration in range(20):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -190,21 +220,35 @@ class FollowImportService:
                     normalized = normalize_youtube_subscription_href(str(href))
                     if normalized:
                         ids.add(normalized)
+                logger.debug(
+                    "Follow import scroll platform=youtube iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(ids),
+                    page.url,
+                )
                 if len(ids) >= limit:
                     break
                 await page.mouse.wheel(0, 2400)
                 await page.wait_for_timeout(700)
-            return sorted(ids)[:limit]
+            out = sorted(ids)[:limit]
+            logger.info("Follow import finished platform=youtube count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "youtube_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=youtube")
+            raise
         finally:
             await page.close()
 
     async def import_substack_subscriptions(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("substack")
         try:
+            logger.info("Follow import started platform=substack limit=%d", limit)
             await page.goto("https://substack.com/settings", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3000)
             urls: set[str] = set()
-            for _ in range(18):
+            for iteration in range(18):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -225,21 +269,35 @@ class FollowImportService:
                     normalized = self._normalize_substack_url(str(href))
                     if normalized:
                         urls.add(normalized)
+                logger.debug(
+                    "Follow import scroll platform=substack iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(urls),
+                    page.url,
+                )
                 if len(urls) >= limit:
                     break
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(700)
-            return sorted(urls)[:limit]
+            out = sorted(urls)[:limit]
+            logger.info("Follow import finished platform=substack count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "substack_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=substack")
+            raise
         finally:
             await page.close()
 
     async def import_medium_following(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("medium")
         try:
+            logger.info("Follow import started platform=medium limit=%d", limit)
             await page.goto("https://medium.com/me/following", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3200)
             urls: set[str] = set()
-            for _ in range(20):
+            for iteration in range(20):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -259,21 +317,35 @@ class FollowImportService:
                     normalized = self._normalize_medium_url(str(href))
                     if normalized:
                         urls.add(normalized)
+                logger.debug(
+                    "Follow import scroll platform=medium iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(urls),
+                    page.url,
+                )
                 if len(urls) >= limit:
                     break
                 await page.mouse.wheel(0, 2400)
                 await page.wait_for_timeout(700)
-            return sorted(urls)[:limit]
+            out = sorted(urls)[:limit]
+            logger.info("Follow import finished platform=medium count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "medium_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=medium")
+            raise
         finally:
             await page.close()
 
     async def import_spotify_podcast_follows(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("spotify")
         try:
+            logger.info("Follow import started platform=spotify limit=%d", limit)
             await page.goto("https://open.spotify.com/collection/podcasts", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3200)
             urls: set[str] = set()
-            for _ in range(22):
+            for iteration in range(22):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -292,21 +364,35 @@ class FollowImportService:
                     normalized = self._normalize_spotify_show_url(str(href))
                     if normalized:
                         urls.add(normalized)
+                logger.debug(
+                    "Follow import scroll platform=spotify iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(urls),
+                    page.url,
+                )
                 if len(urls) >= limit:
                     break
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(700)
-            return sorted(urls)[:limit]
+            out = sorted(urls)[:limit]
+            logger.info("Follow import finished platform=spotify count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "spotify_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=spotify")
+            raise
         finally:
             await page.close()
 
     async def import_apple_podcast_subscriptions(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("apple_podcasts")
         try:
+            logger.info("Follow import started platform=apple_podcasts limit=%d", limit)
             await page.goto("https://podcasts.apple.com/us/library/shows", wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3200)
             urls: set[str] = set()
-            for _ in range(20):
+            for iteration in range(20):
                 batch = await page.evaluate(
                     """
                     () => {
@@ -325,16 +411,30 @@ class FollowImportService:
                     normalized = self._normalize_apple_podcast_url(str(href))
                     if normalized:
                         urls.add(normalized)
+                logger.debug(
+                    "Follow import scroll platform=apple_podcasts iteration=%d batch=%d total=%d url=%s",
+                    iteration + 1,
+                    len(batch),
+                    len(urls),
+                    page.url,
+                )
                 if len(urls) >= limit:
                     break
                 await page.mouse.wheel(0, 2200)
                 await page.wait_for_timeout(700)
-            return sorted(urls)[:limit]
+            out = sorted(urls)[:limit]
+            logger.info("Follow import finished platform=apple_podcasts count=%d", len(out))
+            return out
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "apple_podcasts_follow_import_failed", error=exc)
+            logger.exception("Follow import failed platform=apple_podcasts")
+            raise
         finally:
             await page.close()
 
     async def import_sources(self, *, platform: str, limit: int = 200) -> list[ImportedFollowSource]:
         normalized_platform = platform.strip().lower()
+        logger.info("Normalizing imported follows platform=%s limit=%d", normalized_platform, limit)
         if normalized_platform == "x":
             imported = await self.import_x_follows(limit=limit)
         elif normalized_platform == "linkedin":
@@ -356,6 +456,12 @@ class FollowImportService:
         out: list[ImportedFollowSource] = []
         for raw_source in imported:
             out.extend(await self._normalize_imported_source(platform=normalized_platform, raw_source=raw_source))
+        logger.info(
+            "Normalized imported follows platform=%s raw_count=%d normalized_count=%d",
+            normalized_platform,
+            len(imported),
+            len(out),
+        )
         return out
 
     async def import_to_subject(self, *, subject_name: str, platform: str, limit: int = 200) -> int:

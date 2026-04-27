@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
 from pcca.config import Settings
+from pcca.observability import monotonic_ms_since, new_action_id, summarize_payload
 from pcca.services.desktop_command_service import DesktopCommandService
 
 logger = logging.getLogger(__name__)
@@ -101,10 +102,9 @@ INDEX_HTML = r"""
         </section>
         <section data-step="db_initialized">
           <h2>2. Local Agent</h2>
-          <p>Initialize local storage and start the Telegram/scheduler agent. Then send <code>/start</code> to your Telegram bot.</p>
+          <p>Local storage and the Telegram/scheduler agent start automatically when this wizard opens. Closing the wizard stops the local agent. Then send <code>/start</code> to your Telegram bot.</p>
           <div class="actions">
-            <button onclick="postAction('/api/init-db')">Init DB</button>
-            <button onclick="postAction('/api/agent/start')">Start Agent</button>
+            <button onclick="postAction('/api/agent/start')">Start Agent If Stopped</button>
             <button class="secondary" onclick="postAction('/api/agent/stop')">Stop Agent</button>
           </div>
         </section>
@@ -173,7 +173,7 @@ async function request(path, opts={}) {
   return data;
 }
 async function postAction(path, body={}) {
-  try { setBusy(true); const data = await request(path, {method:'POST', body: JSON.stringify(body)}); logLine(data.message || 'ok'); await loadState(); return data; }
+  try { setBusy(true); const data = await request(path, {method:'POST', body: JSON.stringify(body)}); logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'ok'}`); await loadState(); return data; }
   catch (err) { logLine(`ERROR: ${err.message}`); alert(err.message); }
   finally { setBusy(false); }
 }
@@ -230,7 +230,7 @@ async function loadState() {
     renderSources(data.staged_sources || []);
     renderSteps(data.onboarding.current_step || 'start');
     agentBadge.textContent = `agent: ${data.agent_running ? 'running' : 'stopped'}`;
-    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, subjects: data.subjects.map(x => x.name)}, null, 2);
+    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name)}, null, 2);
     logs.textContent = (data.logs || []).slice().reverse().join('\n');
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
@@ -291,15 +291,42 @@ class DesktopWebServer:
                 return {}
 
         async def run_result(handler: Callable[[dict[str, Any]], Awaitable[Any]], request):
+            started_at = time.monotonic()
+            action_id = new_action_id(request.url.path.strip("/").replace("/", "_") or "index")
             try:
                 payload = await read_json(request)
+                logger.info(
+                    "Desktop action started action_id=%s path=%s payload=%s",
+                    action_id,
+                    request.url.path,
+                    summarize_payload(payload),
+                )
                 result = await handler(payload)
                 if hasattr(result, "to_dict"):
-                    return JSONResponse(result.to_dict())
-                return JSONResponse(result)
+                    body = result.to_dict()
+                else:
+                    body = result
+                if isinstance(body, dict):
+                    body = {**body, "action_id": action_id}
+                    ok = body.get("ok", True)
+                else:
+                    ok = True
+                logger.info(
+                    "Desktop action finished action_id=%s path=%s ok=%s duration_ms=%d",
+                    action_id,
+                    request.url.path,
+                    ok,
+                    monotonic_ms_since(started_at),
+                )
+                return JSONResponse(body)
             except Exception as exc:
-                logger.exception("Desktop request failed path=%s", request.url.path)
-                return JSONResponse({"ok": False, "message": str(exc)}, status_code=500)
+                logger.exception(
+                    "Desktop request failed action_id=%s path=%s duration_ms=%d",
+                    action_id,
+                    request.url.path,
+                    monotonic_ms_since(started_at),
+                )
+                return JSONResponse({"ok": False, "message": str(exc), "action_id": action_id}, status_code=500)
 
         async def index(_request):
             return HTMLResponse(INDEX_HTML)
@@ -391,6 +418,10 @@ class DesktopWebServer:
 
         @asynccontextmanager
         async def lifespan(_app):
+            if self.service is not None:
+                result = await self.service.startup_for_wizard()
+                if not result.ok:
+                    logger.warning("Wizard startup completed with warning: %s", result.message)
             yield
             await shutdown_service()
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass, field
 
 from pcca.collectors.base import Collector
@@ -31,6 +32,7 @@ class PipelineOrchestrator:
 
     async def run_nightly_collection(self) -> dict:
         run_id = await self.run_log_repo.start_run("nightly_collection")
+        run_started_at = time.monotonic()
         stats = {
             "subjects_seen": 0,
             "sources_seen": 0,
@@ -45,6 +47,7 @@ class PipelineOrchestrator:
         try:
             subjects = await self.subject_service.list_subjects()
             stats["subjects_seen"] = len(subjects)
+            logger.info("Nightly collection started run_id=%s subjects=%d", run_id, len(subjects))
             for subject in subjects:
                 include_terms: list[str] = []
                 exclude_terms: list[str] = []
@@ -61,7 +64,16 @@ class PipelineOrchestrator:
                         min_practicality = float(pref.quality_rules["min_practicality"])
                 subject_sources = await self.source_service.list_sources_for_subject(subject.name)
                 stats["sources_seen"] += len(subject_sources)
+                logger.info(
+                    "Nightly subject plan run_id=%s subject=%s sources=%d include_terms=%d exclude_terms=%d",
+                    run_id,
+                    subject.name,
+                    len(subject_sources),
+                    len(include_terms),
+                    len(exclude_terms),
+                )
                 for source in subject_sources:
+                    source_started_at = time.monotonic()
                     collector = self.collectors.get(source.platform)
                     if collector is None:
                         logger.warning(
@@ -73,7 +85,8 @@ class PipelineOrchestrator:
                         continue
                     try:
                         logger.info(
-                            "Collecting source subject=%s source_id=%s platform=%s identifier=%s",
+                            "Collecting source run_id=%s subject=%s source_id=%s platform=%s identifier=%s",
+                            run_id,
                             subject.name,
                             source.source_id,
                             source.platform,
@@ -84,17 +97,28 @@ class PipelineOrchestrator:
                         stats["sources_crawled"] += 1
                         stats["items_collected"] += len(items)
                         logger.info(
-                            "Collected source subject=%s source_id=%s platform=%s items=%d",
+                            "Collected source run_id=%s subject=%s source_id=%s platform=%s items=%d duration_ms=%d",
+                            run_id,
                             subject.name,
                             source.source_id,
                             source.platform,
                             len(items),
+                            int((time.monotonic() - source_started_at) * 1000),
                         )
                         if items:
                             upsert_stats = await self.item_repo.upsert_many(items)
                             stats["items_inserted"] += upsert_stats["inserted"]
                             stats["items_updated"] += upsert_stats["updated"]
                             changed_item_ids = set(upsert_stats.get("changed_item_ids", []))
+                            logger.info(
+                                "Upserted source items run_id=%s subject=%s source_id=%s inserted=%d updated=%d changed=%d",
+                                run_id,
+                                subject.name,
+                                source.source_id,
+                                upsert_stats["inserted"],
+                                upsert_stats["updated"],
+                                len(changed_item_ids),
+                            )
 
                             for item, item_id in zip(items, upsert_stats["item_ids"]):
                                 if item_id not in changed_item_ids:
@@ -133,24 +157,40 @@ class PipelineOrchestrator:
                         await self.source_service.mark_source_needs_reauth(source.source_id)
                         stats["sources_needing_reauth"] += 1
                         logger.warning(
-                            "Session challenge detected subject=%s source_id=%s platform=%s challenge=%s url=%s",
+                            "Session challenge detected run_id=%s subject=%s source_id=%s platform=%s challenge=%s url=%s duration_ms=%d",
+                            run_id,
                             subject.name,
                             source.source_id,
                             exc.platform,
                             exc.challenge_kind,
                             exc.current_url,
+                            int((time.monotonic() - source_started_at) * 1000),
                         )
                     except Exception:
                         logger.exception(
-                            "Collector failed for subject=%s platform=%s source=%s",
+                            "Collector failed run_id=%s subject=%s platform=%s source=%s duration_ms=%d",
+                            run_id,
                             subject.name,
                             source.platform,
                             source.account_or_channel_id,
+                            int((time.monotonic() - source_started_at) * 1000),
                         )
                         stats["collector_errors"] += 1
 
             await self.run_log_repo.finish_run(run_id, status="success", stats=stats)
+            logger.info(
+                "Nightly collection succeeded run_id=%s duration_ms=%d stats=%s",
+                run_id,
+                int((time.monotonic() - run_started_at) * 1000),
+                stats,
+            )
             return stats
         except Exception:
             await self.run_log_repo.finish_run(run_id, status="failed", stats=stats)
+            logger.exception(
+                "Nightly collection failed run_id=%s duration_ms=%d stats=%s",
+                run_id,
+                int((time.monotonic() - run_started_at) * 1000),
+                stats,
+            )
             raise

@@ -142,7 +142,15 @@ Digest delivery, button callbacks, conversational control. Free-form intent disp
 SQLite access, migrations, repositories, event logs. Single shared `aiosqlite.Connection` in v1; split reader/writer planned (task T-9).
 
 ### 4.13 Observability
-Today: `run_logs.stats_json` blob. Target: per-collector extraction success %, model latency, digest delivery success, session-challenge counters (task T-20).
+Implemented local dogfood layer:
+- rotating app logs at `.pcca/logs/pcca.log`
+- desktop action IDs with start/finish/failure timing
+- browser console, page error, failed-request, and HTTP 4xx/5xx breadcrumbs
+- browser failure screenshots plus JSON metadata at `.pcca/debug/browser/`
+- per-source collection timing, item counts, model rerank timing, Telegram send timing
+- `pcca debug-bundle` for a redacted local support bundle
+
+Still planned under task T-20: durable metric rollups for per-collector extraction success %, model latency percentiles, digest delivery success, and session-challenge counters exposed through `/stats`.
 
 ### 4.14 Discovery Service (`services/source_discovery_service.py`)
 Canonical source normalization for imported follows/subscriptions and platform-specific source identities. Passive + active account discovery is planned.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
@@ -57,6 +58,8 @@ class TelegramService:
         self.get_digest_action = get_digest_action
 
     async def start(self) -> None:
+        started_at = time.monotonic()
+        logger.info("Telegram service starting.")
         app = ApplicationBuilder().token(self.bot_token).build()
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(CommandHandler("help", self._on_help))
@@ -75,18 +78,20 @@ class TelegramService:
             raise RuntimeError("Telegram updater is not available.")
         await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         self.application = app
-        logger.info("Telegram service started.")
+        logger.info("Telegram service started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
     async def stop(self) -> None:
         if self.application is None:
             return
+        started_at = time.monotonic()
+        logger.info("Telegram service stopping.")
         app = self.application
         self.application = None
         if app.updater is not None:
             await app.updater.stop()
         await app.stop()
         await app.shutdown()
-        logger.info("Telegram service stopped.")
+        logger.info("Telegram service stopped duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
     async def send_digest_message(
         self,
@@ -99,6 +104,14 @@ class TelegramService:
         if self.application is None:
             logger.warning("Telegram application not started, skipping digest send.")
             return None
+        started_at = time.monotonic()
+        logger.info(
+            "Telegram digest send started chat_id=%s subject=%s items=%d thread_id=%s",
+            chat_id,
+            subject_name,
+            len(items),
+            thread_id,
+        )
         title = f"📌 {subject_name} — {len(items)} items today"
         body = "\n\n".join(items) if items else "No high-signal items passed your quality bar today."
         keyboard_rows = []
@@ -118,18 +131,39 @@ class TelegramService:
                 InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
             ]
         )
-        sent = await self.application.bot.send_message(
-            chat_id=chat_id,
-            text=f"{title}\n\n{body}",
-            reply_markup=InlineKeyboardMarkup(keyboard_rows),
-            message_thread_id=thread_id,
-            disable_web_page_preview=True,
-        )
-        return sent.message_id
+        try:
+            sent = await self.application.bot.send_message(
+                chat_id=chat_id,
+                text=f"{title}\n\n{body}",
+                reply_markup=InlineKeyboardMarkup(keyboard_rows),
+                message_thread_id=thread_id,
+                disable_web_page_preview=True,
+            )
+            logger.info(
+                "Telegram digest send finished chat_id=%s subject=%s message_id=%s duration_ms=%d",
+                chat_id,
+                subject_name,
+                sent.message_id,
+                int((time.monotonic() - started_at) * 1000),
+            )
+            return sent.message_id
+        except Exception:
+            logger.exception(
+                "Telegram digest send failed chat_id=%s subject=%s duration_ms=%d",
+                chat_id,
+                subject_name,
+                int((time.monotonic() - started_at) * 1000),
+            )
+            raise
 
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        logger.info(
+            "Telegram /start received chat_id=%s user_id=%s",
+            update.effective_chat.id if update.effective_chat else None,
+            update.effective_user.id if update.effective_user else None,
+        )
         new_routes = await self.routing_service.ensure_routes_for_chat(
             chat_id=update.effective_chat.id,
             title=update.effective_chat.title or update.effective_chat.full_name,
@@ -194,6 +228,12 @@ class TelegramService:
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
             return
+        logger.debug(
+            "Telegram text received chat_id=%s user_id=%s chars=%d",
+            update.effective_chat.id if update.effective_chat else None,
+            update.effective_user.id if update.effective_user else None,
+            len(update.message.text),
+        )
         await self.routing_service.ensure_routes_for_chat(
             chat_id=update.effective_chat.id,
             title=update.effective_chat.title or update.effective_chat.full_name,
@@ -204,6 +244,13 @@ class TelegramService:
         if update.message is None:
             return
         intent = parse_intent(text)
+        logger.info(
+            "Telegram intent parsed action=%s subject=%s platform=%s source_present=%s",
+            intent.action.value,
+            intent.subject_name,
+            intent.platform,
+            bool(intent.source_id or intent.source_url),
+        )
         thread_id = str(update.message.message_thread_id) if update.message.message_thread_id else None
 
         if intent.action is IntentAction.CREATE_SUBJECT:
@@ -471,6 +518,7 @@ class TelegramService:
             await message.reply_text("Another manual run is in progress. Please wait a bit and try again.")
             return
         await message.reply_text(f"Running `{action_name}` now...", parse_mode="Markdown")
+        started_at = time.monotonic()
         try:
             async with self._manual_action_lock:
                 await action()
@@ -478,8 +526,17 @@ class TelegramService:
             if action_name == "read content":
                 reauth_note = await self._format_reauth_sources()
             await message.reply_text(f"{action_name} completed.{reauth_note}")
+            logger.info(
+                "Telegram manual action finished action=%s duration_ms=%d",
+                action_name,
+                int((time.monotonic() - started_at) * 1000),
+            )
         except Exception:
-            logger.exception("Manual action failed: %s", action_name)
+            logger.exception(
+                "Manual action failed: %s duration_ms=%d",
+                action_name,
+                int((time.monotonic() - started_at) * 1000),
+            )
             await message.reply_text(f"`{action_name}` failed. Check logs and try again.", parse_mode="Markdown")
 
     async def _format_reauth_sources(self) -> str:
