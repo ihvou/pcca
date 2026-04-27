@@ -43,6 +43,9 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     telegram_bot_token: str | None
+    session_refresh_enabled: bool = True
+    session_refresh_cooldown_seconds: int = 1800
+    session_refresh_browser: str | None = None
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -68,6 +71,15 @@ class Settings:
         # morning_cron auto-send for users who have a stable nightly+morning routine.
         digest_auto_send_raw = (_env("PCCA_DIGEST_AUTO_SEND", "false") or "false").strip().lower()
         digest_auto_send = digest_auto_send_raw in {"1", "true", "yes", "on"}
+        session_refresh_enabled_raw = (_env("PCCA_SESSION_REFRESH_ENABLED", "true") or "true").strip().lower()
+        session_refresh_enabled = session_refresh_enabled_raw in {"1", "true", "yes", "on"}
+        try:
+            session_refresh_cooldown_seconds = int(_env("PCCA_SESSION_REFRESH_COOLDOWN_SECONDS", "1800") or "1800")
+        except ValueError:
+            session_refresh_cooldown_seconds = 1800
+        session_refresh_browser = _env("PCCA_SESSION_REFRESH_BROWSER", None)
+        if session_refresh_browser is not None:
+            session_refresh_browser = session_refresh_browser.strip().lower() or None
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -83,6 +95,9 @@ class Settings:
             ollama_base_url=_env("PCCA_OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434",
             ollama_model=_env("PCCA_OLLAMA_MODEL", "qwen2.5:7b") or "qwen2.5:7b",
             telegram_bot_token=_env("PCCA_TELEGRAM_BOT_TOKEN"),
+            session_refresh_enabled=session_refresh_enabled,
+            session_refresh_cooldown_seconds=max(0, session_refresh_cooldown_seconds),
+            session_refresh_browser=session_refresh_browser,
         )
 
     def ensure_dirs(self) -> None:

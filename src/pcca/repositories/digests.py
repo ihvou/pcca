@@ -68,6 +68,39 @@ class DigestRepository:
             status=row["status"],
         )
 
+    async def delete_digests_for_date(self, *, run_date: date, subject_ids: set[int] | None = None) -> int:
+        params: list[object] = [run_date.isoformat()]
+        subject_filter = ""
+        if subject_ids:
+            placeholders = ",".join("?" for _ in subject_ids)
+            subject_filter = f" AND subject_id IN ({placeholders})"
+            params.extend(sorted(subject_ids))
+
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT id
+                FROM digests
+                WHERE run_date = ?{subject_filter}
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        digest_ids = [int(row["id"]) for row in rows]
+        if not digest_ids:
+            return 0
+
+        placeholders = ",".join("?" for _ in digest_ids)
+        digest_params = tuple(digest_ids)
+        # Current schema does not use ON DELETE CASCADE, so dependency rows must
+        # be removed explicitly before deleting the digest root rows.
+        await self.conn.execute(f"DELETE FROM digest_deliveries WHERE digest_id IN ({placeholders})", digest_params)
+        await self.conn.execute(f"DELETE FROM digest_buttons WHERE digest_id IN ({placeholders})", digest_params)
+        await self.conn.execute(f"DELETE FROM digest_items WHERE digest_id IN ({placeholders})", digest_params)
+        await self.conn.execute(f"DELETE FROM digests WHERE id IN ({placeholders})", digest_params)
+        await self.conn.commit()
+        return len(digest_ids)
+
     async def list_digest_items(self, *, digest_id: int) -> list[DigestItemRow]:
         rows = await (
             await self.conn.execute(

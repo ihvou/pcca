@@ -43,6 +43,26 @@ class FakeFollowImportService(FollowImportService):
         return ["https://example.substack.com"]
 
 
+class FakeSessionRefreshService:
+    def __init__(self) -> None:
+        self.platforms: list[str] = []
+
+    async def refresh_platform(self, platform: str):
+        self.platforms.append(platform)
+        return type(
+            "RefreshResult",
+            (),
+            {
+                "refreshed": True,
+                "skipped": False,
+                "reason": "refreshed",
+                "browser": "arc",
+                "profile_name": "Default",
+                "missing_cookie_names": [],
+            },
+        )()
+
+
 @dataclass
 class FakeDiscovery:
     async def discover(self, raw_input: str) -> list[DiscoveredSource]:
@@ -67,6 +87,22 @@ async def test_import_to_subject_wires_sources() -> None:
     assert count == 2
     assert ("Vibe Coding", "x", "alice") in fake_source_service.calls
     assert ("Vibe Coding", "x", "bob") in fake_source_service.calls
+
+
+@pytest.mark.asyncio
+async def test_import_sources_refreshes_session_before_reading_follows() -> None:
+    fake_source_service = FakeSourceService(calls=[])
+    refresh_service = FakeSessionRefreshService()
+    service = FakeFollowImportService(
+        session_manager=None,  # type: ignore[arg-type]
+        source_service=fake_source_service,
+        session_refresh_service=refresh_service,  # type: ignore[arg-type]
+    )
+
+    imported = await service.import_sources(platform="x", limit=10)
+
+    assert refresh_service.platforms == ["x"]
+    assert [source.account_or_channel_id for source in imported] == ["alice", "bob"]
 
 
 @pytest.mark.asyncio

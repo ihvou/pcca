@@ -12,6 +12,7 @@ from pcca.repositories.run_logs import RunLogRepository
 from pcca.pipeline.curation import CurationEngine
 from pcca.services.model_router import ModelRouter
 from pcca.services.preference_service import PreferenceService
+from pcca.services.session_capture_service import SessionRefreshService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 
@@ -28,6 +29,7 @@ class PipelineOrchestrator:
     preference_service: PreferenceService | None = None
     curation_engine: CurationEngine = field(default_factory=CurationEngine)
     model_router: ModelRouter | None = None
+    session_refresh_service: SessionRefreshService | None = None
     collectors: dict[str, Collector] = field(default_factory=dict)
 
     async def run_nightly_collection(self) -> dict:
@@ -83,6 +85,19 @@ class PipelineOrchestrator:
                             source.platform,
                         )
                         continue
+                    if self.session_refresh_service is not None:
+                        refresh = await self.session_refresh_service.refresh_platform(source.platform)
+                        logger.info(
+                            "Pre-collection session refresh run_id=%s platform=%s refreshed=%s skipped=%s reason=%s browser=%s profile=%s missing=%s",
+                            run_id,
+                            source.platform,
+                            refresh.refreshed,
+                            refresh.skipped,
+                            refresh.reason,
+                            refresh.browser,
+                            refresh.profile_name,
+                            refresh.missing_cookie_names,
+                        )
                     try:
                         logger.info(
                             "Collecting source run_id=%s subject=%s source_id=%s platform=%s identifier=%s",

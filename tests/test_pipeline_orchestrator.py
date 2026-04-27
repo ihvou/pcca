@@ -48,6 +48,26 @@ class ChallengedCollector:
         )
 
 
+class FakeSessionRefreshService:
+    def __init__(self) -> None:
+        self.platforms: list[str] = []
+
+    async def refresh_platform(self, platform: str):
+        self.platforms.append(platform)
+        return type(
+            "RefreshResult",
+            (),
+            {
+                "refreshed": True,
+                "skipped": False,
+                "reason": "refreshed",
+                "browser": "arc",
+                "profile_name": "Default",
+                "missing_cookie_names": [],
+            },
+        )()
+
+
 @pytest.mark.asyncio
 async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
@@ -97,6 +117,45 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     assert second_stats["items_inserted"] == 0
     assert second_stats["items_updated"] == 0
     assert second_stats["items_scored"] == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_refreshes_session_before_collecting_source(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding")
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="x",
+        account_or_channel_id="borischerny",
+        display_name="Boris Cherny",
+        priority=1,
+    )
+
+    refresh_service = FakeSessionRefreshService()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        session_refresh_service=refresh_service,  # type: ignore[arg-type]
+        collectors={"x": DummyRSSCollector()},
+    )
+    stats = await orchestrator.run_nightly_collection()
+
+    assert refresh_service.platforms == ["x"]
+    assert stats["items_collected"] == 1
 
     await db.close()
 

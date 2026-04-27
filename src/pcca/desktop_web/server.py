@@ -122,6 +122,7 @@ INDEX_HTML = r"""
             <button class="warn" onclick="captureSession()">Capture Session</button>
             <button onclick="stageFollows()">Stage Follows</button>
           </div>
+          <div class="status-line" id="reauthSources">No sources currently need re-login.</div>
         </section>
         <section data-step="sources_reviewed">
           <h2>4. Review Staged Sources</h2>
@@ -143,7 +144,10 @@ INDEX_HTML = r"""
         <section data-step="completed">
           <h2>6. Smoke Crawl + Test Digest</h2>
           <p>The wizard only completes if at least one item is collected and at least one Telegram delivery succeeds.</p>
-          <div class="actions"><button onclick="smoke()">Smoke Crawl + Test Digest</button></div>
+          <div class="actions">
+            <button onclick="smoke()">Smoke Crawl + Test Digest</button>
+            <button class="secondary" onclick="rebuildDigest()">Rebuild Today's Digest</button>
+          </div>
           <div class="status-line" id="smokeStatus">Not run yet.</div>
         </section>
       </main>
@@ -183,6 +187,7 @@ async function saveSettings() {
 async function captureSession() { return postAction('/api/session/capture', {platform: platform.value, browser: browser.value}); }
 async function loginPlatform() { return postAction('/api/login', {platform: platform.value}); }
 async function stageFollows() { return postAction('/api/stage-follows', {platform: platform.value, limit: Number(limit.value || 100)}); }
+async function rebuildDigest() { return postAction('/api/digest/rebuild'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
 async function confirmSubject() {
   return postAction('/api/confirm-staged-sources', {
@@ -211,6 +216,21 @@ function renderSources(rows) {
     sources.appendChild(div);
   }
 }
+function renderReauth(rows) {
+  if (!rows.length) {
+    reauthSources.textContent = 'No sources currently need re-login.';
+    reauthSources.className = 'status-line ok';
+    return;
+  }
+  const lines = rows.map(r => `- ${r.platform}: ${r.display_name} (${r.account_or_channel_id})`);
+  reauthSources.textContent = [
+    'Sources needing re-login:',
+    ...lines,
+    '',
+    'Log into the platform in your normal browser, then run Stage Follows or Read Content again. Capture Session is still available as a repair action.'
+  ].join('\n');
+  reauthSources.className = 'status-line bad';
+}
 function renderSteps(current) {
   const order = ['runtime_configured','db_initialized','sources_imported','sources_reviewed','subject_confirmed','completed'];
   const index = Math.max(0, order.indexOf(current));
@@ -228,9 +248,10 @@ async function loadState() {
     digestTime.value = s.digest_time || '08:30';
     if (platform.options.length === 0) data.platforms.forEach(p => platform.add(new Option(p, p)));
     renderSources(data.staged_sources || []);
+    renderReauth(data.reauth_sources || []);
     renderSteps(data.onboarding.current_step || 'start');
     agentBadge.textContent = `agent: ${data.agent_running ? 'running' : 'stopped'}`;
-    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name)}, null, 2);
+    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, session_refresh: `${s.session_refresh_enabled ? 'on' : 'off'} (${s.session_refresh_browser}, ${s.session_refresh_cooldown_seconds}s)`, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name)}, null, 2);
     logs.textContent = (data.logs || []).slice().reverse().join('\n');
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
@@ -412,6 +433,10 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(lambda _p: self.service.run_smoke_crawl_and_digest(), request)
 
+        async def rebuild_digest(request):
+            assert self.service is not None
+            return await run_result(lambda _p: self.service.rebuild_todays_digest(), request)
+
         async def shutdown_service() -> None:
             if self.service is not None:
                 await self.service.shutdown()
@@ -439,6 +464,7 @@ class DesktopWebServer:
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
+            Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
         ]
         app = Starlette(routes=routes, lifespan=lifespan)
         app.add_middleware(BaseHTTPMiddleware, dispatch=require_auth)

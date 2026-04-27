@@ -8,6 +8,7 @@ from pcca.config import Settings
 from pcca.db import Database
 from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.routing import RoutingRepository
+from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.desktop_command_service import (
     DesktopCommandService,
@@ -16,6 +17,7 @@ from pcca.services.desktop_command_service import (
     evaluate_smoke_result,
 )
 from pcca.services.routing_service import RoutingService
+from pcca.services.source_service import SourceService
 
 
 def make_settings(tmp_path: Path, token: str | None = None) -> Settings:
@@ -133,3 +135,41 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
     assert state.completed_at is None
     assert [row.status for row in staged] == ["confirmed"]
     assert subject_row is not None
+
+
+@pytest.mark.asyncio
+async def test_desktop_state_surfaces_sources_needing_reauth(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject_repo = SubjectRepository(conn=db.conn)
+        source_service = SourceService(
+            source_repo=SourceRepository(conn=db.conn),
+            subject_repo=subject_repo,
+        )
+        await SubjectRepository(conn=db.conn).create("Vibe Coding")
+        await source_service.add_source_to_subject(
+            subject_name="Vibe Coding",
+            platform="youtube",
+            account_or_channel_id="@openai",
+            display_name="OpenAI",
+        )
+        source = await SourceRepository(conn=db.conn).get_by_identity(
+            platform="youtube",
+            account_or_channel_id="@openai",
+        )
+        assert source is not None
+        await SourceRepository(conn=db.conn).mark_needs_reauth(source.id)
+    finally:
+        await db.close()
+
+    state = await service.get_state()
+
+    assert state["reauth_sources"][0]["platform"] == "youtube"
+    assert state["reauth_sources"][0]["account_or_channel_id"] == "@openai"

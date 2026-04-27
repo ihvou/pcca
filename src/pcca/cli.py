@@ -545,6 +545,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
     sub.add_parser("run-digest-once", help="Run digest sending once")
+    sub.add_parser("rebuild-digest-once", help="Force rebuild today's digest and send it")
     sub.add_parser("run-agent", help="Run scheduler + Telegram bot")
     sub.add_parser("run-desktop", help="Run desktop webview wizard for onboarding/control")
     debug_bundle_parser = sub.add_parser("debug-bundle", help="Create a local redacted debug bundle")
@@ -720,6 +721,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         app = PCCAApp(settings=settings)
         asyncio.run(app.run_digest_once())
         print("Digest run completed.")
+        return
+
+    if args.command == "rebuild-digest-once":
+        app = PCCAApp(settings=settings)
+        stats = asyncio.run(app.rebuild_digest_once())
+        print(f"Digest rebuild completed: {stats}")
         return
 
     if args.command == "run-agent":

@@ -12,6 +12,7 @@ venv/
 # Local runtime data
 .env
 .env.*
+!.env.example
 .pcca/
 data/
 *.db

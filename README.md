@@ -13,6 +13,8 @@ Phase-1 functional foundation is in place:
 - detailed run/browser logging to `.pcca/logs/pcca.log` for local debugging
 - nightly collection pipeline + scoring + persistence
 - morning digest assembly and Telegram delivery wiring
+- auto-refresh of captured browser cookies before follow import and collection
+- forced rebuild of today's digest from current scores
 - browser-session login and follow import for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts
 - unified source flow for X/LinkedIn/YouTube/Substack/reddit/Spotify/Apple Podcasts/Medium
 - collectors: X, LinkedIn, YouTube, Substack, Reddit, Spotify, Apple Podcasts, Medium, RSS
@@ -41,6 +43,7 @@ pcca run-desktop
 Use the desktop wizard to:
 - save timezone, digest time, and Telegram bot token
 - capture sessions from your normal browser
+- let PCCA auto-refresh captured sessions before future imports and reads
 - stage follows/subscriptions for review
 - create the first subject from staged sources
 - trigger read/digest runs
@@ -50,6 +53,7 @@ CLI one-shot jobs are available for developer/debug use:
 ```bash
 pcca run-nightly-once
 pcca run-digest-once
+pcca rebuild-digest-once
 ```
 
 Run the long-lived agent:
@@ -86,6 +90,7 @@ pcca run-desktop
 
 4. Back in the desktop wizard:
 - capture sessions from the browser where you are already logged in
+- after first capture, PCCA re-syncs fresh cookies automatically before import/read runs
 - stage follows/subscriptions
 - review staged sources
 - create the first subject with include/exclude/high-quality notes
@@ -129,6 +134,7 @@ pcca run-desktop
 - Leave browser capture on `Auto`, or choose the exact browser where you are logged in.
 - Click `Capture Session`.
 - Repeat for each platform you want included in the smoke test.
+- After first capture, normal `Stage Follows`, `Read Content`, and nightly runs re-read fresh cookies from your normal browser automatically on a cooldown.
 
 5. Stage and review follows/subscriptions
 - For each connected platform, click `Stage Follows`.
@@ -144,6 +150,7 @@ pcca run-desktop
 - Or use Telegram:
   - `/read_content`
   - `/get_digest`
+- If you added sources after already sending today's digest, use `Rebuild Today's Digest` in the wizard or `/rebuild_digest` in Telegram.
 
 8. Validate Scenario 1 success criteria
 - You can list subjects and sources in Telegram:
@@ -212,6 +219,7 @@ The bundle includes redacted logs, DB summaries, and debug artifacts. It does no
 - `/setup` guided onboarding checklist
 - `/read_content` manual on-demand collection run
 - `/get_digest` manual on-demand digest run
+- `/rebuild_digest` delete today's existing digest rows and send a fresh composition
 - free-form examples:
   - `Create subject: Agentic PM`
   - `Unsubscribe x:borischerny from Vibe Coding`
@@ -240,10 +248,18 @@ into PCCA's Playwright profile. Cookie lifetimes vary by platform:
 - **LinkedIn (`li_at`)** — ~1 year.
 - **Spotify / Substack / Medium** — long-lived.
 - **YouTube / Google (SID family)** — rotates aggressively; can require
-  re-capture every few days. As long as you stay logged into Google in
-  your normal browser, T-40 (planned) will auto-refresh PCCA's cookies
-  before each scrape so manual re-capture is one-time. Until T-40 lands,
-  re-click `Capture Session` for YouTube when scrapes start failing.
+  periodic refresh. As long as you stay logged into Google in your normal
+  browser, PCCA auto-refreshes its Playwright profile before follow import
+  and collection so manual re-capture should be a one-time setup/repair action.
+
+Session refresh is enabled by default:
+
+```bash
+PCCA_SESSION_REFRESH_ENABLED=true
+PCCA_SESSION_REFRESH_COOLDOWN_SECONDS=1800
+# Optional: chrome, arc, brave, or edge. Empty means auto-detect.
+PCCA_SESSION_REFRESH_BROWSER=
+```
 
 When PCCA detects a logged-out scrape (401 / login redirect), it marks
 the source `follow_state='needs_reauth'` and the wizard surfaces it

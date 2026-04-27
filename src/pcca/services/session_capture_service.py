@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -7,6 +8,7 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -84,6 +86,24 @@ class SessionCaptureResult:
             "captured_cookie_names": self.captured_cookie_names,
             "missing_cookie_names": self.missing_cookie_names,
         }
+
+
+@dataclass
+class SessionRefreshResult:
+    platform: str
+    refreshed: bool
+    skipped: bool
+    reason: str
+    browser: str | None = None
+    profile_name: str | None = None
+    injected_cookie_count: int = 0
+    required_cookie_names: list[str] = field(default_factory=list)
+    captured_cookie_names: list[str] = field(default_factory=list)
+    missing_cookie_names: list[str] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.refreshed or self.skipped
 
 
 PLATFORM_COOKIE_TARGETS = {
@@ -471,6 +491,162 @@ class SessionCaptureService:
             captured_cookie_names=captured_names,
             missing_cookie_names=missing,
         )
+
+
+class SessionRefreshService:
+    """Best-effort cookie sync from the user's real browser into PCCA profiles.
+
+    This is intentionally non-fatal: if cookie reading/decryption fails, existing
+    PCCA profile cookies remain untouched and collectors still get a chance to run.
+    Actual login/challenge detection remains the collector's responsibility.
+    """
+
+    def __init__(
+        self,
+        *,
+        settings: Settings,
+        session_manager: BrowserSessionManager,
+        cookie_reader: ChromiumCookieReader | None = None,
+        cooldown_seconds: int | None = None,
+        browser: str | None = None,
+    ) -> None:
+        self.settings = settings
+        self.session_manager = session_manager
+        self.cookie_reader = cookie_reader or ChromiumCookieReader()
+        self.cooldown_seconds = (
+            settings.session_refresh_cooldown_seconds
+            if cooldown_seconds is None
+            else max(0, cooldown_seconds)
+        )
+        self.browser = browser if browser is not None else settings.session_refresh_browser
+        self.enabled = settings.session_refresh_enabled
+        self._last_attempt_by_platform: dict[str, float] = {}
+        self._locks_by_platform: dict[str, asyncio.Lock] = {}
+
+    async def refresh_platform(self, platform: str, *, force: bool = False) -> SessionRefreshResult:
+        platform = platform.strip().lower()
+        target = PLATFORM_COOKIE_TARGETS.get(platform)
+        if target is None:
+            return SessionRefreshResult(
+                platform=platform,
+                refreshed=False,
+                skipped=True,
+                reason="unsupported_platform",
+            )
+        if not self.enabled:
+            return SessionRefreshResult(
+                platform=platform,
+                refreshed=False,
+                skipped=True,
+                reason="disabled",
+                required_cookie_names=required_requirement_descriptions(target),
+            )
+
+        lock = self._locks_by_platform.setdefault(platform, asyncio.Lock())
+        async with lock:
+            now = time.monotonic()
+            last_attempt = self._last_attempt_by_platform.get(platform)
+            if not force and last_attempt is not None and now - last_attempt < self.cooldown_seconds:
+                return SessionRefreshResult(
+                    platform=platform,
+                    refreshed=False,
+                    skipped=True,
+                    reason="cooldown",
+                    required_cookie_names=required_requirement_descriptions(target),
+                )
+            self._last_attempt_by_platform[platform] = now
+
+            try:
+                profile_db, cookies = self.cookie_reader.read_platform_cookies(
+                    platform=platform,
+                    browser=self.browser,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session refresh failed while reading browser cookies platform=%s browser=%s error=%s",
+                    platform,
+                    self.browser or "auto",
+                    exc,
+                    exc_info=True,
+                )
+                return SessionRefreshResult(
+                    platform=platform,
+                    refreshed=False,
+                    skipped=False,
+                    reason=f"cookie_read_failed: {exc}",
+                    required_cookie_names=required_requirement_descriptions(target),
+                    missing_cookie_names=required_requirement_descriptions(target),
+                )
+
+            captured_names = sorted({cookie.name for cookie in cookies})
+            missing = missing_requirement_descriptions(target, set(captured_names))
+            if missing:
+                logger.warning(
+                    "Session refresh found incomplete browser session platform=%s browser=%s profile=%s captured=%s missing=%s",
+                    platform,
+                    profile_db.source.browser,
+                    profile_db.profile_name,
+                    captured_names,
+                    missing,
+                )
+                return SessionRefreshResult(
+                    platform=platform,
+                    refreshed=False,
+                    skipped=False,
+                    reason="missing_required_cookies",
+                    browser=profile_db.source.browser,
+                    profile_name=profile_db.profile_name,
+                    required_cookie_names=required_requirement_descriptions(target),
+                    captured_cookie_names=captured_names,
+                    missing_cookie_names=missing,
+                )
+
+            try:
+                injected = await self.session_manager.inject_session_cookies(
+                    platform=platform,
+                    cookies=[cookie.to_playwright() for cookie in cookies],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Session refresh failed while injecting cookies platform=%s browser=%s profile=%s error=%s",
+                    platform,
+                    profile_db.source.browser,
+                    profile_db.profile_name,
+                    exc,
+                    exc_info=True,
+                )
+                return SessionRefreshResult(
+                    platform=platform,
+                    refreshed=False,
+                    skipped=False,
+                    reason=f"cookie_inject_failed: {exc}",
+                    browser=profile_db.source.browser,
+                    profile_name=profile_db.profile_name,
+                    required_cookie_names=required_requirement_descriptions(target),
+                    captured_cookie_names=captured_names,
+                    missing_cookie_names=[],
+                )
+
+            logger.info(
+                "Session refresh complete platform=%s browser=%s profile=%s injected_cookie_count=%d captured=%s",
+                platform,
+                profile_db.source.browser,
+                profile_db.profile_name,
+                injected,
+                captured_names,
+            )
+            return SessionRefreshResult(
+                platform=platform,
+                refreshed=True,
+                skipped=False,
+                reason="refreshed",
+                browser=profile_db.source.browser,
+                profile_name=profile_db.profile_name,
+                injected_cookie_count=injected,
+                required_cookie_names=required_requirement_descriptions(target),
+                captured_cookie_names=captured_names,
+                missing_cookie_names=[],
+            )
 
 
 def read_macos_keychain_password(service_name: str) -> str:

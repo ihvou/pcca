@@ -4,7 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
@@ -30,7 +30,8 @@ from pcca.services.voice_transcription_service import VoiceTranscriptionService
 logger = logging.getLogger(__name__)
 
 
-ManualAction = Callable[[], Awaitable[None]]
+ManualAction = Callable[[], Awaitable[Any]]
+DigestRebuildAction = Callable[..., Awaitable[Any]]
 
 
 @dataclass
@@ -46,6 +47,7 @@ class TelegramService:
     application: Application | None = None
     read_content_action: ManualAction | None = None
     get_digest_action: ManualAction | None = None
+    rebuild_digest_action: DigestRebuildAction | None = None
     _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     def attach_manual_actions(
@@ -53,9 +55,11 @@ class TelegramService:
         *,
         read_content_action: ManualAction,
         get_digest_action: ManualAction,
+        rebuild_digest_action: DigestRebuildAction | None = None,
     ) -> None:
         self.read_content_action = read_content_action
         self.get_digest_action = get_digest_action
+        self.rebuild_digest_action = rebuild_digest_action
 
     async def start(self) -> None:
         started_at = time.monotonic()
@@ -67,6 +71,7 @@ class TelegramService:
         app.add_handler(CommandHandler("onboard", self._on_setup))
         app.add_handler(CommandHandler("read_content", self._on_read_content_command))
         app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
+        app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
         app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
         app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
@@ -129,6 +134,7 @@ class TelegramService:
             [
                 InlineKeyboardButton("Read Content Now", callback_data="run:read"),
                 InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
+                InlineKeyboardButton("Rebuild Today's Digest", callback_data="run:rebuild"),
             ]
         )
         try:
@@ -209,6 +215,7 @@ class TelegramService:
             "- show/refine preferences per subject\n"
             "- run collection now (`/read_content`)\n"
             "- run digest now (`/get_digest`)\n"
+            "- rebuild today's digest after adding sources (`/rebuild_digest`)\n"
             "- collect feedback (👍 👎 🔖)\n"
             "- accept voice notes (transcription backend pending)",
             reply_markup=self._quick_actions_reply_keyboard(),
@@ -224,6 +231,11 @@ class TelegramService:
         if update.message is None:
             return
         await self._run_manual_action_from_message(update.message, action_name="get digest", action=self.get_digest_action)
+
+    async def _on_rebuild_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_rebuild_digest_from_message(update.message)
 
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
@@ -448,6 +460,10 @@ class TelegramService:
             )
             return
 
+        if intent.action is IntentAction.RUN_REBUILD_DIGEST:
+            await self._run_rebuild_digest_from_message(update.message)
+            return
+
         if intent.action is IntentAction.HELP:
             await self._on_help(update, None)
             return
@@ -500,6 +516,36 @@ class TelegramService:
         if data == "run:digest":
             await self._run_manual_action_from_message(message, action_name="get digest", action=self.get_digest_action)
             return
+        if data == "run:rebuild":
+            await self._run_rebuild_digest_from_message(message)
+            return
+
+    async def _run_rebuild_digest_from_message(self, message) -> None:
+        if self.rebuild_digest_action is None:
+            await message.reply_text(
+                "`rebuild digest` action is not available yet in this runtime.",
+                parse_mode="Markdown",
+            )
+            return
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None) or getattr(chat, "id", None)
+        thread_id_raw = getattr(message, "message_thread_id", None)
+        thread_id = str(thread_id_raw) if thread_id_raw else None
+        subject_ids: set[int] | None = None
+        if chat_id is not None:
+            subject = await self.routing_service.resolve_subject_for_chat(chat_id=chat_id, thread_id=thread_id)
+            if subject is None:
+                await message.reply_text(
+                    "I do not know which subject to rebuild from this chat yet. "
+                    "Send /start or create/link a subject first."
+                )
+                return
+            subject_ids = {subject.id}
+
+        async def action() -> Any:
+            return await self.rebuild_digest_action(subject_ids=subject_ids)
+
+        await self._run_manual_action_from_message(message, action_name="rebuild digest", action=action)
 
     async def _run_manual_action_from_message(
         self,
@@ -555,6 +601,7 @@ class TelegramService:
                 [
                     InlineKeyboardButton("Read Content Now", callback_data="run:read"),
                     InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
+                    InlineKeyboardButton("Rebuild Today's Digest", callback_data="run:rebuild"),
                 ]
             ]
         )
@@ -563,7 +610,7 @@ class TelegramService:
     @staticmethod
     def _quick_actions_reply_keyboard() -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
-            [["Read Content", "Get Digest"], ["List subjects", "Help"]],
+            [["Read Content", "Get Digest"], ["Rebuild Digest", "List subjects"], ["Help"]],
             resize_keyboard=True,
             one_time_keyboard=False,
         )

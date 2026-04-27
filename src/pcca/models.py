@@ -15,6 +15,7 @@ class IntentAction(str, Enum):
     SHOW_PREFERENCES = "show_preferences"
     RUN_READ_CONTENT = "run_read_content"
     RUN_GET_DIGEST = "run_get_digest"
+    RUN_REBUILD_DIGEST = "run_rebuild_digest"
     HELP = "help"
     UNKNOWN = "unknown"
 

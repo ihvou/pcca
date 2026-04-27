@@ -144,3 +144,112 @@ async def test_digest_run_is_idempotent_and_feedback_buttons_map_to_items(tmp_pa
     assert int(feedback_count["c"]) == 1
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    subject = await subject_service.create_subject("Agentic PM")
+
+    routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
+    await routing_service.register_chat(chat_id=123, title="Test")
+    await routing_service.link_subject(subject_name="Agentic PM", chat_id=123)
+
+    item_repo = ItemRepository(conn=db.conn)
+    item_score_repo = ItemScoreRepository(conn=db.conn)
+
+    first_stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="item-1",
+                author="Boris Cherny",
+                url="https://example.com/old",
+                text="Older Claude Code workflow detail",
+                transcript_text=None,
+                published_at="2026-04-24T09:00:00",
+                metadata={},
+            )
+        ]
+    )
+    first_item_id = first_stats["item_ids"][0]
+    await item_score_repo.upsert_score(
+        item_id=first_item_id,
+        subject_id=subject.id,
+        pass1_score=0.7,
+        pass2_score=0.7,
+        practicality_score=0.7,
+        novelty_score=0.6,
+        trust_score=0.8,
+        noise_penalty=0.0,
+        final_score=0.72,
+        rationale="older but useful",
+    )
+
+    digest_repo = DigestRepository(conn=db.conn)
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=item_score_repo,
+        digest_repo=digest_repo,
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    initial_stats = await runner.run_morning_digest()
+    assert initial_stats["deliveries_sent"] == 1
+    assert "Older Claude Code workflow detail" in fake_telegram.sent_messages[-1]["items"][0]
+
+    second_stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="item-2",
+                author="Claude Team",
+                url="https://example.com/new",
+                text="Fresh Claude Code release with concrete implementation steps",
+                transcript_text=None,
+                published_at="2026-04-24T14:30:00",
+                metadata={},
+            )
+        ]
+    )
+    second_item_id = second_stats["item_ids"][0]
+    await item_score_repo.upsert_score(
+        item_id=second_item_id,
+        subject_id=subject.id,
+        pass1_score=0.98,
+        pass2_score=0.96,
+        practicality_score=0.95,
+        novelty_score=0.95,
+        trust_score=0.9,
+        noise_penalty=0.0,
+        final_score=0.97,
+        rationale="fresh release details",
+    )
+
+    rebuild_stats = await runner.rebuild_todays_digest()
+
+    assert rebuild_stats["digests_rebuilt"] == 1
+    assert rebuild_stats["deliveries_sent"] == 1
+    assert len(fake_telegram.sent_messages) == 2
+    assert "Fresh Claude Code release" in fake_telegram.sent_messages[-1]["items"][0]
+
+    digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
+    delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()
+    latest_run = await (
+        await db.conn.execute("SELECT run_type, status FROM run_logs ORDER BY id DESC LIMIT 1")
+    ).fetchone()
+    assert int(digest_count["c"]) == 1
+    assert int(delivery_count["c"]) == 1
+    assert latest_run["run_type"] == "digest_rebuild"
+    assert latest_run["status"] == "success"
+
+    await db.close()

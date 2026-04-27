@@ -46,13 +46,20 @@ class JobRunner:
             logger.exception("Nightly collection failed duration_ms=%d", int((time.monotonic() - started_at) * 1000))
             raise
 
-    async def run_morning_digest(self) -> dict:
+    async def run_morning_digest(
+        self,
+        *,
+        run_type: str = "morning_digest",
+        force_rebuild: bool = False,
+        subject_ids: set[int] | None = None,
+    ) -> dict:
         started_at = time.monotonic()
-        run_id = await self.run_log_repo.start_run("morning_digest") if self.run_log_repo is not None else None
+        run_id = await self.run_log_repo.start_run(run_type) if self.run_log_repo is not None else None
         stats = {
             "subjects_seen": 0,
             "subjects_with_routes": 0,
             "digests_created_or_reused": 0,
+            "digests_rebuilt": 0,
             "items_selected": 0,
             "deliveries_sent": 0,
             "deliveries_failed": 0,
@@ -60,8 +67,17 @@ class JobRunner:
         }
         try:
             subjects = await self.subject_service.list_subjects()
+            if subject_ids is not None:
+                subjects = [subject for subject in subjects if subject.id in subject_ids]
             stats["subjects_seen"] = len(subjects)
-            logger.info("Morning digest run started run_id=%s subjects=%d", run_id, len(subjects))
+            logger.info(
+                "Morning digest run started run_id=%s run_type=%s subjects=%d force_rebuild=%s subject_ids=%s",
+                run_id,
+                run_type,
+                len(subjects),
+                force_rebuild,
+                sorted(subject_ids) if subject_ids is not None else None,
+            )
             if (
                 self.telegram_service is None
                 or self.telegram_service.application is None
@@ -71,6 +87,21 @@ class JobRunner:
             ):
                 stats["skipped_missing_dependencies"] = True
                 return stats
+
+            if force_rebuild:
+                rebuilt = await self.digest_repo.delete_digests_for_date(
+                    run_date=date.today(),
+                    subject_ids=subject_ids,
+                )
+                stats["digests_rebuilt"] = rebuilt
+                logger.info(
+                    "Deleted existing digest rows for rebuild run_id=%s run_type=%s date=%s count=%d subject_ids=%s",
+                    run_id,
+                    run_type,
+                    date.today().isoformat(),
+                    rebuilt,
+                    sorted(subject_ids) if subject_ids is not None else None,
+                )
 
             for subject in subjects:
                 subject_started_at = time.monotonic()
@@ -198,6 +229,13 @@ class JobRunner:
                     int((time.monotonic() - started_at) * 1000),
                     stats,
                 )
+
+    async def rebuild_todays_digest(self, *, subject_ids: set[int] | None = None) -> dict:
+        return await self.run_morning_digest(
+            run_type="digest_rebuild",
+            force_rebuild=True,
+            subject_ids=subject_ids,
+        )
 
 
 @dataclass

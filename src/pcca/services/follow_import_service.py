@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from pcca.browser.session_manager import BrowserSessionManager
+from pcca.services.session_capture_service import SessionRefreshService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 
@@ -45,6 +46,7 @@ class FollowImportService:
     session_manager: BrowserSessionManager
     source_service: SourceService
     source_discovery: SourceDiscoveryService = field(default_factory=SourceDiscoveryService)
+    session_refresh_service: SessionRefreshService | None = None
 
     @staticmethod
     def supported_platforms() -> tuple[str, ...]:
@@ -435,6 +437,18 @@ class FollowImportService:
     async def import_sources(self, *, platform: str, limit: int = 200) -> list[ImportedFollowSource]:
         normalized_platform = platform.strip().lower()
         logger.info("Normalizing imported follows platform=%s limit=%d", normalized_platform, limit)
+        if self.session_refresh_service is not None:
+            refresh = await self.session_refresh_service.refresh_platform(normalized_platform)
+            logger.info(
+                "Pre-import session refresh platform=%s refreshed=%s skipped=%s reason=%s browser=%s profile=%s missing=%s",
+                normalized_platform,
+                refresh.refreshed,
+                refresh.skipped,
+                refresh.reason,
+                refresh.browser,
+                refresh.profile_name,
+                refresh.missing_cookie_names,
+            )
         if normalized_platform == "x":
             imported = await self.import_x_follows(limit=limit)
         elif normalized_platform == "linkedin":

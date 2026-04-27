@@ -84,7 +84,7 @@ Nightly crawl, morning digest, weekly reflection, discovery jobs. Wake-aware and
 Playwright persistent profiles per platform. Session cookies are captured from the user's normal browser and injected into these profiles; PCCA does not drive anti-bot-protected login/OAuth flows. Browser-channel stealth/orphan cleanup remains useful for scraping, not login. Session health checks. `needs_reauth` flagging (task T-1).
 
 ### 4.4.1 Session Capture Service (`services/session_capture_service.py`)
-Reads platform auth cookies from supported local browser stores with explicit user action, then injects them into the matching PCCA Playwright profile. T-37A/T-37C implement macOS Chromium-family browser capture (Chrome/Arc/Brave/Edge) for X, LinkedIn, YouTube, Spotify, Substack, Medium, and best-effort Apple Podcasts. Raw cookie values are never logged or written into PCCA's SQLite DB.
+Reads platform auth cookies from supported local browser stores with explicit user action, then injects them into the matching PCCA Playwright profile. T-37A/T-37C implement macOS Chromium-family browser capture (Chrome/Arc/Brave/Edge) for X, LinkedIn, YouTube, Spotify, Substack, Medium, and best-effort Apple Podcasts. `SessionRefreshService` re-reads and re-injects fresh cookies before follow import and collection with a per-platform cooldown, so manual capture is normally a one-time setup/repair action. Raw cookie values are never logged or written into PCCA's SQLite DB.
 
 ### 4.5 Source Collectors (`collectors/`)
 One file per platform:
@@ -136,7 +136,7 @@ Subject creation, lifecycle, routing, isolation.
 Subject-specific profile state. Versioned rule updates. Rollback capable.
 
 ### 4.11 Telegram Service (`services/telegram_service.py`)
-Digest delivery, button callbacks, conversational control. Free-form intent dispatch via `intent_parser.py`. Voice via `voice_transcription_service.py` (placeholder, task T-23).
+Digest delivery, button callbacks, conversational control, and on-demand read/digest/rebuild actions. Free-form intent dispatch via `intent_parser.py`. Voice via `voice_transcription_service.py` (placeholder, task T-23).
 
 ### 4.12 Storage Service (`db.py`, `repositories/`)
 SQLite access, migrations, repositories, event logs. Single shared `aiosqlite.Connection` in v1; split reader/writer planned (task T-9).

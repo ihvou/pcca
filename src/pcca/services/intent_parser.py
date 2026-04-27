@@ -159,6 +159,9 @@ def parse_intent(text: str) -> ParsedIntent:
     if lowered in {"/get_digest", "get digest", "get digest now", "run digest"}:
         return ParsedIntent(action=IntentAction.RUN_GET_DIGEST, raw_text=text)
 
+    if lowered in {"/rebuild_digest", "rebuild digest", "rebuild today's digest", "rebuild today digest"}:
+        return ParsedIntent(action=IntentAction.RUN_REBUILD_DIGEST, raw_text=text)
+
     for pattern in CREATE_PATTERNS:
         if re.search(pattern, lowered):
             return ParsedIntent(

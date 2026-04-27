@@ -200,7 +200,13 @@ class DesktopCommandService:
             onboarding_repo = OnboardingRepository(conn=db.conn)
             state = await onboarding_repo.get_state()
             staged = await onboarding_repo.list_sources(status=None)
-            subjects = await SubjectService(repository=SubjectRepository(conn=db.conn)).list_subjects()
+            subject_repo = SubjectRepository(conn=db.conn)
+            source_service = SourceService(
+                source_repo=SourceRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            subjects = await SubjectService(repository=subject_repo).list_subjects()
+            reauth_sources = await source_service.list_sources_needing_reauth()
             return {
                 "settings": {
                     "timezone": settings.timezone,
@@ -211,6 +217,9 @@ class DesktopCommandService:
                     "log_file": str(settings.data_dir / "logs" / "pcca.log"),
                     "debug_dir": str(settings.data_dir / "debug"),
                     "browser_channel": settings.browser_channel or "bundled",
+                    "session_refresh_enabled": settings.session_refresh_enabled,
+                    "session_refresh_cooldown_seconds": settings.session_refresh_cooldown_seconds,
+                    "session_refresh_browser": settings.session_refresh_browser or "auto",
                 },
                 "onboarding": {
                     "current_step": state.current_step,
@@ -224,6 +233,7 @@ class DesktopCommandService:
                     "completed_at": state.completed_at,
                 },
                 "staged_sources": [asdict(row) for row in staged],
+                "reauth_sources": [asdict(row) for row in reauth_sources],
                 "subjects": [asdict(subject) for subject in subjects],
                 "platforms": SUPPORTED_ONBOARDING_PLATFORMS,
                 "agent_running": self.agent_running,
@@ -505,6 +515,17 @@ class DesktopCommandService:
                 "digest_stats": digest_stats or {},
                 "smoke": evaluation.to_dict(),
             },
+        )
+
+    async def rebuild_todays_digest(self) -> CommandResult:
+        self.log("Rebuilding today's digest.")
+        app = PCCAApp(settings=self.settings())
+        stats = await app.rebuild_digest_once()
+        self.log(f"Digest rebuild finished: {json.dumps(stats or {}, sort_keys=True)}")
+        return CommandResult(
+            True,
+            "Rebuilt today's digest.",
+            {"digest_stats": stats or {}},
         )
 
     async def shutdown(self) -> None:

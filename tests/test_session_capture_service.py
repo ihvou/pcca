@@ -6,10 +6,14 @@ from pathlib import Path
 import pytest
 
 from pcca.browser.session_manager import BrowserSessionManager
+from pcca.config import Settings
 from pcca.services.session_capture_service import (
+    BrowserCookieSource,
+    BrowserProfileCookieDb,
     CapturedCookie,
     ChromiumCookieReader,
     PLATFORM_COOKIE_TARGETS,
+    SessionRefreshService,
     chrome_time_to_unix,
     domain_matches,
     missing_requirement_descriptions,
@@ -17,6 +21,29 @@ from pcca.services.session_capture_service import (
     strip_pkcs7,
     target_cookie_names,
 )
+
+
+def make_settings(tmp_path: Path, *, refresh_enabled: bool = True, cooldown_seconds: int = 1800) -> Settings:
+    data_dir = tmp_path / ".pcca"
+    return Settings(
+        timezone="UTC",
+        nightly_cron="0 1 * * *",
+        morning_cron="30 8 * * *",
+        digest_auto_send=False,
+        data_dir=data_dir,
+        db_path=data_dir / "pcca.db",
+        browser_profiles_dir=data_dir / "browser_profiles",
+        browser_headless=True,
+        browser_headful_platforms={"x", "linkedin"},
+        browser_channel="chrome",
+        ollama_enabled=False,
+        ollama_base_url="http://localhost:11434",
+        ollama_model="qwen2.5:7b",
+        telegram_bot_token=None,
+        session_refresh_enabled=refresh_enabled,
+        session_refresh_cooldown_seconds=cooldown_seconds,
+        session_refresh_browser=None,
+    )
 
 
 def test_domain_matching_accepts_subdomains() -> None:
@@ -254,3 +281,121 @@ async def test_browser_manager_injects_session_cookies(tmp_path: Path, monkeypat
     # primary cookie domain and closed the page cleanly afterwards.
     assert context.page.gotos == ["https://x.com/"]
     assert context.page.closed is True
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_injects_and_respects_cooldown(tmp_path: Path) -> None:
+    class FakeCookieReader:
+        calls = 0
+
+        def read_platform_cookies(self, *, platform: str, browser: str | None = None):
+            self.calls += 1
+            assert platform == "x"
+            assert browser is None
+            return (
+                BrowserProfileCookieDb(
+                    source=BrowserCookieSource(
+                        browser="arc",
+                        display_name="Arc",
+                        user_data_root=tmp_path,
+                        keychain_service="Arc Safe Storage",
+                    ),
+                    profile_name="Default",
+                    cookie_db_path=tmp_path / "Cookies",
+                ),
+                [
+                    CapturedCookie(name="auth_token", value="auth", domain=".x.com"),
+                    CapturedCookie(name="ct0", value="csrf", domain=".x.com"),
+                ],
+            )
+
+    class FakeSessionManager:
+        def __init__(self) -> None:
+            self.injected: list[tuple[str, list[dict]]] = []
+
+        async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
+            self.injected.append((platform, cookies))
+            return len(cookies)
+
+    reader = FakeCookieReader()
+    manager = FakeSessionManager()
+    service = SessionRefreshService(
+        settings=make_settings(tmp_path, cooldown_seconds=1800),
+        session_manager=manager,  # type: ignore[arg-type]
+        cookie_reader=reader,  # type: ignore[arg-type]
+    )
+
+    first = await service.refresh_platform("x")
+    second = await service.refresh_platform("x")
+
+    assert first.refreshed is True
+    assert first.browser == "arc"
+    assert first.injected_cookie_count == 2
+    assert second.skipped is True
+    assert second.reason == "cooldown"
+    assert reader.calls == 1
+    assert len(manager.injected) == 1
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_missing_required_cookies_does_not_inject(tmp_path: Path) -> None:
+    class FakeCookieReader:
+        def read_platform_cookies(self, *, platform: str, browser: str | None = None):
+            return (
+                BrowserProfileCookieDb(
+                    source=BrowserCookieSource(
+                        browser="chrome",
+                        display_name="Chrome",
+                        user_data_root=tmp_path,
+                        keychain_service="Chrome Safe Storage",
+                    ),
+                    profile_name="Default",
+                    cookie_db_path=tmp_path / "Cookies",
+                ),
+                [CapturedCookie(name="guest_id", value="guest", domain=".x.com")],
+            )
+
+    class FakeSessionManager:
+        async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
+            raise AssertionError("Should not inject incomplete sessions")
+
+    service = SessionRefreshService(
+        settings=make_settings(tmp_path, cooldown_seconds=0),
+        session_manager=FakeSessionManager(),  # type: ignore[arg-type]
+        cookie_reader=FakeCookieReader(),  # type: ignore[arg-type]
+    )
+
+    result = await service.refresh_platform("x")
+
+    assert result.refreshed is False
+    assert result.reason == "missing_required_cookies"
+    assert result.missing_cookie_names == ["auth_token", "ct0"]
+
+
+@pytest.mark.asyncio
+async def test_session_refresh_read_error_falls_back_without_injecting(tmp_path: Path) -> None:
+    class FakeCookieReader:
+        def read_platform_cookies(self, *, platform: str, browser: str | None = None):
+            _ = platform, browser
+            raise RuntimeError("keychain denied")
+
+    class FakeSessionManager:
+        async def inject_session_cookies(self, *, platform: str, cookies: list[dict]) -> int:
+            _ = platform, cookies
+            raise AssertionError("Should keep the existing PCCA profile untouched")
+
+    service = SessionRefreshService(
+        settings=make_settings(tmp_path, cooldown_seconds=0),
+        session_manager=FakeSessionManager(),  # type: ignore[arg-type]
+        cookie_reader=FakeCookieReader(),  # type: ignore[arg-type]
+    )
+
+    result = await service.refresh_platform("youtube")
+
+    assert result.refreshed is False
+    assert result.skipped is False
+    assert result.reason.startswith("cookie_read_failed:")
+    assert result.missing_cookie_names == [
+        "one of: SID, __Secure-1PSID, __Secure-3PSID",
+        "one of: SAPISID, APISID, __Secure-1PAPISID, __Secure-3PAPISID",
+    ]

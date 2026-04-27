@@ -31,6 +31,7 @@ from pcca.services.follow_import_service import FollowImportService
 from pcca.services.model_router import ModelRouter
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
+from pcca.services.session_capture_service import SessionRefreshService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
@@ -49,6 +50,7 @@ class PCCAApp:
     preference_service: PreferenceService = field(init=False)
     feedback_service: FeedbackService = field(init=False)
     follow_import_service: FollowImportService = field(init=False)
+    session_refresh_service: SessionRefreshService = field(init=False)
     routing_service: RoutingService = field(init=False)
     pipeline_orchestrator: PipelineOrchestrator = field(init=False)
     browser_session_manager: BrowserSessionManager = field(init=False)
@@ -94,10 +96,15 @@ class PCCAApp:
             headful_platforms=self.settings.browser_headful_platforms,
             browser_channel=self.settings.browser_channel,
         )
+        self.session_refresh_service = SessionRefreshService(
+            settings=self.settings,
+            session_manager=self.browser_session_manager,
+        )
         self.follow_import_service = FollowImportService(
             session_manager=self.browser_session_manager,
             source_service=self.source_service,
             source_discovery=SourceDiscoveryService(),
+            session_refresh_service=self.session_refresh_service,
         )
 
         self.pipeline_orchestrator = PipelineOrchestrator(
@@ -112,6 +119,7 @@ class PCCAApp:
                 ollama_base_url=self.settings.ollama_base_url,
                 ollama_model=self.settings.ollama_model,
             ),
+            session_refresh_service=self.session_refresh_service,
             collectors={
                 "x": XCollector(session_manager=self.browser_session_manager),
                 "linkedin": LinkedInCollector(session_manager=self.browser_session_manager),
@@ -162,6 +170,7 @@ class PCCAApp:
             self.telegram_service.attach_manual_actions(
                 read_content_action=self.scheduler.job_runner.run_nightly_collection,
                 get_digest_action=self.scheduler.job_runner.run_morning_digest,
+                rebuild_digest_action=self.scheduler.job_runner.rebuild_todays_digest,
             )
         logger.info("PCCA app started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
@@ -203,6 +212,20 @@ class PCCAApp:
         try:
             stats = await self.scheduler.job_runner.run_morning_digest()
             logger.info("PCCA one-shot digest finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
+        finally:
+            await self.stop()
+
+    async def rebuild_digest_once(self, *, subject_ids: set[int] | None = None) -> dict:
+        started_at = time.monotonic()
+        await self.start(with_scheduler=False, with_telegram=True)
+        try:
+            stats = await self.scheduler.job_runner.rebuild_todays_digest(subject_ids=subject_ids)
+            logger.info(
+                "PCCA one-shot digest rebuild finished duration_ms=%d stats=%s",
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
             return stats
         finally:
             await self.stop()
