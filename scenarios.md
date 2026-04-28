@@ -40,12 +40,12 @@ User installs the app, connects Telegram, connects content sources, creates a fi
 User creates a separate area of interest with its own preferences and refinement loop.
 
 ### Scenario
-1. User sends a free-form Telegram message such as "Create a subject for Agentic PM" or "Track AI coding workflows separately."
-2. Bot asks for a small amount of guidance: what to include, what to avoid, and what counts as high quality.
-3. User answers in natural language, by text or voice.
-4. Bot creates the subject and confirms where updates for that subject will appear.
-5. Future updates for this subject reflect its own preferences.
-6. Preferences for one subject do not change another subject unless the user explicitly asks for that.
+1. User describes a new subject in a single free-form Telegram message (text or voice), saying what is useful, what is not, and what good looks like. They can name it or skip naming.
+2. Bot proposes a short title (creating one if the user did not), rephrases the description in its own working format, and shows both back for confirmation.
+3. User confirms, corrects, or adds detail. The loop repeats as many times as the user wants until the title and rephrasing are right.
+4. Bot creates the subject with the agreed-upon title and preferences, and confirms where updates for that subject will appear.
+5. Future updates for this subject reflect those preferences.
+6. Preferences for one subject do not change another subject unless the user explicitly asks otherwise.
 
 ---
 
