@@ -58,12 +58,22 @@ Four logical layers run on a daily cycle. Feedback runs continuously.
 
 Layer responsibilities:
 
-- **Ingestion** — collect raw items from logged-in browser sessions and RSS-like feeds; normalize into canonical `items` + `item_segments`.
-- **Curation** — score items against subject preferences through a two-pass pipeline (Pass-1 cheap screening → shortlist → Pass-2 deep analysis).
-- **Delivery** — compose per-subject digests and send to mapped Telegram threads with inline feedback controls.
-- **Feedback** — capture inline reactions and free-form conversational signals; update subject preferences and source trust.
+- **Ingestion** — monitored sources are checked once per cycle; raw items from logged-in browser sessions and RSS-like feeds are normalized into canonical `items` + `item_segments` and stored in a single shared content store. The same item can be useful for any number of subjects without being collected more than once.
+- **Curation** — for each active subject, score every collected item against that subject's preferences through a two-pass pipeline (Pass-1 cheap screening → shortlist → Pass-2 deep analysis). The same item can produce different scores for different subjects.
+- **Delivery** — compose per-subject digests and render them through a swappable output layer ([§4.16](#416-digest-renderer)). Today's only renderer is a Telegram-text format with inline feedback controls; future renderers (rich media, custom-per-subject) will be drop-in replacements.
+- **Feedback** — capture inline reactions and free-form conversational signals (text or voice); update subject preferences and source trust.
 
 The **taste model** (subject preferences + feedback-derived signals) sits across the curation and feedback layers and is the moat.
+
+### 3.1 Source vs Subject Model (Important)
+
+This is the single most-confused invariant in the system.
+
+- **Sources are monitored globally.** A source is added once via the user's "confirm what to monitor" gesture (Scenario 1.9) and feeds the shared content store. Sources do not belong to subjects.
+- **Subjects are independent queries.** Each subject has its own preferences and scores every collected item independently (Scenarios 3.1.5, 3.2.1–3.2.2). The same article can score 0.9 for "Agentic PM" and 0.0 for "Vibe Coding" — that's normal.
+- **`subject_sources` is an optional override layer**, not a gate. A row in `subject_sources` represents a per-subject hint or override (priority bump, suspended-for-this-subject after repeated 👎 feedback). Default behavior with no row: every monitored source feeds every subject.
+
+When this invariant is violated, users hit the recurring "I added X follows but they don't show up in subject Y" trap. See task T-45 for the migration plan from the legacy per-subject attachment model.
 
 ---
 
@@ -135,6 +145,9 @@ Subject creation, lifecycle, routing, isolation.
 ### 4.10 Preference Engine (`services/preference_service.py`)
 Subject-specific profile state. Versioned rule updates. Rollback capable.
 
+### 4.10.1 Preference Extraction Service (planned, task T-46)
+The conversational subject-creation flow described in [scenarios.md §Scenario 2](./scenarios.md#scenario-2-user-starts-a-new-subject-and-sets-preferences) requires turning a free-form user message ("I want practical AI-in-HR case studies, no hype") into PCCA's internal preference shape (title + `include_rules_json` + `exclude_rules_json` + optional `quality_rules_json`). A `PreferenceExtractionService` wraps `ModelRouter` to do this extraction in one LLM call, then renders the extracted shape back to the user for confirmation. The conversational state machine (draft → propose → confirm | correct → save) is held in `pending_subject_drafts` keyed by chat_id with a 1-hour TTL, and the same state-machine primitive is reused for in-flight refinement (Scenario 5). Graceful fallback when Ollama is disabled: today's structured `Refine X: include …; exclude …` syntax keeps working as the developer escape hatch.
+
 ### 4.11 Telegram Service (`services/telegram_service.py`)
 Digest delivery, button callbacks, conversational control, and on-demand read/digest/rebuild actions. Free-form intent dispatch via `intent_parser.py`. Voice via `voice_transcription_service.py` (placeholder, task T-23).
 
@@ -158,11 +171,14 @@ Canonical source normalization for imported follows/subscriptions and platform-s
 ### 4.15 Voice Transcription Service (`services/voice_transcription_service.py`)
 Converts Telegram voice notes to text for intent parsing. v1 placeholder (always returns `None`). Local-first path planned (task T-23).
 
+### 4.16 Digest Renderer (planned, task T-48)
+Per [scenarios.md §3.2.7](./scenarios.md#scenario-32-system-finds-subject-relevant-updates-and-builds-output), the user-facing output format will evolve and may become selectable from templates or fully custom per subject. Today the format is hardcoded into `JobRunner.run_morning_digest`, which limits how the format can change. Task T-48 extracts a `DigestRenderer` interface that takes (`subject`, ranked `CandidateItem` list, optional `context`) and returns the full delivery payload (text + inline keyboard markup for Telegram, future formats can return rich-media payloads or other shapes). Today's Telegram-text format becomes the default `TelegramDigestRenderer`. Other renderers and per-subject template configuration plug in without changing the scheduler or pipeline.
+
 ---
 
 ## 5) Data Model
 
-Subject-centric. Subject isolation at the preference layer; items are global; scores are per-(item, subject).
+Subjects and sources are independent. Items are global. Scores are per-(item, subject).
 
 ### 5.1 Core Tables
 
@@ -174,13 +190,16 @@ subject_preferences(id, subject_id, version, include_rules_json,
                     quality_rules_json, updated_at)
 
 sources(id, platform, account_or_channel_id, display_name,
-        follow_state, last_crawled_at,
+        follow_state, last_crawled_at, is_monitored,
         UNIQUE(platform, account_or_channel_id))
 
 discovered_sources(id, platform, account_or_channel_id, display_name,
                    discovery_type, evidence_json, confidence_score,
                    status, created_at)
 
+# Optional per-subject override layer (priority bumps, "suspended for this
+# subject only" decisions from feedback). Default behavior with no row:
+# every monitored source feeds every subject. See §3.1.
 subject_sources(subject_id, source_id, priority, status,
                 PRIMARY KEY(subject_id, source_id))
 
@@ -210,18 +229,28 @@ telegram_chats(chat_id PRIMARY KEY, title, last_seen_at)
 
 subject_routes(id, subject_id, chat_id, thread_id, created_at,
                UNIQUE(subject_id, chat_id, thread_id))
+
+# Conversational subject-creation drafts (see §4.10.1, T-46). One row per
+# in-progress chat session; cleared on save/abandon/TTL expiry.
+pending_subject_drafts(chat_id PRIMARY KEY, title, description_text,
+                       extracted_rules_json, last_user_message,
+                       updated_at)
 ```
 
 ### 5.2 Design Rules
 
-- **Subject isolation** is mandatory at the preference layer. A feedback on subject A must not change scoring for subject B unless explicitly opted in.
+- **Subjects and sources are independent** (§3.1). `sources.is_monitored = true` means "in the shared content store"; subject relevance is determined by `item_scores`, not by `subject_sources` membership.
+- **Subject isolation** is mandatory at the preference layer. Feedback on subject A must not change scoring for subject B unless explicitly opted in.
 - **Item storage is global**; scoring is per-subject. The same item discovered on two platforms should collapse at the dedupe step (task T-10).
 - **Preference edits are versioned and append-only.** Rollback by reading an older version.
 - **Run IDs** for ingestion are mandatory; **dedupe keys** for digests (`UNIQUE(subject_id, run_date)`) are mandatory (task T-5).
+- **`subject_sources` is for overrides, not gating.** Existing rows are preserved as priority/suspended hints during the T-45 migration; they are not consulted when deciding whether to crawl a source.
 
 ---
 
 ## 6) Analysis Logic (Practicality-First)
+
+The pipeline runs **once per cycle, not once per subject**: every monitored source is crawled and normalized into the shared content store, then for each active subject the curation pipeline scores every item against that subject's preferences. One crawl × N scores, never N crawls × 1 score.
 
 ### 6.1 Pass-1 — Cheap Screening
 Inputs: titles, snippets, first transcript chunks.
@@ -232,6 +261,9 @@ Today: keyword list in `curation.py`. Target: keep for pre-filter only (task T-1
 Inputs: full text / transcript segments for **shortlisted** items.
 Outputs: actionable insights extracted, practical-value score, trust assessment, subject-specific explanation.
 Today: same keyword pass as Pass-1 plus optional Ollama delta. Target: Ollama (or premium) as primary scorer on top-K only (tasks T-3, T-16).
+
+### 6.2.1 Engagement Signals as Curation Inputs (planned, task T-47)
+Per [scenarios.md §3.1.4](./scenarios.md#scenario-31-system-collects-fresh-content-from-sources), the system collects rich context — descriptions, authors, timestamps, views, likes, shares, comments, reposts. Today only basic fields are captured. T-47 adds per-platform engagement-signal capture into `items.metadata_json` so "trending / breaking / debatable / reputable" can become real ranking inputs to Pass-1 / Pass-2 instead of being invisible.
 
 ### 6.3 Segment-Level Filtering
 For long-form content (transcripts, long articles):
@@ -263,7 +295,6 @@ Default daily schedule (local time, configurable via `PCCA_NIGHTLY_CRON` / `PCCA
 - `08:30` — send digest
 
 Weekly:
-- Preference reflection summary (not yet implemented — task T-27)
 - Source health summary
 - Discovery suggestion run
 
