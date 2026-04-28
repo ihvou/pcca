@@ -61,7 +61,7 @@ Layer responsibilities:
 - **Ingestion** — monitored sources are checked once per cycle; raw items from logged-in browser sessions and RSS-like feeds are normalized into canonical `items` + `item_segments` and stored in a single shared content store. The same item can be useful for any number of subjects without being collected more than once.
 - **Curation** — for each active subject, score every collected item against that subject's preferences through a two-pass pipeline (Pass-1 cheap screening → shortlist → Pass-2 deep analysis). The same item can produce different scores for different subjects.
 - **Delivery** — compose per-subject digests and render them through a swappable output layer ([§4.16](#416-digest-renderer)). Today's only renderer is a Telegram-text format with inline feedback controls; future renderers (rich media, custom-per-subject) will be drop-in replacements.
-- **Feedback** — capture inline reactions and free-form conversational signals (text or voice); update subject preferences and source trust.
+- **Feedback** — capture inline reactions and free-form conversational signals (text or voice). Two paths converge on the same data store but differ in confidence and immediacy ([§3.2](#32-explicit-vs-implicit-feedback)): explicit user instructions edit preferences directly; implicit reactions feed a swappable Learning Strategy ([§4.20](#420-learning-strategy)) that interprets patterns over time.
 
 The **taste model** (subject preferences + feedback-derived signals) sits across the curation and feedback layers and is the moat.
 
@@ -74,6 +74,17 @@ This is the single most-confused invariant in the system.
 - **`subject_sources` is an optional override layer**, not a gate. A row in `subject_sources` represents a per-subject hint or override (priority bump, suspended-for-this-subject after repeated 👎 feedback). Default behavior with no row: every monitored source feeds every subject.
 
 When this invariant is violated, users hit the recurring "I added X follows but they don't show up in subject Y" trap. See task T-45 for the migration plan from the legacy per-subject attachment model.
+
+### 3.2 Explicit vs Implicit Feedback
+
+Feedback enters the system through two distinct paths that share the same `feedback_events` storage but differ sharply in how PCCA treats them:
+
+- **Explicit instructions** — the user states a rule directly in free-form text or voice. *"I do not want any content about Cursor."* / *"Ignore Elon Musk unless he posts about space."* / *"Less hype like this."* The Preference Extraction Service ([§4.10.1](#4101-preference-extraction-service-planned-task-t-46)) parses these into structured rule edits ([§5.3 Preference Rule Schema](#53-preference-rule-schema)) and applies them to the subject's `subject_preferences` immediately, with the user's confirmation in a rephrase-and-validate loop. **High confidence, immediate effect, versioned.**
+- **Implicit reactions** — button taps (👍 👎 🔖 🚫 etc.) and short replies. These are recorded as raw signal in `feedback_events` with no prebuilt interpretation. The Learning Strategy ([§4.20](#420-learning-strategy)) is a swappable layer that reads reactions in context and proposes adjustments — typically threshold-gated and asks the user to disambiguate when patterns are unclear. **Low confidence, learns over time, conservative defaults.**
+
+Buttons are **shortcuts to text reactions** ([§4.18](#418-button-shortcut-framework)), not hardcoded action mappings. A button labeled 🚫 with macro text *"this is spam, downgrade source"* records the same kind of `feedback_events` row as the user typing the macro themselves; the Learning Strategy decides what (if anything) to do with the resulting signal. This means buttons can be added, removed, or relabeled in configuration without touching the feedback path.
+
+Explicit instructions take precedence over inferred patterns: a Learning Strategy never overrides a rule the user stated explicitly.
 
 ---
 
@@ -172,7 +183,61 @@ Canonical source normalization for imported follows/subscriptions and platform-s
 Converts Telegram voice notes to text for intent parsing. v1 placeholder (always returns `None`). Local-first path planned (task T-23).
 
 ### 4.16 Digest Renderer (`digest_renderer.py`)
-Per [scenarios.md §3.2.7](./scenarios.md#scenario-32-system-finds-subject-relevant-updates-and-builds-output), the user-facing output format will evolve and may become selectable from templates or fully custom per subject. `DigestRenderer` takes (`subject`, ranked `CandidateItem` list, `DigestRenderContext`) and returns a `DeliveryPayload` carrying text lines, inline feedback actions, and digest-item persistence hints. Today's Telegram-text format is the default `TelegramDigestRenderer`; alternate renderers can be injected into `JobRunner` without changing collection, scoring, routing, or Telegram sending.
+Per [scenarios.md §3.2.7](./scenarios.md#scenario-32-system-finds-subject-relevant-updates-and-builds-output), the user-facing output format will evolve and may become selectable from templates or fully custom per subject. `DigestRenderer` takes (`subject`, ranked `CandidateItem` list, `DigestRenderContext`) and returns a `DeliveryPayload` carrying — for each picked item — a **short** view (default 4-line render: title + 1-line teaser + source meta + why) and a **full** view (extended quote / summary, transcript jump, longer why). One `digest_items` row maps to **one delivered Telegram message per Brief** rather than a single bundled message; the message starts in short view and the user can tap *📖 More* to replace it in place via `editMessageText` (T-55).
+
+User-facing wording: each delivered item is a **Brief**. Internal DB names (`digests`, `digest_items`) stay as-is. Bot copy says "today's briefs", "1 brief saved", "no new briefs since 14:30", etc.
+
+Per-subject template selection (`subjects.output_template`) lets future renderers live alongside the default — `news_brief`, `quote_anthology`, `bulletin`, `tools_changelog` are anticipated templates, each ~80 LoC. T-48 ships the interface plus `TelegramBriefRenderer` as the default; further templates are subsequent PRs.
+
+### 4.17 Brief Routing (`services/routing_service.py`)
+Per the group-per-subject UX, users typically create one Telegram group per subject (custom name, custom avatar, opened on their own cadence). The data model already supports this via `subject_routes(subject_id, chat_id, thread_id)`. Default behavior under T-56:
+
+- `/start` in a fresh chat with no route prompts a **subject picker** rather than auto-linking. The user taps which subject this chat should receive.
+- Single-subject single-chat users are auto-linked silently — no picker, no friction.
+- The wizard exposes a routes table for explicit reassignment.
+- Briefs for a subject only fan out to the chats listed in `subject_routes`; subjects without routes warn at delivery time but never error.
+
+### 4.18 Button Shortcut Framework (`services/feedback_buttons.py`)
+Inline buttons attached to Briefs are declarative shortcuts to text reactions, never hardcoded action mappings ([§3.2](#32-explicit-vs-implicit-feedback)). Each button is a `(label, text_macro)` pair — for example `("👎", "less like this")` or `("🚫", "this is spam, downgrade source")`. When a user taps a button:
+
+1. The callback fires with `{item_id, button_label}`.
+2. The bot resolves the label to its current macro text and **stores the same kind of `feedback_events` row** that a free-form text reply would produce: `feedback_type='button_<label>'`, `comment_text=<macro>`, plus `subject_id`, `item_id`, and `created_at`.
+3. The Learning Strategy ([§4.20](#420-learning-strategy)) is the only thing that decides whether and how to act on that record.
+
+Default global button set: 👍 / 👎 / 🔖 / 🚫 / 📖 More. The 📖 More button is a UI action (triggers `editMessageText` to expand to the full view); the others record feedback. Per-subject overrides live in `subjects.button_shortcuts_json`. Adding or relabeling a button is a configuration change with no code edits.
+
+### 4.19 Smart Briefs Command
+A single user-facing action — `/briefs` in Telegram and the wizard's *Get Briefs* button — handles both fresh-build and resend with no user-visible mode toggle:
+
+- If new content exists for the subject since the last delivery, the existing `digests` row for today is rebuilt (T-41 path) and a fresh set of Briefs is sent.
+- If nothing has changed, the previous Briefs are resent with a one-line *"no new content since HH:MM"* footer so the user understands why.
+
+`/rebuild_briefs` is retained as an explicit force-rebuild for power users. Old `/get_digest` and `/rebuild_digest` aliases are kept for one release cycle, then dropped.
+
+### 4.20 Learning Strategy (`services/learning_strategy.py`)
+A first-class extension point alongside the Digest Renderer ([§4.16](#416-digest-renderer)) and the Model Router ([§4.7](#47-model-router-servicesmodel_routerpy)). PCCA ships one default implementation; external contributors can replace the entire layer.
+
+**Interface** (sketched, full definition in T-17):
+
+```
+class LearningStrategy(Protocol):
+    async def interpret(
+        self,
+        *,
+        feedback_event: FeedbackEvent,
+        item: Item | None,
+        subject: Subject,
+        recent_history: list[FeedbackEvent],
+    ) -> list[LearningAction]: ...
+```
+
+`LearningAction.kind` values: `no_action`, `ask_user_to_disambiguate`, `adjust_source_weight`, `adjust_author_weight`, `adjust_topic_terms`, `suspend_source_for_subject`, `tag_item_for_review`. Each action carries a `target`, `delta`, `confidence`, and plain-English `rationale`.
+
+**Default strategy: conservative + disambiguating.** Threshold-gated: most adjustments require N similar reactions in the last 14 days before firing. Below threshold the strategy records but takes no action. When patterns are visible but ambiguous (e.g., user 🚫'd a reposted item — was it the source, the original author, or the topic?), the strategy emits `ask_user_to_disambiguate` and the bot posts a follow-up question. The user's reply becomes its own feedback event with richer context, often resolving the ambiguity.
+
+**Key invariant:** explicit user instructions ([§4.10.1](#4101-preference-extraction-service-planned-task-t-46)) take precedence. The Learning Strategy never overrides a rule the user stated directly.
+
+Reads from `feedback_events` and `subject_preferences`; writes proposed actions back to `subject_preferences` (versioned) and `subject_sources` (per-subject overrides). Decisions are logged to `run_logs` with `run_type='learning_run'` for observability.
 
 ---
 
@@ -245,6 +310,52 @@ pending_subject_drafts(chat_id PRIMARY KEY, title, description_text,
 - **Preference edits are versioned and append-only.** Rollback by reading an older version.
 - **Run IDs** for ingestion are mandatory; **dedupe keys** for digests (`UNIQUE(subject_id, run_date)`) are mandatory (task T-5).
 - **`subject_sources` is for overrides, not gating.** Existing rows are preserved as priority/suspended hints during the T-45 migration; they are not consulted when deciding whether to crawl a source.
+
+### 5.3 Preference Rule Schema
+
+`subject_preferences.include_rules_json` and `exclude_rules_json` carry a structured rule shape that supports topic-level, author-level, and source-level rules plus compound conditionals. Both columns share the same shape:
+
+```json
+{
+  "topics":  ["claude code", "agent workflows"],
+  "authors": ["karpathy"],
+  "sources": []
+}
+```
+
+Plus a sibling `quality_rules_json` field on the same `subject_preferences` row holding higher-order rules:
+
+```json
+{
+  "min_practicality": 0.4,
+  "max_items": 5,
+  "conditional_rules": [
+    {
+      "kind": "exclude_unless_topic",
+      "author": "elon musk",
+      "unless_topics": ["space", "spacex", "starship", "rocket"]
+    },
+    {
+      "kind": "include_only_if_source_tier",
+      "topic": "ai tools",
+      "source_tiers": ["official", "practitioner"]
+    }
+  ]
+}
+```
+
+**Rule families and where they're evaluated:**
+
+| Rule type | Storage | Evaluator | Cost |
+|---|---|---|---|
+| `topics` (include/exclude) | flat list | Pass-1 keyword filter | cheap |
+| `authors` (include/exclude) | flat list | Pass-1 author equality match | cheap |
+| `sources` (include/exclude per subject) | flat list, mirrored to `subject_sources(status='suspended')` | Pass-1 source join | cheap |
+| `conditional_rules` | structured array | Pass-2 LLM (T-16) reads natural-language constraints and applies them per item | model call |
+
+This schema is the contract between the **Preference Extraction Service** ([§4.10.1](#4101-preference-extraction-service-planned-task-t-46)) — which writes it from free-form user input — and the **Curation Engine** ([§4.8](#48-curation-engine-pipelinecurationpy)) — which reads it during Pass-1 and Pass-2. New rule kinds (e.g. `time_decay_after`, `require_engagement_above`) extend `conditional_rules` without migrations because the column is JSON.
+
+**Rule precedence:** explicit rules (set by the user via [§4.10.1](#4101-preference-extraction-service-planned-task-t-46)) always take precedence over actions proposed by the Learning Strategy ([§4.20](#420-learning-strategy)).
 
 ---
 
