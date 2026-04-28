@@ -400,11 +400,11 @@ async def _confirm_staged_sources(
         )
         print(f"Created subject '{created.name}' and monitored {len(staged)} staged source(s).")
         if new_routes:
-            print(f"Linked subject to {new_routes} registered Telegram chat(s) for digest delivery.")
+            print(f"Linked subject to {new_routes} registered Telegram chat(s) for Brief delivery.")
         else:
             print(
                 "No Telegram chat is registered yet. Send /start to your bot in Telegram "
-                "to complete digest routing."
+                "to complete Brief routing."
             )
     finally:
         await db.close()
@@ -548,8 +548,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
-    sub.add_parser("run-digest-once", help="Run digest sending once")
-    sub.add_parser("rebuild-digest-once", help="Force rebuild today's digest and send it")
+    sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
+    sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
+    sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
+    sub.add_parser("rebuild-digest-once", help="Deprecated alias for rebuild-briefs-once")
     sub.add_parser("run-agent", help="Run scheduler + Telegram bot")
     sub.add_parser("run-desktop", help="Run desktop webview wizard for onboarding/control")
     debug_bundle_parser = sub.add_parser("debug-bundle", help="Create a local redacted debug bundle")
@@ -688,11 +690,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         print(result.message)
         if result.data.get("new_routes"):
-            print(f"Linked subject to {result.data['new_routes']} registered Telegram chat(s) for digest delivery.")
+            print(f"Linked subject to {result.data['new_routes']} registered Telegram chat(s) for Brief delivery.")
         else:
             print(
                 "No Telegram chat is registered yet. Send /start to your bot in Telegram "
-                "to complete digest routing."
+                "to complete Brief routing."
             )
         return
 
@@ -726,16 +728,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(f"Nightly run completed: {stats}")
         return
 
-    if args.command == "run-digest-once":
+    if args.command in {"run-briefs-once", "run-digest-once"}:
         app = PCCAApp(settings=settings)
-        asyncio.run(app.run_digest_once())
-        print("Digest run completed.")
+        asyncio.run(app.run_briefs_once())
+        print("Brief run completed.")
         return
 
-    if args.command == "rebuild-digest-once":
+    if args.command in {"rebuild-briefs-once", "rebuild-digest-once"}:
         app = PCCAApp(settings=settings)
-        stats = asyncio.run(app.rebuild_digest_once())
-        print(f"Digest rebuild completed: {stats}")
+        stats = asyncio.run(app.rebuild_briefs_once())
+        print(f"Brief rebuild completed: {stats}")
         return
 
     if args.command == "run-agent":

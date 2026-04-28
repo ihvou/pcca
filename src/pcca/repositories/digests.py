@@ -22,6 +22,8 @@ class DigestItemRow:
     item_id: int
     rank: int
     reason_selected: str
+    short_text: str | None = None
+    full_text: str | None = None
 
 
 @dataclass
@@ -31,6 +33,26 @@ class DigestButtonRow:
     item_id: int
     subject_id: int
     action: str
+    label: str
+    kind: str
+
+
+@dataclass
+class DigestBriefViewRow:
+    digest_id: int
+    item_id: int
+    short_text: str
+    full_text: str
+
+
+@dataclass
+class DigestItemDeliveryRow:
+    digest_id: int
+    item_id: int
+    subject_id: int
+    chat_id: int
+    thread_id: str
+    message_id: int
 
 
 @dataclass
@@ -94,6 +116,10 @@ class DigestRepository:
         digest_params = tuple(digest_ids)
         # Current schema does not use ON DELETE CASCADE, so dependency rows must
         # be removed explicitly before deleting the digest root rows.
+        await self.conn.execute(
+            f"DELETE FROM digest_item_deliveries WHERE digest_id IN ({placeholders})",
+            digest_params,
+        )
         await self.conn.execute(f"DELETE FROM digest_deliveries WHERE digest_id IN ({placeholders})", digest_params)
         await self.conn.execute(f"DELETE FROM digest_buttons WHERE digest_id IN ({placeholders})", digest_params)
         await self.conn.execute(f"DELETE FROM digest_items WHERE digest_id IN ({placeholders})", digest_params)
@@ -101,11 +127,24 @@ class DigestRepository:
         await self.conn.commit()
         return len(digest_ids)
 
+    async def get_button_shortcuts_json(self, *, subject_id: int) -> str | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT button_shortcuts_json
+                FROM subjects
+                WHERE id = ?
+                """,
+                (subject_id,),
+            )
+        ).fetchone()
+        return str(row["button_shortcuts_json"]) if row is not None and row["button_shortcuts_json"] else None
+
     async def list_digest_items(self, *, digest_id: int) -> list[DigestItemRow]:
         rows = await (
             await self.conn.execute(
                 """
-                SELECT digest_id, item_id, rank, reason_selected
+                SELECT digest_id, item_id, rank, reason_selected, short_text, full_text
                 FROM digest_items
                 WHERE digest_id = ?
                 ORDER BY rank ASC
@@ -119,23 +158,47 @@ class DigestRepository:
                 item_id=row["item_id"],
                 rank=row["rank"],
                 reason_selected=row["reason_selected"],
+                short_text=row["short_text"],
+                full_text=row["full_text"],
             )
             for row in rows
         ]
 
-    async def add_digest_item(self, *, digest_id: int, item_id: int, rank: int, reason_selected: str) -> None:
+    async def add_digest_item(
+        self,
+        *,
+        digest_id: int,
+        item_id: int,
+        rank: int,
+        reason_selected: str,
+        short_text: str | None = None,
+        full_text: str | None = None,
+    ) -> None:
         await self.conn.execute(
             """
-            INSERT INTO digest_items(digest_id, item_id, rank, reason_selected)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO digest_items(digest_id, item_id, rank, reason_selected, short_text, full_text)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(digest_id, item_id)
-            DO UPDATE SET rank = excluded.rank, reason_selected = excluded.reason_selected
+            DO UPDATE SET
+              rank = excluded.rank,
+              reason_selected = excluded.reason_selected,
+              short_text = excluded.short_text,
+              full_text = excluded.full_text
             """,
-            (digest_id, item_id, rank, reason_selected),
+            (digest_id, item_id, rank, reason_selected, short_text, full_text),
         )
         await self.conn.commit()
 
-    async def create_button_token(self, *, digest_id: int, item_id: int, subject_id: int, action: str) -> str:
+    async def create_button_token(
+        self,
+        *,
+        digest_id: int,
+        item_id: int,
+        subject_id: int,
+        action: str,
+        label: str | None = None,
+        kind: str = "feedback",
+    ) -> str:
         existing = await (
             await self.conn.execute(
                 """
@@ -148,15 +211,25 @@ class DigestRepository:
             )
         ).fetchone()
         if existing is not None:
+            await self.conn.execute(
+                """
+                UPDATE digest_buttons
+                SET label = COALESCE(?, label),
+                    kind = COALESCE(?, kind)
+                WHERE token = ?
+                """,
+                (label, kind, existing["token"]),
+            )
+            await self.conn.commit()
             return str(existing["token"])
 
         token = token_urlsafe(8)
         await self.conn.execute(
             """
-            INSERT INTO digest_buttons(token, digest_id, item_id, subject_id, action)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO digest_buttons(token, digest_id, item_id, subject_id, action, label, kind)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, digest_id, item_id, subject_id, action),
+            (token, digest_id, item_id, subject_id, action, label or action, kind),
         )
         await self.conn.commit()
         return token
@@ -165,7 +238,7 @@ class DigestRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT token, digest_id, item_id, subject_id, action
+                SELECT token, digest_id, item_id, subject_id, action, label, kind
                 FROM digest_buttons
                 WHERE token = ?
                 """,
@@ -180,6 +253,53 @@ class DigestRepository:
             item_id=row["item_id"],
             subject_id=row["subject_id"],
             action=row["action"],
+            label=row["label"] or row["action"],
+            kind=row["kind"] or "feedback",
+        )
+
+    async def list_buttons_for_item(self, *, digest_id: int, item_id: int) -> list[DigestButtonRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT token, digest_id, item_id, subject_id, action, label, kind
+                FROM digest_buttons
+                WHERE digest_id = ? AND item_id = ?
+                ORDER BY created_at ASC
+                """,
+                (digest_id, item_id),
+            )
+        ).fetchall()
+        return [
+            DigestButtonRow(
+                token=row["token"],
+                digest_id=row["digest_id"],
+                item_id=row["item_id"],
+                subject_id=row["subject_id"],
+                action=row["action"],
+                label=row["label"] or row["action"],
+                kind=row["kind"] or "feedback",
+            )
+            for row in rows
+        ]
+
+    async def get_brief_view(self, *, digest_id: int, item_id: int) -> DigestBriefViewRow | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT digest_id, item_id, short_text, full_text
+                FROM digest_items
+                WHERE digest_id = ? AND item_id = ?
+                """,
+                (digest_id, item_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return DigestBriefViewRow(
+            digest_id=row["digest_id"],
+            item_id=row["item_id"],
+            short_text=row["short_text"] or "",
+            full_text=row["full_text"] or row["short_text"] or "",
         )
 
     async def mark_sent(self, *, digest_id: int) -> None:
@@ -218,3 +338,64 @@ class DigestRepository:
             (digest_id, chat_id, thread_key, message_id, status, status, error_text),
         )
         await self.conn.commit()
+
+    async def record_item_delivery(
+        self,
+        *,
+        digest_id: int,
+        item_id: int,
+        chat_id: int,
+        thread_id: str | None,
+        status: str,
+        message_id: int | None = None,
+        error_text: str | None = None,
+    ) -> None:
+        thread_key = thread_id or ""
+        await self.conn.execute(
+            """
+            INSERT INTO digest_item_deliveries(
+              digest_id, item_id, chat_id, thread_id, message_id, sent_at, status, error_text
+            )
+            VALUES (?, ?, ?, ?, ?, CASE WHEN ? = 'sent' THEN CURRENT_TIMESTAMP ELSE NULL END, ?, ?)
+            """,
+            (digest_id, item_id, chat_id, thread_key, message_id, status, status, error_text),
+        )
+        await self.conn.commit()
+
+    async def find_item_delivery_by_message(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+    ) -> DigestItemDeliveryRow | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT
+                  did.digest_id,
+                  did.item_id,
+                  d.subject_id,
+                  did.chat_id,
+                  did.thread_id,
+                  did.message_id
+                FROM digest_item_deliveries did
+                JOIN digests d ON d.id = did.digest_id
+                WHERE did.chat_id = ?
+                  AND did.message_id = ?
+                  AND did.status = 'sent'
+                ORDER BY did.sent_at DESC
+                LIMIT 1
+                """,
+                (chat_id, message_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return DigestItemDeliveryRow(
+            digest_id=row["digest_id"],
+            item_id=row["item_id"],
+            subject_id=row["subject_id"],
+            chat_id=row["chat_id"],
+            thread_id=row["thread_id"],
+            message_id=row["message_id"],
+        )

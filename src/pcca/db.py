@@ -309,6 +309,37 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON pending_subject_drafts(updated_at);
         """,
     ),
+    (
+        7,
+        """
+        ALTER TABLE subjects ADD COLUMN button_shortcuts_json TEXT;
+
+        ALTER TABLE digest_items ADD COLUMN short_text TEXT;
+        ALTER TABLE digest_items ADD COLUMN full_text TEXT;
+
+        ALTER TABLE digest_buttons ADD COLUMN label TEXT;
+        ALTER TABLE digest_buttons ADD COLUMN kind TEXT NOT NULL DEFAULT 'feedback';
+
+        CREATE TABLE IF NOT EXISTS digest_item_deliveries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          digest_id INTEGER NOT NULL,
+          item_id INTEGER NOT NULL,
+          chat_id INTEGER NOT NULL,
+          thread_id TEXT NOT NULL DEFAULT '',
+          message_id INTEGER,
+          sent_at TEXT,
+          status TEXT NOT NULL,
+          error_text TEXT,
+          FOREIGN KEY(digest_id) REFERENCES digests(id),
+          FOREIGN KEY(item_id) REFERENCES items(id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_digest_item_deliveries_message
+          ON digest_item_deliveries(chat_id, message_id);
+
+        DROP INDEX IF EXISTS idx_feedback_subject_item_type;
+        """,
+    ),
 ]
 
 

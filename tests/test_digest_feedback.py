@@ -7,7 +7,7 @@ import pytest
 
 from pcca.collectors.base import CollectedItem
 from pcca.db import Database
-from pcca.digest_renderer import DeliveryPayload, RenderedDigestItem
+from pcca.digest_renderer import BriefButtonPayload, BriefPayload, DeliveryPayload
 from pcca.repositories.digests import DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -27,21 +27,40 @@ class FakeTelegramService:
     def __init__(self) -> None:
         self.sent_messages: list[dict] = []
 
-    async def send_digest_message(
+    async def send_brief_message(
         self,
         *,
         chat_id: int,
         subject_name: str,
-        items: list[str],
-        item_actions: list[dict] | None = None,
+        brief: BriefPayload,
+        footer: str | None = None,
         thread_id: int | None = None,
     ) -> int:
         self.sent_messages.append(
             {
                 "chat_id": chat_id,
                 "subject_name": subject_name,
-                "items": items,
-                "item_actions": item_actions or [],
+                "brief": brief,
+                "footer": footer,
+                "thread_id": thread_id,
+            }
+        )
+        return len(self.sent_messages)
+
+    async def send_no_briefs_message(
+        self,
+        *,
+        chat_id: int,
+        subject_name: str,
+        footer: str | None = None,
+        thread_id: int | None = None,
+    ) -> int:
+        self.sent_messages.append(
+            {
+                "chat_id": chat_id,
+                "subject_name": subject_name,
+                "brief": None,
+                "footer": footer,
                 "thread_id": thread_id,
             }
         )
@@ -53,47 +72,62 @@ class HeadlineOnlyRenderer:
 
     async def render(self, *, subject, ranked_items, context) -> DeliveryPayload:
         if not ranked_items:
-            return DeliveryPayload(renderer_name=self.name, items=[])
+            return DeliveryPayload(renderer_name=self.name, briefs=[])
         candidate = ranked_items[0]
-        token = await context.create_button_token(candidate, "up")
-        return DeliveryPayload(
-            renderer_name=self.name,
-            items=[f"{subject.name}: {candidate.title_or_text.splitlines()[0]}"],
-            item_actions=[{"rank": 1, "tokens": {"up": token}}],
-            rendered_items=[
-                RenderedDigestItem(
-                    item_id=candidate.item_id,
-                    rank=1,
-                    reason_selected="headline renderer",
+        token = await context.create_button_token(
+            candidate,
+            "more like this",
+            label="More like this",
+            kind="feedback",
+        )
+        brief = BriefPayload(
+            item_id=candidate.item_id,
+            rank=1,
+            reason_selected="headline renderer",
+            short_text=f"{subject.name}: {candidate.title_or_text.splitlines()[0]}",
+            full_text=f"{subject.name}: {candidate.title_or_text}",
+            buttons=[
+                BriefButtonPayload(
+                    label="More like this",
+                    token=token,
+                    text_macro="more like this",
                 )
             ],
         )
+        return DeliveryPayload(renderer_name=self.name, briefs=[brief])
 
 
-@pytest.mark.asyncio
-async def test_digest_run_is_idempotent_and_feedback_buttons_map_to_items(tmp_path: Path) -> None:
-    db = Database(path=tmp_path / "pcca.db")
-    await db.connect()
-    await db.initialize()
+async def _seed_subject_with_route(db: Database) -> tuple[SubjectService, RoutingService, object]:
     assert db.conn is not None
-
     subject_repo = SubjectRepository(conn=db.conn)
     subject_service = SubjectService(repository=subject_repo)
     subject = await subject_service.create_subject("Agentic PM")
-
     routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
     await routing_service.register_chat(chat_id=123, title="Test")
     await routing_service.link_subject(subject_name="Agentic PM", chat_id=123)
+    return subject_service, routing_service, subject
 
+
+async def _seed_item_score(
+    db: Database,
+    *,
+    subject_id: int,
+    external_id: str,
+    text: str,
+    url: str,
+    score: float,
+    rationale: str,
+) -> int:
+    assert db.conn is not None
     item_repo = ItemRepository(conn=db.conn)
     item_stats = await item_repo.upsert_many(
         [
             CollectedItem(
                 platform="rss",
-                external_id="item-1",
+                external_id=external_id,
                 author="Boris Cherny",
-                url="https://example.com/post",
-                text="Claude Code release details with practical agent workflow",
+                url=url,
+                text=text,
                 transcript_text=None,
                 published_at="2026-04-24T09:00:00",
                 metadata={},
@@ -101,18 +135,36 @@ async def test_digest_run_is_idempotent_and_feedback_buttons_map_to_items(tmp_pa
         ]
     )
     item_id = item_stats["item_ids"][0]
-
-    item_score_repo = ItemScoreRepository(conn=db.conn)
-    await item_score_repo.upsert_score(
+    await ItemScoreRepository(conn=db.conn).upsert_score(
         item_id=item_id,
-        subject_id=subject.id,
-        pass1_score=0.9,
-        pass2_score=0.9,
-        practicality_score=0.9,
-        novelty_score=0.8,
-        trust_score=0.8,
+        subject_id=subject_id,
+        pass1_score=score,
+        pass2_score=score,
+        practicality_score=score,
+        novelty_score=score,
+        trust_score=score,
         noise_penalty=0.0,
-        final_score=0.92,
+        final_score=score,
+        rationale=rationale,
+    )
+    return item_id
+
+
+@pytest.mark.asyncio
+async def test_digest_run_sends_one_message_per_brief_and_feedback_buttons_map_to_items(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    item_id = await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Claude Code release details with practical agent workflow",
+        url="https://example.com/post",
+        score=0.92,
         rationale="practical release details",
     )
 
@@ -121,7 +173,7 @@ async def test_digest_run_is_idempotent_and_feedback_buttons_map_to_items(tmp_pa
     runner = JobRunner(
         subject_service=subject_service,
         routing_service=routing_service,
-        item_score_repo=item_score_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
         digest_repo=digest_repo,
         run_log_repo=RunLogRepository(conn=db.conn),
         telegram_service=fake_telegram,  # type: ignore[arg-type]
@@ -133,39 +185,50 @@ async def test_digest_run_is_idempotent_and_feedback_buttons_map_to_items(tmp_pa
     digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
     digest_item_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_items")).fetchone()
     delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()
+    item_delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_item_deliveries")).fetchone()
     button_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_buttons")).fetchone()
     assert int(digest_count["c"]) == 1
     assert int(digest_item_count["c"]) == 1
     assert int(delivery_count["c"]) == 1
-    assert int(button_count["c"]) == 3
+    assert int(item_delivery_count["c"]) == 2
+    assert int(button_count["c"]) == 5
     assert len(fake_telegram.sent_messages) == 2
-    assert "published: 2026-04-24T09:00:00" in fake_telegram.sent_messages[0]["items"][0]
+    assert "published 2026-04-24T09:00:00" in fake_telegram.sent_messages[0]["brief"].short_text
 
     token_row = await (
-        await db.conn.execute("SELECT token FROM digest_buttons WHERE action = 'up' LIMIT 1")
+        await db.conn.execute("SELECT token FROM digest_buttons WHERE action = 'more like this' LIMIT 1")
     ).fetchone()
     feedback_service = FeedbackService(
         feedback_repo=FeedbackRepository(conn=db.conn),
-        subject_repo=subject_repo,
+        subject_repo=SubjectRepository(conn=db.conn),
         digest_repo=digest_repo,
     )
     button = await feedback_service.get_digest_button(token_row["token"])
     assert button is not None
     assert button.item_id == item_id
     assert button.subject_id == subject.id
+    assert button.label == "👍"
+    assert button.kind == "feedback"
 
     await feedback_service.add_feedback_by_subject_id(
         subject_id=button.subject_id,
         item_id=button.item_id,
-        feedback_type=f"button_{button.action}",
+        feedback_type="button_macro",
+        comment_text=button.action,
     )
     await feedback_service.add_feedback_by_subject_id(
         subject_id=button.subject_id,
         item_id=button.item_id,
-        feedback_type=f"button_{button.action}",
+        feedback_type="button_macro",
+        comment_text=button.action,
     )
     feedback_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM feedback_events")).fetchone()
-    assert int(feedback_count["c"]) == 1
+    assert int(feedback_count["c"]) == 2
+
+    delivery = await feedback_service.find_digest_item_by_message(chat_id=123, message_id=1)
+    assert delivery is not None
+    assert delivery.item_id == item_id
+    assert delivery.subject_id == subject.id
 
     await db.close()
 
@@ -177,42 +240,14 @@ async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
     await db.initialize()
     assert db.conn is not None
 
-    subject_repo = SubjectRepository(conn=db.conn)
-    subject_service = SubjectService(repository=subject_repo)
-    subject = await subject_service.create_subject("Agentic PM")
-
-    routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
-    await routing_service.register_chat(chat_id=123, title="Test")
-    await routing_service.link_subject(subject_name="Agentic PM", chat_id=123)
-
-    item_repo = ItemRepository(conn=db.conn)
-    item_stats = await item_repo.upsert_many(
-        [
-            CollectedItem(
-                platform="rss",
-                external_id="item-1",
-                author="Boris Cherny",
-                url="https://example.com/post",
-                text="Claude Code release details with practical agent workflow",
-                transcript_text=None,
-                published_at="2026-04-24T09:00:00",
-                metadata={},
-            )
-        ]
-    )
-    item_id = item_stats["item_ids"][0]
-
-    item_score_repo = ItemScoreRepository(conn=db.conn)
-    await item_score_repo.upsert_score(
-        item_id=item_id,
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    item_id = await _seed_item_score(
+        db,
         subject_id=subject.id,
-        pass1_score=0.9,
-        pass2_score=0.9,
-        practicality_score=0.9,
-        novelty_score=0.8,
-        trust_score=0.8,
-        noise_penalty=0.0,
-        final_score=0.92,
+        external_id="item-1",
+        text="Claude Code release details with practical agent workflow",
+        url="https://example.com/post",
+        score=0.92,
         rationale="practical release details",
     )
 
@@ -221,7 +256,7 @@ async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
     runner = JobRunner(
         subject_service=subject_service,
         routing_service=routing_service,
-        item_score_repo=item_score_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
         digest_repo=digest_repo,
         run_log_repo=RunLogRepository(conn=db.conn),
         telegram_service=fake_telegram,  # type: ignore[arg-type]
@@ -231,17 +266,85 @@ async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
     stats = await runner.run_morning_digest()
 
     assert stats["renderers_used"] == {"headline_only": 1}
-    assert fake_telegram.sent_messages[0]["items"] == [
+    assert fake_telegram.sent_messages[0]["brief"].short_text == (
         "Agentic PM: Claude Code release details with practical agent workflow"
-    ]
+    )
     digest_item = await (
-        await db.conn.execute("SELECT reason_selected FROM digest_items WHERE item_id = ?", (item_id,))
+        await db.conn.execute("SELECT reason_selected, short_text FROM digest_items WHERE item_id = ?", (item_id,))
     ).fetchone()
     assert digest_item["reason_selected"] == "headline renderer"
+    assert digest_item["short_text"].startswith("Agentic PM:")
     latest_run = await (
         await db.conn.execute("SELECT stats_json FROM run_logs ORDER BY id DESC LIMIT 1")
     ).fetchone()
     assert json.loads(latest_run["stats_json"])["renderers_used"] == {"headline_only": 1}
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_briefs_resends_when_no_new_items_and_rebuilds_when_fresh_items_exist(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Older Claude Code workflow detail",
+        url="https://example.com/old",
+        score=0.72,
+        rationale="older but useful",
+    )
+
+    digest_repo = DigestRepository(conn=db.conn)
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=digest_repo,
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    initial_stats = await runner.run_smart_briefs()
+    resend_stats = await runner.run_smart_briefs()
+
+    assert initial_stats["deliveries_sent"] == 1
+    assert resend_stats["smart_resends"] == 1
+    assert "Older Claude Code workflow detail" in fake_telegram.sent_messages[-1]["brief"].short_text
+    assert fake_telegram.sent_messages[-1]["footer"].startswith("No new briefs since ")
+
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-2",
+        text="Fresh Claude Code release with concrete implementation steps",
+        url="https://example.com/new",
+        score=0.97,
+        rationale="fresh release details",
+    )
+
+    fresh_stats = await runner.run_smart_briefs()
+
+    assert fresh_stats["digests_rebuilt"] == 1
+    assert fresh_stats["deliveries_sent"] == 1
+    assert "Fresh Claude Code release" in fake_telegram.sent_messages[-1]["brief"].short_text
+    assert fake_telegram.sent_messages[-1]["footer"] is None
+
+    digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
+    delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()
+    latest_run = await (
+        await db.conn.execute("SELECT run_type, status FROM run_logs ORDER BY id DESC LIMIT 1")
+    ).fetchone()
+    assert int(digest_count["c"]) == 1
+    assert int(delivery_count["c"]) == 1
+    assert latest_run["run_type"] == "briefs"
+    assert latest_run["status"] == "success"
 
     await db.close()
 
@@ -253,42 +356,14 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
     await db.initialize()
     assert db.conn is not None
 
-    subject_repo = SubjectRepository(conn=db.conn)
-    subject_service = SubjectService(repository=subject_repo)
-    subject = await subject_service.create_subject("Agentic PM")
-
-    routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
-    await routing_service.register_chat(chat_id=123, title="Test")
-    await routing_service.link_subject(subject_name="Agentic PM", chat_id=123)
-
-    item_repo = ItemRepository(conn=db.conn)
-    item_score_repo = ItemScoreRepository(conn=db.conn)
-
-    first_stats = await item_repo.upsert_many(
-        [
-            CollectedItem(
-                platform="rss",
-                external_id="item-1",
-                author="Boris Cherny",
-                url="https://example.com/old",
-                text="Older Claude Code workflow detail",
-                transcript_text=None,
-                published_at="2026-04-24T09:00:00",
-                metadata={},
-            )
-        ]
-    )
-    first_item_id = first_stats["item_ids"][0]
-    await item_score_repo.upsert_score(
-        item_id=first_item_id,
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
         subject_id=subject.id,
-        pass1_score=0.7,
-        pass2_score=0.7,
-        practicality_score=0.7,
-        novelty_score=0.6,
-        trust_score=0.8,
-        noise_penalty=0.0,
-        final_score=0.72,
+        external_id="item-1",
+        text="Older Claude Code workflow detail",
+        url="https://example.com/old",
+        score=0.72,
         rationale="older but useful",
     )
 
@@ -297,7 +372,7 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
     runner = JobRunner(
         subject_service=subject_service,
         routing_service=routing_service,
-        item_score_repo=item_score_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
         digest_repo=digest_repo,
         run_log_repo=RunLogRepository(conn=db.conn),
         telegram_service=fake_telegram,  # type: ignore[arg-type]
@@ -305,33 +380,15 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
 
     initial_stats = await runner.run_morning_digest()
     assert initial_stats["deliveries_sent"] == 1
-    assert "Older Claude Code workflow detail" in fake_telegram.sent_messages[-1]["items"][0]
+    assert "Older Claude Code workflow detail" in fake_telegram.sent_messages[-1]["brief"].short_text
 
-    second_stats = await item_repo.upsert_many(
-        [
-            CollectedItem(
-                platform="rss",
-                external_id="item-2",
-                author="Claude Team",
-                url="https://example.com/new",
-                text="Fresh Claude Code release with concrete implementation steps",
-                transcript_text=None,
-                published_at="2026-04-24T14:30:00",
-                metadata={},
-            )
-        ]
-    )
-    second_item_id = second_stats["item_ids"][0]
-    await item_score_repo.upsert_score(
-        item_id=second_item_id,
+    await _seed_item_score(
+        db,
         subject_id=subject.id,
-        pass1_score=0.98,
-        pass2_score=0.96,
-        practicality_score=0.95,
-        novelty_score=0.95,
-        trust_score=0.9,
-        noise_penalty=0.0,
-        final_score=0.97,
+        external_id="item-2",
+        text="Fresh Claude Code release with concrete implementation steps",
+        url="https://example.com/new",
+        score=0.97,
         rationale="fresh release details",
     )
 
@@ -339,8 +396,9 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
 
     assert rebuild_stats["digests_rebuilt"] == 1
     assert rebuild_stats["deliveries_sent"] == 1
-    assert len(fake_telegram.sent_messages) == 2
-    assert "Fresh Claude Code release" in fake_telegram.sent_messages[-1]["items"][0]
+    assert len(fake_telegram.sent_messages) == 3
+    rebuilt_texts = [message["brief"].short_text for message in fake_telegram.sent_messages[-2:]]
+    assert any("Fresh Claude Code release" in text for text in rebuilt_texts)
 
     digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
     delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()

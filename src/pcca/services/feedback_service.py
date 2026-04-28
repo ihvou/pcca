@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from pcca.repositories.digests import DigestButtonRow, DigestRepository
+from pcca.repositories.digests import DigestBriefViewRow, DigestButtonRow, DigestItemDeliveryRow, DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.subjects import SubjectRepository
 
@@ -50,3 +50,18 @@ class FeedbackService:
         if self.digest_repo is None:
             return None
         return await self.digest_repo.get_button(token)
+
+    async def list_digest_buttons_for_item(self, *, digest_id: int, item_id: int) -> list[DigestButtonRow]:
+        if self.digest_repo is None:
+            return []
+        return await self.digest_repo.list_buttons_for_item(digest_id=digest_id, item_id=item_id)
+
+    async def get_digest_brief_view(self, *, digest_id: int, item_id: int) -> DigestBriefViewRow | None:
+        if self.digest_repo is None:
+            return None
+        return await self.digest_repo.get_brief_view(digest_id=digest_id, item_id=item_id)
+
+    async def find_digest_item_by_message(self, *, chat_id: int, message_id: int) -> DigestItemDeliveryRow | None:
+        if self.digest_repo is None:
+            return None
+        return await self.digest_repo.find_item_delivery_by_message(chat_id=chat_id, message_id=message_id)

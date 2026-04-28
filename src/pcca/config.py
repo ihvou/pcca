@@ -66,8 +66,8 @@ class Settings:
             browser_channel = browser_channel.strip().lower() or None
         ollama_enabled_raw = (_env("PCCA_OLLAMA_ENABLED", "false") or "false").strip().lower()
         ollama_enabled = ollama_enabled_raw in {"1", "true", "yes", "on"}
-        # Default OFF: in v1 the daily digest is on-demand via the Telegram bot's
-        # "Get Digest" button. Set PCCA_DIGEST_AUTO_SEND=true to re-enable the
+        # Default OFF: in v1 daily Brief delivery is on-demand via the Telegram bot's
+        # "Get Briefs" button. Set PCCA_DIGEST_AUTO_SEND=true to re-enable the
         # morning_cron auto-send for users who have a stable nightly+morning routine.
         digest_auto_send_raw = (_env("PCCA_DIGEST_AUTO_SEND", "false") or "false").strip().lower()
         digest_auto_send = digest_auto_send_raw in {"1", "true", "yes", "on"}

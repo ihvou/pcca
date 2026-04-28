@@ -17,6 +17,7 @@ from telegram.ext import (
     filters,
 )
 
+from pcca.digest_renderer import BriefPayload, EXPAND_BRIEF_ACTION
 from pcca.models import IntentAction
 from pcca.repositories.subject_drafts import SubjectDraft, SubjectDraftRepository
 from pcca.services.feedback_service import FeedbackService
@@ -74,9 +75,12 @@ class TelegramService:
         app.add_handler(CommandHandler("setup", self._on_setup))
         app.add_handler(CommandHandler("onboard", self._on_setup))
         app.add_handler(CommandHandler("read_content", self._on_read_content_command))
+        app.add_handler(CommandHandler("briefs", self._on_briefs_command))
+        app.add_handler(CommandHandler("rebuild_briefs", self._on_rebuild_briefs_command))
         app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
         app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
+        app.add_handler(CallbackQueryHandler(self._on_more_callback, pattern=r"^more:"))
         app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
         app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
@@ -102,69 +106,77 @@ class TelegramService:
         await app.shutdown()
         logger.info("Telegram service stopped duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
-    async def send_digest_message(
+    async def send_brief_message(
         self,
         chat_id: int,
         subject_name: str,
-        items: list[str],
-        item_actions: list[dict] | None = None,
+        brief: BriefPayload,
+        footer: str | None = None,
         thread_id: int | None = None,
     ) -> int | None:
         if self.application is None:
-            logger.warning("Telegram application not started, skipping digest send.")
+            logger.warning("Telegram application not started, skipping Brief send.")
             return None
         started_at = time.monotonic()
         logger.info(
-            "Telegram digest send started chat_id=%s subject=%s items=%d thread_id=%s",
+            "Telegram Brief send started chat_id=%s subject=%s item_id=%s rank=%s thread_id=%s",
             chat_id,
             subject_name,
-            len(items),
+            brief.item_id,
+            brief.rank,
             thread_id,
         )
-        title = f"📌 {subject_name} — {len(items)} items today"
-        body = "\n\n".join(items) if items else "No high-signal items passed your quality bar today."
-        keyboard_rows = []
-        for action_row in item_actions or []:
-            rank = action_row.get("rank")
-            tokens = action_row.get("tokens", {})
-            keyboard_rows.append(
-                [
-                    InlineKeyboardButton(f"{rank} 👍", callback_data=f"fb:{tokens.get('up', '')}"),
-                    InlineKeyboardButton(f"{rank} 👎", callback_data=f"fb:{tokens.get('down', '')}"),
-                    InlineKeyboardButton(f"{rank} 🔖", callback_data=f"fb:{tokens.get('save', '')}"),
-                ]
-            )
-        keyboard_rows.append(
-            [
-                InlineKeyboardButton("Read Content Now", callback_data="run:read"),
-                InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
-                InlineKeyboardButton("Rebuild Today's Digest", callback_data="run:rebuild"),
-            ]
-        )
+        text = brief.short_text
+        if footer:
+            text = f"{text}\n\n{footer}"
         try:
             sent = await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"{title}\n\n{body}",
-                reply_markup=InlineKeyboardMarkup(keyboard_rows),
+                text=f"📌 {subject_name}\n\n{text}",
+                reply_markup=self._brief_inline_keyboard(brief.buttons),
                 message_thread_id=thread_id,
                 disable_web_page_preview=True,
             )
             logger.info(
-                "Telegram digest send finished chat_id=%s subject=%s message_id=%s duration_ms=%d",
+                "Telegram Brief send finished chat_id=%s subject=%s item_id=%s message_id=%s duration_ms=%d",
                 chat_id,
                 subject_name,
+                brief.item_id,
                 sent.message_id,
                 int((time.monotonic() - started_at) * 1000),
             )
             return sent.message_id
         except Exception:
             logger.exception(
-                "Telegram digest send failed chat_id=%s subject=%s duration_ms=%d",
+                "Telegram Brief send failed chat_id=%s subject=%s item_id=%s duration_ms=%d",
                 chat_id,
                 subject_name,
+                brief.item_id,
                 int((time.monotonic() - started_at) * 1000),
             )
             raise
+
+    async def send_no_briefs_message(
+        self,
+        chat_id: int,
+        subject_name: str,
+        footer: str | None = None,
+        thread_id: int | None = None,
+    ) -> int | None:
+        if self.application is None:
+            logger.warning("Telegram application not started, skipping empty Brief notice.")
+            return None
+        body = "No high-signal briefs passed your quality bar today."
+        if footer:
+            body = f"{body}\n\n{footer}"
+        sent = await self.application.bot.send_message(
+            chat_id=chat_id,
+            text=f"📌 {subject_name}\n\n{body}",
+            reply_markup=self._quick_actions_inline_keyboard(),
+            message_thread_id=thread_id,
+            disable_web_page_preview=True,
+        )
+        return sent.message_id
 
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -179,7 +191,7 @@ class TelegramService:
             title=update.effective_chat.title or update.effective_chat.full_name,
         )
         connect_note = (
-            f"\nLinked {new_routes} existing subject(s) to this chat for digest delivery."
+            f"\nLinked {new_routes} existing subject(s) to this chat for Brief delivery."
             if new_routes
             else ""
         )
@@ -198,11 +210,11 @@ class TelegramService:
         await update.message.reply_text(
             "Scenario 1 setup flow:\n"
             "1. Open the desktop app and use the desktop wizard.\n"
-            "2. Set timezone, digest time, and your Telegram bot token.\n"
+            "2. Set timezone, Brief time, and your Telegram bot token.\n"
             "3. Start the local agent, then send `/start` here to verify Telegram.\n"
             "4. Log into platforms in your normal browser, then capture sessions in the desktop app.\n"
             "5. Stage follows/subscriptions, review them, and create your first subject.\n"
-            "6. Click Smoke Crawl + Test Digest, or use `/read_content` then `/get_digest` here.\n\n"
+            "6. Click Smoke Crawl + Test Briefs, or use `/read_content` then `/briefs` here.\n\n"
             "Connected-account onboarding is available for "
             "X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
             f"{reauth_note}",
@@ -218,9 +230,9 @@ class TelegramService:
             "- list/remove imported sources\n"
             "- show/refine preferences per subject\n"
             "- run collection now (`/read_content`)\n"
-            "- run digest now (`/get_digest`)\n"
-            "- rebuild today's digest after adding sources (`/rebuild_digest`)\n"
-            "- collect feedback (👍 👎 🔖)\n"
+            "- get Briefs now (`/briefs`)\n"
+            "- force rebuild today's Briefs (`/rebuild_briefs`)\n"
+            "- collect per-Brief feedback (buttons or replies)\n"
             "- accept voice notes (transcription backend pending)",
             reply_markup=self._quick_actions_reply_keyboard(),
         )
@@ -231,14 +243,29 @@ class TelegramService:
             return
         await self._run_manual_action_from_message(update.message, action_name="read content", action=self.read_content_action)
 
+    async def _on_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_manual_action_from_message(update.message, action_name="get briefs", action=self.get_digest_action)
+
+    async def _on_rebuild_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_rebuild_digest_from_message(update.message)
+
     async def _on_get_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
-        await self._run_manual_action_from_message(update.message, action_name="get digest", action=self.get_digest_action)
+        await update.message.reply_text("`/get_digest` is now `/briefs`. I will run `/briefs` now.", parse_mode="Markdown")
+        await self._run_manual_action_from_message(update.message, action_name="get briefs", action=self.get_digest_action)
 
     async def _on_rebuild_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
+        await update.message.reply_text(
+            "`/rebuild_digest` is now `/rebuild_briefs`. I will rebuild today's Briefs now.",
+            parse_mode="Markdown",
+        )
         await self._run_rebuild_digest_from_message(update.message)
 
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -254,7 +281,38 @@ class TelegramService:
             chat_id=update.effective_chat.id,
             title=update.effective_chat.title or update.effective_chat.full_name,
         )
+        if await self._record_brief_reply_feedback(update, update.message.text):
+            return
         await self._handle_text_intent(update, update.message.text)
+
+    async def _record_brief_reply_feedback(self, update: Update, text: str) -> bool:
+        if update.message is None or update.effective_chat is None:
+            return False
+        replied_to = update.message.reply_to_message
+        if replied_to is None:
+            return False
+        delivery = await self.feedback_service.find_digest_item_by_message(
+            chat_id=update.effective_chat.id,
+            message_id=replied_to.message_id,
+        )
+        if delivery is None:
+            return False
+        await self.feedback_service.add_feedback_by_subject_id(
+            subject_id=delivery.subject_id,
+            item_id=delivery.item_id,
+            feedback_type="reply_text",
+            comment_text=text,
+        )
+        await update.message.reply_text("Feedback saved for this Brief.")
+        logger.info(
+            "Telegram Brief reply feedback saved chat_id=%s reply_to=%s subject_id=%s item_id=%s chars=%d",
+            update.effective_chat.id,
+            replied_to.message_id,
+            delivery.subject_id,
+            delivery.item_id,
+            len(text),
+        )
+        return True
 
     async def _handle_text_intent(self, update: Update, text: str) -> None:
         if update.message is None:
@@ -291,7 +349,7 @@ class TelegramService:
             )
             await update.message.reply_text(
                 f"Subject ready: {subject.name}\n"
-                "I will include it in nightly runs and morning digests."
+                "I will include it in nightly runs and morning Briefs."
             )
             return
 
@@ -469,7 +527,7 @@ class TelegramService:
         if intent.action is IntentAction.RUN_GET_DIGEST:
             await self._run_manual_action_from_message(
                 update.message,
-                action_name="get digest",
+                action_name="get briefs",
                 action=self.get_digest_action,
             )
             return
@@ -589,6 +647,8 @@ class TelegramService:
                 "Please send the same instruction as text for now."
             )
             return
+        if await self._record_brief_reply_feedback(update, transcript):
+            return
         await self._handle_text_intent(update, transcript)
 
     async def _on_feedback_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -596,15 +656,44 @@ class TelegramService:
             return
         token = (update.callback_query.data or "fb:").split(":", 1)[1]
         button = await self.feedback_service.get_digest_button(token)
-        if button is None:
+        if button is None or button.kind != "feedback":
             await update.callback_query.answer("This feedback button is no longer available.")
             return
         await self.feedback_service.add_feedback_by_subject_id(
             subject_id=button.subject_id,
             item_id=button.item_id,
-            feedback_type=f"button_{button.action}",
+            feedback_type="button_macro",
+            comment_text=button.action,
         )
         await update.callback_query.answer("Feedback saved.")
+
+    async def _on_more_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query is None:
+            return
+        token = (update.callback_query.data or "more:").split(":", 1)[1]
+        button = await self.feedback_service.get_digest_button(token)
+        if button is None or button.kind != "expand" or button.action != EXPAND_BRIEF_ACTION:
+            await update.callback_query.answer("This Brief can no longer be expanded.")
+            return
+        view = await self.feedback_service.get_digest_brief_view(
+            digest_id=button.digest_id,
+            item_id=button.item_id,
+        )
+        if view is None:
+            await update.callback_query.answer("This Brief can no longer be expanded.")
+            return
+        buttons = await self.feedback_service.list_digest_buttons_for_item(
+            digest_id=button.digest_id,
+            item_id=button.item_id,
+        )
+        await update.callback_query.edit_message_text(
+            text=view.full_text,
+            reply_markup=self._brief_inline_keyboard_from_button_rows(
+                [row for row in buttons if row.kind == "feedback"]
+            ),
+            disable_web_page_preview=True,
+        )
+        await update.callback_query.answer("Expanded.")
 
     async def _on_run_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is None:
@@ -617,17 +706,17 @@ class TelegramService:
         if data == "run:read":
             await self._run_manual_action_from_message(message, action_name="read content", action=self.read_content_action)
             return
-        if data == "run:digest":
-            await self._run_manual_action_from_message(message, action_name="get digest", action=self.get_digest_action)
+        if data in {"run:briefs", "run:digest"}:
+            await self._run_manual_action_from_message(message, action_name="get briefs", action=self.get_digest_action)
             return
-        if data == "run:rebuild":
+        if data in {"run:rebuild", "run:rebuild_briefs"}:
             await self._run_rebuild_digest_from_message(message)
             return
 
     async def _run_rebuild_digest_from_message(self, message) -> None:
         if self.rebuild_digest_action is None:
             await message.reply_text(
-                "`rebuild digest` action is not available yet in this runtime.",
+                "`rebuild briefs` action is not available yet in this runtime.",
                 parse_mode="Markdown",
             )
             return
@@ -649,7 +738,7 @@ class TelegramService:
         async def action() -> Any:
             return await self.rebuild_digest_action(subject_ids=subject_ids)
 
-        await self._run_manual_action_from_message(message, action_name="rebuild digest", action=action)
+        await self._run_manual_action_from_message(message, action_name="rebuild briefs", action=action)
 
     async def _run_manual_action_from_message(
         self,
@@ -700,21 +789,60 @@ class TelegramService:
         return "\n\nNeeds re-login before next collection:\n" + "\n".join(lines)
 
     async def _send_quick_actions(self, message) -> None:
-        keyboard = InlineKeyboardMarkup(
-            [
+        await message.reply_text("Quick actions:", reply_markup=self._quick_actions_inline_keyboard())
+
+    def _brief_inline_keyboard(self, buttons) -> InlineKeyboardMarkup:
+        feedback_buttons = [button for button in buttons if button.kind == "feedback"]
+        expand_buttons = [button for button in buttons if button.kind == "expand"]
+        rows: list[list[InlineKeyboardButton]] = []
+        if feedback_buttons:
+            rows.append(
                 [
-                    InlineKeyboardButton("Read Content Now", callback_data="run:read"),
-                    InlineKeyboardButton("Get Digest Now", callback_data="run:digest"),
-                    InlineKeyboardButton("Rebuild Today's Digest", callback_data="run:rebuild"),
+                    InlineKeyboardButton(button.label, callback_data=f"fb:{button.token}")
+                    for button in feedback_buttons[:4]
                 ]
+            )
+        if expand_buttons:
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        expand_buttons[0].label,
+                        callback_data=f"more:{expand_buttons[0].token}",
+                    )
+                ]
+            )
+        rows.extend(self._quick_action_rows())
+        return InlineKeyboardMarkup(rows)
+
+    def _brief_inline_keyboard_from_button_rows(self, buttons) -> InlineKeyboardMarkup:
+        rows: list[list[InlineKeyboardButton]] = []
+        if buttons:
+            rows.append(
+                [
+                    InlineKeyboardButton(button.label, callback_data=f"fb:{button.token}")
+                    for button in buttons[:4]
+                ]
+            )
+        rows.extend(self._quick_action_rows())
+        return InlineKeyboardMarkup(rows)
+
+    def _quick_actions_inline_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(self._quick_action_rows())
+
+    @staticmethod
+    def _quick_action_rows() -> list[list[InlineKeyboardButton]]:
+        return [
+            [
+                InlineKeyboardButton("Read Content Now", callback_data="run:read"),
+                InlineKeyboardButton("Get Briefs", callback_data="run:briefs"),
+                InlineKeyboardButton("Rebuild Briefs", callback_data="run:rebuild_briefs"),
             ]
-        )
-        await message.reply_text("Quick actions:", reply_markup=keyboard)
+        ]
 
     @staticmethod
     def _quick_actions_reply_keyboard() -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
-            [["Read Content", "Get Digest"], ["Rebuild Digest", "List subjects"], ["Help"]],
+            [["Read Content", "Get Briefs"], ["Rebuild Briefs", "List subjects"], ["Help"]],
             resize_keyboard=True,
             one_time_keyboard=False,
         )

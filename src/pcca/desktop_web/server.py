@@ -84,7 +84,7 @@ INDEX_HTML = r"""
     <header>
       <div>
         <h1>Personal signal,<br/>not platform noise.</h1>
-        <p>First-run dogfood flow: connect Telegram, capture sessions from your browser, choose sources to monitor, create your first subject, then send a real test digest.</p>
+        <p>First-run dogfood flow: connect Telegram, capture sessions from your browser, choose sources to monitor, create your first subject, then send real test Briefs.</p>
       </div>
       <div class="badge" id="agentBadge">agent: checking</div>
     </header>
@@ -92,10 +92,10 @@ INDEX_HTML = r"""
       <main class="steps">
         <section data-step="runtime_configured">
           <h2>1. Runtime</h2>
-          <p>Set timezone, morning digest time, and your individual Telegram bot token. The token is stored locally and never echoed back.</p>
+          <p>Set timezone, morning Brief time, and your individual Telegram bot token. The token is stored locally and never echoed back.</p>
           <div class="row">
             <label>Timezone <input id="timezone" value="UTC" /></label>
-            <label>Digest time <input id="digestTime" value="08:30" /></label>
+            <label>Brief time <input id="digestTime" value="08:30" /></label>
           </div>
           <label style="margin-top:12px">Telegram bot token <input id="telegramToken" type="password" placeholder="123456:ABC..." /></label>
           <div class="actions"><button onclick="saveSettings()">Save Runtime Settings</button></div>
@@ -146,11 +146,12 @@ INDEX_HTML = r"""
           <div class="actions"><button onclick="confirmSubject()">Create Subject</button></div>
         </section>
         <section data-step="completed">
-          <h2>6. Smoke Crawl + Test Digest</h2>
+          <h2>6. Smoke Crawl + Test Briefs</h2>
           <p>The wizard only completes if at least one item is collected and at least one Telegram delivery succeeds.</p>
           <div class="actions">
-            <button onclick="smoke()">Smoke Crawl + Test Digest</button>
-            <button class="secondary" onclick="rebuildDigest()">Rebuild Today's Digest</button>
+            <button onclick="smoke()">Smoke Crawl + Test Briefs</button>
+            <button class="secondary" onclick="getBriefs()">Get Briefs</button>
+            <button class="secondary" onclick="rebuildDigest()">Rebuild Today's Briefs</button>
           </div>
           <div class="status-line" id="smokeStatus">Not run yet.</div>
         </section>
@@ -191,6 +192,7 @@ async function saveSettings() {
 async function captureSession() { return postAction('/api/session/capture', {platform: platform.value, browser: browser.value}); }
 async function loginPlatform() { return postAction('/api/login', {platform: platform.value}); }
 async function stageFollows() { return postAction('/api/stage-follows', {platform: platform.value, limit: Number(limit.value || 100)}); }
+async function getBriefs() { return postAction('/api/briefs'); }
 async function rebuildDigest() { return postAction('/api/digest/rebuild'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
@@ -446,6 +448,10 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(lambda _p: self.service.run_smoke_crawl_and_digest(), request)
 
+        async def briefs(request):
+            assert self.service is not None
+            return await run_result(lambda _p: self.service.get_briefs(), request)
+
         async def rebuild_digest(request):
             assert self.service is not None
             return await run_result(lambda _p: self.service.rebuild_todays_digest(), request)
@@ -478,6 +484,7 @@ class DesktopWebServer:
             Route("/api/staged-sources/monitor", monitor_staged_sources, methods=["POST"]),
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
+            Route("/api/briefs", briefs, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
         ]
         app = Starlette(routes=routes, lifespan=lifespan)

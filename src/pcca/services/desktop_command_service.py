@@ -108,7 +108,7 @@ def evaluate_smoke_result(nightly_stats: dict[str, Any], digest_stats: dict[str,
             deliveries_sent=deliveries_sent,
             message=(
                 "Smoke crawl collected 0 items. Re-check captured sessions and staged sources, "
-                "then run Smoke Crawl + Test Digest again."
+                "then run Smoke Crawl + Test Briefs again."
             ),
         )
     if deliveries_sent < 1:
@@ -117,7 +117,7 @@ def evaluate_smoke_result(nightly_stats: dict[str, Any], digest_stats: dict[str,
             items_collected=items_collected,
             deliveries_sent=deliveries_sent,
             message=(
-                "Smoke digest was composed but not delivered. Send /start to your Telegram bot "
+                "Smoke Briefs were composed but not delivered. Send /start to your Telegram bot "
                 "and make sure the subject is linked to that chat."
             ),
         )
@@ -125,7 +125,7 @@ def evaluate_smoke_result(nightly_stats: dict[str, Any], digest_stats: dict[str,
         ok=True,
         items_collected=items_collected,
         deliveries_sent=deliveries_sent,
-        message=f"Smoke crawl: {items_collected} items collected, {deliveries_sent} deliveries sent.",
+        message=f"Smoke crawl: {items_collected} items collected, {deliveries_sent} Brief delivery route(s) sent.",
     )
 
 
@@ -526,10 +526,9 @@ class DesktopCommandService:
         nightly_stats = await nightly_app.run_nightly_once()
         self.log(f"Smoke crawl finished: {json.dumps(nightly_stats, sort_keys=True)}")
 
-        self.log("Running test digest.")
-        digest_app = PCCAApp(settings=self.settings())
-        digest_stats = await digest_app.run_digest_once()
-        self.log(f"Test digest finished: {json.dumps(digest_stats or {}, sort_keys=True)}")
+        self.log("Running test Briefs.")
+        digest_stats = await self._run_briefs_with_available_agent()
+        self.log(f"Test Briefs finished: {json.dumps(digest_stats or {}, sort_keys=True)}")
 
         evaluation = evaluate_smoke_result(nightly_stats, digest_stats)
         settings = self.settings()
@@ -556,16 +555,41 @@ class DesktopCommandService:
             },
         )
 
-    async def rebuild_todays_digest(self) -> CommandResult:
-        self.log("Rebuilding today's digest.")
-        app = PCCAApp(settings=self.settings())
-        stats = await app.rebuild_digest_once()
-        self.log(f"Digest rebuild finished: {json.dumps(stats or {}, sort_keys=True)}")
+    async def get_briefs(self) -> CommandResult:
+        self.log("Getting Briefs.")
+        stats = await self._run_briefs_with_available_agent()
+        self.log(f"Briefs finished: {json.dumps(stats or {}, sort_keys=True)}")
         return CommandResult(
             True,
-            "Rebuilt today's digest.",
+            "Briefs sent.",
             {"digest_stats": stats or {}},
         )
+
+    async def rebuild_todays_digest(self) -> CommandResult:
+        self.log("Rebuilding today's Briefs.")
+        stats = await self._rebuild_briefs_with_available_agent()
+        self.log(f"Brief rebuild finished: {json.dumps(stats or {}, sort_keys=True)}")
+        return CommandResult(
+            True,
+            "Rebuilt today's Briefs.",
+            {"digest_stats": stats or {}},
+        )
+
+    async def _run_briefs_with_available_agent(self) -> dict:
+        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
+            self.log("Using running local agent for Brief delivery.")
+            return await self._agent_app.scheduler.job_runner.run_smart_briefs()
+        self.log("Local agent is unavailable; starting one-shot Brief delivery.")
+        app = PCCAApp(settings=self.settings())
+        return await app.run_briefs_once()
+
+    async def _rebuild_briefs_with_available_agent(self) -> dict:
+        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
+            self.log("Using running local agent to rebuild Briefs.")
+            return await self._agent_app.scheduler.job_runner.rebuild_todays_digest()
+        self.log("Local agent is unavailable; starting one-shot Brief rebuild.")
+        app = PCCAApp(settings=self.settings())
+        return await app.rebuild_briefs_once()
 
     async def shutdown(self) -> None:
         self.log("Wizard shutdown: stopping local agent.")

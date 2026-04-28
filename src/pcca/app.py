@@ -175,7 +175,7 @@ class PCCAApp:
         if self.telegram_service is not None:
             self.telegram_service.attach_manual_actions(
                 read_content_action=self.scheduler.job_runner.run_nightly_collection,
-                get_digest_action=self.scheduler.job_runner.run_morning_digest,
+                get_digest_action=self.scheduler.job_runner.run_smart_briefs,
                 rebuild_digest_action=self.scheduler.job_runner.rebuild_todays_digest,
             )
         logger.info("PCCA app started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
@@ -212,29 +212,35 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def run_digest_once(self) -> dict:
+    async def run_briefs_once(self) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)
         try:
-            stats = await self.scheduler.job_runner.run_morning_digest()
-            logger.info("PCCA one-shot digest finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            stats = await self.scheduler.job_runner.run_smart_briefs()
+            logger.info("PCCA one-shot Briefs finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
             return stats
         finally:
             await self.stop()
 
-    async def rebuild_digest_once(self, *, subject_ids: set[int] | None = None) -> dict:
+    async def run_digest_once(self) -> dict:
+        return await self.run_briefs_once()
+
+    async def rebuild_briefs_once(self, *, subject_ids: set[int] | None = None) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)
         try:
             stats = await self.scheduler.job_runner.rebuild_todays_digest(subject_ids=subject_ids)
             logger.info(
-                "PCCA one-shot digest rebuild finished duration_ms=%d stats=%s",
+                "PCCA one-shot Briefs rebuild finished duration_ms=%d stats=%s",
                 int((time.monotonic() - started_at) * 1000),
                 stats,
             )
             return stats
         finally:
             await self.stop()
+
+    async def rebuild_digest_once(self, *, subject_ids: set[int] | None = None) -> dict:
+        return await self.rebuild_briefs_once(subject_ids=subject_ids)
 
     async def import_follows_once(self, *, subject_name: str, platform: str, limit: int = 200) -> int:
         await self.start(with_scheduler=False, with_telegram=False)

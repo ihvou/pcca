@@ -76,3 +76,13 @@ def test_parse_run_read_content() -> None:
 def test_parse_run_get_digest() -> None:
     parsed = parse_intent("/get_digest")
     assert parsed.action is IntentAction.RUN_GET_DIGEST
+
+
+def test_parse_run_briefs() -> None:
+    parsed = parse_intent("/briefs")
+    assert parsed.action is IntentAction.RUN_GET_DIGEST
+
+
+def test_parse_rebuild_briefs() -> None:
+    parsed = parse_intent("rebuild today's briefs")
+    assert parsed.action is IntentAction.RUN_REBUILD_DIGEST

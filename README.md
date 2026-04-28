@@ -13,13 +13,13 @@ Phase-1 functional foundation is in place:
 - source linking/removal and connected-account follow import
 - subject preference refinement (include/exclude topics, versioned)
 - conversational subject drafts in Telegram (`save subject` / corrections / cancel)
-- feedback event logging from digest buttons
+- feedback event logging from per-Brief buttons and replies
 - detailed run/browser logging to `.pcca/logs/pcca.log` for local debugging
 - nightly collection pipeline + shared-source collection + per-subject scoring + persistence
 - top-K model rerank shortlisting
-- swappable digest renderer + Telegram delivery wiring
+- swappable internal renderer + Telegram Brief delivery wiring
 - auto-refresh of captured browser cookies before follow import and collection
-- forced rebuild of today's digest from current scores
+- forced rebuild of today's Briefs from current scores
 - browser-session login and follow import for X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts
 - unified source flow for X/LinkedIn/YouTube/Substack/reddit/Spotify/Apple Podcasts/Medium
 - collectors: X, LinkedIn, YouTube, Substack, Reddit, Spotify, Apple Podcasts, Medium, RSS
@@ -46,20 +46,20 @@ pcca run-desktop
 ```
 
 Use the desktop wizard to:
-- save timezone, digest time, and Telegram bot token
+- save timezone, Brief time, and Telegram bot token
 - capture sessions from your normal browser
 - let PCCA auto-refresh captured sessions before future imports and reads
 - stage follows/subscriptions for review
 - confirm which staged sources should be monitored
 - create the first subject separately from source monitoring
-- trigger read/digest runs
+- trigger read/Brief runs
 
 CLI one-shot jobs are available for developer/debug use:
 
 ```bash
 pcca run-nightly-once
-pcca run-digest-once
-pcca rebuild-digest-once
+pcca run-briefs-once
+pcca rebuild-briefs-once
 ```
 
 Run the long-lived agent:
@@ -103,15 +103,15 @@ pcca run-desktop
 - review staged sources
 - confirm which sources should be monitored
 - create the first subject with include/exclude/high-quality notes
-- click `Smoke Crawl + Test Digest`
+- click `Smoke Crawl + Test Briefs`
 
 5. In Telegram:
-- confirm the digest arrives
-- use `👍 / 👎 / 🔖` on digest messages
+- confirm the Brief messages arrive
+- use the per-Brief buttons or reply to a Brief message with free-form feedback
 
 ## Current First-Run Test Walkthrough
 
-Goal: test the current implementation's first-run setup flow, including connected-account follow import and first digest.
+Goal: test the current implementation's first-run setup flow, including connected-account follow import and first Brief delivery.
 This walkthrough is a dogfood checklist, not a future-version product spec.
 
 1. Install and launch
@@ -133,7 +133,7 @@ pcca run-desktop
 
 3. Complete the desktop wizard
 - Local storage and the agent are initialized automatically when the wizard opens.
-- Set timezone and digest time.
+- Set timezone and Brief time.
 - Paste your individual Telegram bot token and click `Save Runtime Settings`.
 - If the agent was already running, saving settings restarts it with the new token.
 - Open your bot chat in Telegram and send `/start`.
@@ -156,18 +156,18 @@ pcca run-desktop
 - Enter the subject name, include terms, exclude terms, and high-quality examples.
 - Click `Create Subject`.
 
-7. Trigger first read + first digest immediately
-- Click `Smoke Crawl + Test Digest`.
+7. Trigger first read + first Brief delivery immediately
+- Click `Smoke Crawl + Test Briefs`.
 - Or use Telegram:
   - `/read_content`
-  - `/get_digest`
-- If you added sources after already sending today's digest, use `Rebuild Today's Digest` in the wizard or `/rebuild_digest` in Telegram.
+  - `/briefs`
+- If you added sources after already sending today's Briefs, use `Rebuild Today's Briefs` in the wizard or `/rebuild_briefs` in Telegram.
 
 8. Validate current implementation behavior
 - You can list subjects and sources in Telegram:
   - `List subjects`
   - `List sources for Agentic PM`
-- You receive digest in Telegram with action buttons.
+- You receive one Telegram message per Brief, each with action buttons.
 
 ## Session Capture + Follow Import
 
@@ -229,8 +229,8 @@ The bundle includes redacted logs, DB summaries, and debug artifacts. It does no
 
 - `/setup` guided onboarding checklist
 - `/read_content` manual on-demand collection run
-- `/get_digest` manual on-demand digest run
-- `/rebuild_digest` delete today's existing digest rows and send a fresh composition
+- `/briefs` smart on-demand Brief delivery
+- `/rebuild_briefs` delete today's existing internal batch rows and send a fresh composition
 - free-form examples:
   - `Create subject: Agentic PM`
   - `I want practical AI-in-HR case studies, no hype`
@@ -239,10 +239,10 @@ The bundle includes redacted logs, DB summaries, and debug artifacts. It does no
   - `Refine Vibe Coding: include release notes; exclude motivation`
   - `Show preferences for Vibe Coding`
 
-### Digest delivery: on-demand by default
+### Brief Delivery: On Demand By Default
 
-In v1 the daily digest is **on-demand only**: click `Get Digest` in the
-Telegram bot whenever you want today's composition. The nightly content
+In v1 the daily Brief delivery is **on-demand only**: click `Get Briefs` in the
+Telegram bot whenever you want today's Briefs. The nightly content
 collection still runs on schedule (`PCCA_NIGHTLY_CRON`, default `0 1 * * *`)
 so the DB has fresh items in the morning. To re-enable the auto-send
 morning cron, set `PCCA_DIGEST_AUTO_SEND=true` in `.env` — the morning

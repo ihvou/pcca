@@ -21,9 +21,6 @@ class FeedbackRepository:
             """
             INSERT INTO feedback_events(subject_id, item_id, feedback_type, comment_text)
             VALUES (?, ?, ?, ?)
-            ON CONFLICT(subject_id, item_id, feedback_type)
-            WHERE item_id IS NOT NULL
-            DO NOTHING
             """,
             (subject_id, item_id, feedback_type, comment_text),
         )
