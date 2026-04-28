@@ -8,8 +8,10 @@ from datetime import date
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from pcca.digest_renderer import DigestRenderContext, DigestRenderer, TelegramDigestRenderer
 from pcca.pipeline.orchestrator import PipelineOrchestrator
 from pcca.repositories.digests import DigestRepository
+from pcca.repositories.item_scores import CandidateItem
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.services.subject_service import SubjectService
@@ -28,6 +30,7 @@ class JobRunner:
     run_log_repo: RunLogRepository | None = None
     pipeline_orchestrator: PipelineOrchestrator | None = None
     telegram_service: TelegramService | None = None
+    digest_renderer: DigestRenderer = field(default_factory=TelegramDigestRenderer)
 
     async def run_nightly_collection(self) -> None:
         started_at = time.monotonic()
@@ -63,6 +66,7 @@ class JobRunner:
             "items_selected": 0,
             "deliveries_sent": 0,
             "deliveries_failed": 0,
+            "renderers_used": {},
             "skipped_missing_dependencies": False,
         }
         try:
@@ -136,34 +140,32 @@ class JobRunner:
                     len(ordered_candidates),
                     bool(existing_items),
                 )
-                lines: list[str] = []
-                item_actions: list[dict] = []
-                for idx, candidate in enumerate(ordered_candidates, start=1):
-                    title = candidate.title_or_text.splitlines()[0][:180] if candidate.title_or_text else "(no title)"
-                    reason = candidate.rationale or f"score={candidate.final_score:.2f}"
-                    line = (
-                        f"{idx}. {title}\n"
-                        f"   via {candidate.author or 'unknown'}\n"
-                        f"   published: {candidate.published_at or 'unknown'}\n"
-                        f"   {candidate.url or ''}\n"
-                        f"   why: {reason}"
-                    )
-                    lines.append(line)
-                    tokens = {
-                        action: await self.digest_repo.create_button_token(
-                            digest_id=digest.id,
-                            item_id=candidate.item_id,
-                            subject_id=subject.id,
-                            action=action,
-                        )
-                        for action in ("up", "down", "save")
-                    }
-                    item_actions.append({"rank": idx, "tokens": tokens})
-                    await self.digest_repo.add_digest_item(
+                async def create_button_token(candidate: CandidateItem, action: str) -> str:
+                    return await self.digest_repo.create_button_token(
                         digest_id=digest.id,
                         item_id=candidate.item_id,
-                        rank=idx,
-                        reason_selected=reason,
+                        subject_id=subject.id,
+                        action=action,
+                    )
+
+                payload = await self.digest_renderer.render(
+                    subject=subject,
+                    ranked_items=ordered_candidates,
+                    context=DigestRenderContext(
+                        digest_id=digest.id,
+                        run_date=date.today(),
+                        create_button_token=create_button_token,
+                    ),
+                )
+                renderers_used = stats["renderers_used"]
+                renderers_used[payload.renderer_name] = int(renderers_used.get(payload.renderer_name, 0)) + 1
+
+                for rendered_item in payload.rendered_items:
+                    await self.digest_repo.add_digest_item(
+                        digest_id=digest.id,
+                        item_id=rendered_item.item_id,
+                        rank=rendered_item.rank,
+                        reason_selected=rendered_item.reason_selected,
                     )
 
                 for route in routes:
@@ -172,8 +174,8 @@ class JobRunner:
                         message_id = await self.telegram_service.send_digest_message(
                             chat_id=route.chat_id,
                             subject_name=subject.name,
-                            items=lines,
-                            item_actions=item_actions,
+                            items=payload.items,
+                            item_actions=payload.item_actions,
                             thread_id=thread_id_int,
                         )
                         await self.digest_repo.record_delivery(

@@ -41,6 +41,18 @@ class LinkedInCollector:
                 """
                 (maxItems) => {
                   const out = [];
+                  const parseCount = (raw) => {
+                    const text = String(raw || "").replace(/,/g, "").trim();
+                    const match = text.match(/([0-9]+(?:\\.[0-9]+)?)\\s*([kKmM]?)/);
+                    if (!match) return null;
+                    const mult = match[2].toLowerCase() === "m" ? 1000000 : match[2].toLowerCase() === "k" ? 1000 : 1;
+                    return Math.round(Number(match[1]) * mult);
+                  };
+                  const countNear = (text, labelPattern) => {
+                    const re = new RegExp(`([0-9][0-9,.]*\\\\s*[kKmM]?)\\\\s+${labelPattern}`, "i");
+                    const match = text.match(re);
+                    return match ? parseCount(match[1]) : null;
+                  };
                   const containers = Array.from(document.querySelectorAll("div.feed-shared-update-v2, div.occludable-update"));
                   for (const node of containers) {
                     const anchor = Array.from(node.querySelectorAll('a[href*="/feed/update/"], a[href*="/posts/"]'))
@@ -58,13 +70,17 @@ class LinkedInCollector:
                     const text = textNode ? textNode.innerText.trim() : node.innerText.slice(0, 1200);
                     const timeEl = node.querySelector("time");
                     const publishedAt = timeEl ? timeEl.getAttribute("datetime") : null;
+                    const allText = node.innerText || "";
 
                     out.push({
                       external_id: extId,
                       author: author,
                       url: absUrl,
                       text: text,
-                      published_at: publishedAt
+                      published_at: publishedAt,
+                      reaction_count: countNear(allText, "reaction|reactions"),
+                      comment_count: countNear(allText, "comment|comments"),
+                      repost_count: countNear(allText, "repost|reposts")
                     });
                     if (out.length >= maxItems) break;
                   }
@@ -89,7 +105,13 @@ class LinkedInCollector:
                 text=item.get("text"),
                 transcript_text=None,
                 published_at=item.get("published_at"),
-                metadata={"source_id": source_id},
+                metadata={
+                    "source_id": source_id,
+                    "reaction_count": item.get("reaction_count"),
+                    "comment_count": item.get("comment_count"),
+                    "repost_count": item.get("repost_count"),
+                    "like_count": item.get("reaction_count"),
+                },
             )
             for item in raw_items
         ]

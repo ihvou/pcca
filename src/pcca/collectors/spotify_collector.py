@@ -32,6 +32,19 @@ def normalize_spotify_show_source(source_id: str) -> str:
     return raw
 
 
+def parse_duration_seconds(text: str | None) -> int | None:
+    if not text:
+        return None
+    hours_match = re.search(r"(\d+)\s*hr", text, flags=re.IGNORECASE)
+    minutes_match = re.search(r"(\d+)\s*min", text, flags=re.IGNORECASE)
+    seconds = 0
+    if hours_match:
+        seconds += int(hours_match.group(1)) * 3600
+    if minutes_match:
+        seconds += int(minutes_match.group(1)) * 60
+    return seconds or None
+
+
 @dataclass
 class SpotifyCollector:
     session_manager: BrowserSessionManager
@@ -104,7 +117,10 @@ class SpotifyCollector:
                     text=str(row.get("description") or title),
                     transcript_text=None,
                     published_at=None,
-                    metadata={"source_id": source_id},
+                    metadata={
+                        "source_id": source_id,
+                        "duration_seconds": parse_duration_seconds(str(row.get("description") or "")),
+                    },
                 )
             )
         return rows

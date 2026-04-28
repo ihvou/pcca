@@ -51,3 +51,34 @@ def test_curation_engine_respects_include_exclude_terms() -> None:
     )
     # Include and exclude both hit, but preference-aware scoring should alter the decision.
     assert tuned.final_score != baseline.final_score
+
+
+def test_curation_engine_uses_engagement_signals() -> None:
+    engine = CurationEngine()
+    low_signal = CollectedItem(
+        platform="x",
+        external_id="post-1",
+        author="author",
+        url="https://x.com/a/status/1",
+        text="Claude Code workflow feature implementation example",
+        transcript_text=None,
+        published_at=None,
+        metadata={},
+    )
+    high_signal = CollectedItem(
+        platform="x",
+        external_id="post-2",
+        author="author",
+        url="https://x.com/a/status/2",
+        text="Claude Code workflow feature implementation example",
+        transcript_text=None,
+        published_at=None,
+        metadata={"view_count": 250_000, "like_count": 4_200, "comment_count": 180, "repost_count": 650},
+    )
+
+    low = engine.score("Vibe Coding", low_signal)
+    high = engine.score("Vibe Coding", high_signal)
+
+    assert high.final_score > low.final_score
+    assert "engagement_strength=" in high.rationale
+    assert "views=250000" in high.rationale

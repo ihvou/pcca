@@ -17,6 +17,14 @@ class ModelRerankResult:
 
 
 @dataclass
+class ModelPreferenceExtractionResult:
+    title: str
+    include_terms: list[str]
+    exclude_terms: list[str]
+    quality_notes: str | None = None
+
+
+@dataclass
 class ModelRouter:
     enabled: bool
     ollama_base_url: str
@@ -72,6 +80,87 @@ class ModelRouter:
             logger.warning(
                 "Model rerank failed subject=%s model=%s duration_ms=%d error=%s",
                 subject_name,
+                self.ollama_model,
+                int((time.monotonic() - started_at) * 1000),
+                exc,
+                exc_info=True,
+            )
+            return None
+
+    async def extract_subject_preferences(
+        self,
+        *,
+        text: str,
+        previous_title: str | None = None,
+        previous_include_terms: list[str] | None = None,
+        previous_exclude_terms: list[str] | None = None,
+        previous_quality_notes: str | None = None,
+    ) -> ModelPreferenceExtractionResult | None:
+        if not self.enabled:
+            logger.debug("Preference extraction skipped: model disabled.")
+            return None
+        started_at = time.monotonic()
+        prompt = (
+            "You turn a user's free-form curation request into a compact subject draft.\n"
+            "Return JSON only with fields:\n"
+            '{"title": "3-5 word title", "include_terms": ["..."], '
+            '"exclude_terms": ["..."], "quality_notes": "optional short note"}\n'
+            "Rules: keep terms specific, prefer practical usefulness, avoid generic words.\n\n"
+            f"PREVIOUS TITLE: {previous_title or ''}\n"
+            f"PREVIOUS INCLUDE: {previous_include_terms or []}\n"
+            f"PREVIOUS EXCLUDE: {previous_exclude_terms or []}\n"
+            f"PREVIOUS QUALITY NOTES: {previous_quality_notes or ''}\n\n"
+            f"USER MESSAGE:\n{text[:4000]}"
+        )
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.1},
+        }
+        try:
+            logger.debug(
+                "Preference extraction started model=%s text_chars=%d previous_title=%s",
+                self.ollama_model,
+                len(text),
+                previous_title,
+            )
+            async with httpx.AsyncClient(timeout=25.0) as client:
+                response = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
+                response.raise_for_status()
+                data = response.json()
+            raw = data.get("response", "")
+            parsed = json.loads(raw)
+            title = str(parsed.get("title") or previous_title or "New Subject").strip()
+            include_terms = [
+                str(term).strip().lower()
+                for term in parsed.get("include_terms", [])
+                if str(term).strip()
+            ][:12]
+            exclude_terms = [
+                str(term).strip().lower()
+                for term in parsed.get("exclude_terms", [])
+                if str(term).strip()
+            ][:12]
+            quality_notes = str(parsed.get("quality_notes") or "").strip() or None
+            logger.info(
+                "Preference extraction finished model=%s duration_ms=%d title=%s include=%d exclude=%d",
+                self.ollama_model,
+                int((time.monotonic() - started_at) * 1000),
+                title,
+                len(include_terms),
+                len(exclude_terms),
+            )
+            return ModelPreferenceExtractionResult(
+                title=title,
+                include_terms=include_terms,
+                exclude_terms=exclude_terms,
+                quality_notes=quality_notes,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Preference extraction failed model=%s duration_ms=%d error=%s",
                 self.ollama_model,
                 int((time.monotonic() - started_at) * 1000),
                 exc,

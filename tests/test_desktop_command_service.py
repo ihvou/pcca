@@ -115,7 +115,7 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
     )
 
     assert result.ok is True
-    assert result.data["confirmed_sources"] == 1
+    assert result.data["monitored_sources"] == 1
     assert result.data["new_routes"] == 1
 
     db = Database(path=settings.db_path)
@@ -128,6 +128,9 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
         subject_row = await (
             await db.conn.execute("SELECT name FROM subjects WHERE name = 'Vibe Coding'")
         ).fetchone()
+        source_row = await (
+            await db.conn.execute("SELECT is_monitored FROM sources WHERE account_or_channel_id = '@openai'")
+        ).fetchone()
     finally:
         await db.close()
 
@@ -135,6 +138,51 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
     assert state.completed_at is None
     assert [row.status for row in staged] == ["confirmed"]
     assert subject_row is not None
+    assert source_row is not None
+    assert int(source_row["is_monitored"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_desktop_service_monitors_staged_sources_without_subject(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        await OnboardingRepository(conn=db.conn).stage_source(
+            platform="youtube",
+            account_or_channel_id="@openai",
+            display_name="OpenAI",
+            raw_source="@openai",
+        )
+    finally:
+        await db.close()
+
+    result = await service.monitor_staged_sources()
+
+    assert result.ok is True
+    assert result.data["monitored_sources"] == 1
+    state = await service.get_state()
+    assert state["pending_staged_count"] == 0
+    assert state["staged_counts"] == {}
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        source_row = await (
+            await db.conn.execute("SELECT is_monitored FROM sources WHERE account_or_channel_id = '@openai'")
+        ).fetchone()
+    finally:
+        await db.close()
+
+    assert source_row is not None
+    assert int(source_row["is_monitored"]) == 1
 
 
 @pytest.mark.asyncio

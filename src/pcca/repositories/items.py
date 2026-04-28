@@ -116,6 +116,53 @@ class ItemRepository:
             "changed_item_ids": changed_item_ids,
         }
 
+    async def list_unscored_for_subject(self, *, subject_id: int) -> list[tuple[int, CollectedItem]]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT
+                  i.id,
+                  i.platform,
+                  i.external_id,
+                  i.canonical_url,
+                  i.author,
+                  i.published_at,
+                  i.raw_text,
+                  i.transcript_text,
+                  i.metadata_json
+                FROM items i
+                LEFT JOIN item_scores s
+                  ON s.item_id = i.id
+                 AND s.subject_id = ?
+                WHERE s.id IS NULL
+                ORDER BY COALESCE(i.updated_at, i.ingested_at, '') DESC, i.id DESC
+                """,
+                (subject_id,),
+            )
+        ).fetchall()
+        out: list[tuple[int, CollectedItem]] = []
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            out.append(
+                (
+                    int(row["id"]),
+                    CollectedItem(
+                        platform=row["platform"],
+                        external_id=row["external_id"],
+                        author=row["author"],
+                        url=row["canonical_url"],
+                        text=row["raw_text"],
+                        transcript_text=row["transcript_text"],
+                        published_at=row["published_at"],
+                        metadata=metadata if isinstance(metadata, dict) else {},
+                    ),
+                )
+            )
+        return out
+
     def _content_hash(self, item: CollectedItem) -> str:
         return self._content_hash_values(
             url=item.url,

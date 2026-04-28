@@ -18,8 +18,10 @@ from telegram.ext import (
 )
 
 from pcca.models import IntentAction
+from pcca.repositories.subject_drafts import SubjectDraft, SubjectDraftRepository
 from pcca.services.feedback_service import FeedbackService
 from pcca.services.intent_parser import parse_intent
+from pcca.services.preference_extraction_service import ExtractedSubjectDraft, PreferenceExtractionService
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
@@ -44,6 +46,8 @@ class TelegramService:
     source_discovery: SourceDiscoveryService
     routing_service: RoutingService
     voice_transcriber: VoiceTranscriptionService
+    subject_draft_repo: SubjectDraftRepository | None = None
+    preference_extractor: PreferenceExtractionService | None = None
     application: Application | None = None
     read_content_action: ManualAction | None = None
     get_digest_action: ManualAction | None = None
@@ -264,10 +268,20 @@ class TelegramService:
             bool(intent.source_id or intent.source_url),
         )
         thread_id = str(update.message.message_thread_id) if update.message.message_thread_id else None
+        if await self._handle_pending_subject_draft(update, text=text, intent=intent, thread_id=thread_id):
+            return
 
         if intent.action is IntentAction.CREATE_SUBJECT:
             if not intent.subject_name:
-                await update.message.reply_text("Tell me the subject name, for example: Create subject: Vibe Coding")
+                if self.subject_draft_repo is None or self.preference_extractor is None:
+                    await update.message.reply_text("Tell me the subject name, for example: Create subject: Vibe Coding")
+                    return
+            if self.subject_draft_repo is not None and self.preference_extractor is not None:
+                draft = await self.preference_extractor.extract(text)
+                if intent.subject_name:
+                    draft.title = intent.subject_name
+                await self._save_subject_draft(update, draft=draft, last_user_message=text)
+                await update.message.reply_text(self._format_subject_draft(draft))
                 return
             subject = await self.subject_service.create_subject(intent.subject_name, telegram_thread_id=thread_id)
             await self.routing_service.link_subject(
@@ -471,6 +485,96 @@ class TelegramService:
         await update.message.reply_text(
             "I can handle setup/refinement/actions in free form.\n"
             "Try: /setup"
+        )
+
+    async def _handle_pending_subject_draft(
+        self,
+        update: Update,
+        *,
+        text: str,
+        intent,
+        thread_id: str | None,
+    ) -> bool:
+        if (
+            update.message is None
+            or update.effective_chat is None
+            or self.subject_draft_repo is None
+            or self.preference_extractor is None
+        ):
+            return False
+        chat_id = update.effective_chat.id
+        draft = await self.subject_draft_repo.get(chat_id)
+        if draft is None:
+            return False
+
+        lowered = text.strip().lower()
+        if lowered in {"cancel", "cancel subject", "discard subject", "abandon subject"}:
+            await self.subject_draft_repo.delete(chat_id)
+            await update.message.reply_text("Subject draft discarded.")
+            return True
+
+        if lowered in {"save", "save it", "save subject", "confirm", "confirm subject", "yes", "looks good"}:
+            subject = await self.subject_service.create_subject(draft.title, telegram_thread_id=thread_id)
+            if draft.include_terms or draft.exclude_terms:
+                await self.preference_service.refine_subject_rules(
+                    subject_name=subject.name,
+                    include_terms=draft.include_terms,
+                    exclude_terms=draft.exclude_terms,
+                )
+            await self.routing_service.link_subject(
+                subject_name=subject.name,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            await self.subject_draft_repo.delete(chat_id)
+            await update.message.reply_text(
+                f"Subject saved: {subject.name}\n"
+                "Future updates for this subject will use these preferences."
+            )
+            return True
+
+        if text.startswith("/") or intent.action in {
+            IntentAction.HELP,
+            IntentAction.RUN_READ_CONTENT,
+            IntentAction.RUN_GET_DIGEST,
+            IntentAction.RUN_REBUILD_DIGEST,
+        }:
+            return False
+
+        updated = await self.preference_extractor.extract(text, previous=draft)
+        await self._save_subject_draft(update, draft=updated, last_user_message=text)
+        await update.message.reply_text(self._format_subject_draft(updated))
+        return True
+
+    async def _save_subject_draft(
+        self,
+        update: Update,
+        *,
+        draft: ExtractedSubjectDraft,
+        last_user_message: str,
+    ) -> SubjectDraft:
+        if update.effective_chat is None or self.subject_draft_repo is None:
+            raise RuntimeError("Subject draft storage is unavailable.")
+        return await self.subject_draft_repo.upsert(
+            chat_id=update.effective_chat.id,
+            title=draft.title,
+            description_text=draft.description_text,
+            include_terms=draft.include_terms,
+            exclude_terms=draft.exclude_terms,
+            quality_notes=draft.quality_notes,
+            last_user_message=last_user_message,
+        )
+
+    def _format_subject_draft(self, draft: ExtractedSubjectDraft) -> str:
+        include = ", ".join(draft.include_terms) if draft.include_terms else "(none yet)"
+        exclude = ", ".join(draft.exclude_terms) if draft.exclude_terms else "(none yet)"
+        quality = f"\nGood looks like: {draft.quality_notes}" if draft.quality_notes else ""
+        return (
+            f"I'll call this: {draft.title}\n"
+            f"Include: {include}\n"
+            f"Avoid: {exclude}"
+            f"{quality}\n\n"
+            "Reply `save subject` to create it, send corrections, or `cancel subject`."
         )
 
     async def _on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

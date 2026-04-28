@@ -9,6 +9,7 @@ CREATE_PATTERNS = (
     r"\bcreate\b.*\b(subject|topic)\b",
     r"\bnew\b.*\b(subject|topic)\b",
     r"\bi want\b.*\b(subject|topic)\b",
+    r"^\s*i want\b",
     r"\btrack\b.*\bin\b.*\bseparate\b",
 )
 

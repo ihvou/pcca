@@ -207,6 +207,10 @@ class DesktopCommandService:
             )
             subjects = await SubjectService(repository=subject_repo).list_subjects()
             reauth_sources = await source_service.list_sources_needing_reauth()
+            pending_staged = [row for row in staged if row.status == "pending"]
+            staged_counts: dict[str, int] = {}
+            for row in pending_staged:
+                staged_counts[row.platform] = staged_counts.get(row.platform, 0) + 1
             return {
                 "settings": {
                     "timezone": settings.timezone,
@@ -233,6 +237,8 @@ class DesktopCommandService:
                     "completed_at": state.completed_at,
                 },
                 "staged_sources": [asdict(row) for row in staged],
+                "staged_counts": staged_counts,
+                "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
                 "subjects": [asdict(subject) for subject in subjects],
                 "platforms": SUPPORTED_ONBOARDING_PLATFORMS,
@@ -412,6 +418,40 @@ class DesktopCommandService:
             return CommandResult(True, f"Removed staged source id={source_id}.")
         return CommandResult(False, f"No pending staged source found for id={source_id}.")
 
+    async def monitor_staged_sources(self) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            subject_repo = SubjectRepository(conn=db.conn)
+            source_service = SourceService(
+                source_repo=SourceRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            onboarding_repo = OnboardingRepository(conn=db.conn)
+            staged = await onboarding_repo.list_sources(status="pending")
+            for row in staged:
+                await source_service.monitor_source(
+                    platform=row.platform,
+                    account_or_channel_id=row.account_or_channel_id,
+                    display_name=row.display_name,
+                )
+            if staged:
+                await onboarding_repo.mark_confirmed([row.id for row in staged])
+                await onboarding_repo.update_state(current_step="sources_reviewed")
+        finally:
+            await db.close()
+        self.log(f"Now monitoring {len(staged)} staged source(s).")
+        return CommandResult(
+            True,
+            f"Now monitoring {len(staged)} source(s). Run Read Content to collect; results will be checked for all subjects.",
+            {"monitored_sources": len(staged)},
+        )
+
     async def confirm_staged_sources(
         self,
         *,
@@ -443,8 +483,7 @@ class DesktopCommandService:
             onboarding_repo = OnboardingRepository(conn=db.conn)
             staged = await onboarding_repo.list_sources(status="pending")
             for row in staged:
-                await source_service.add_source_to_subject(
-                    subject_name=created.name,
+                await source_service.monitor_source(
                     platform=row.platform,
                     account_or_channel_id=row.account_or_channel_id,
                     display_name=row.display_name,
@@ -474,11 +513,11 @@ class DesktopCommandService:
             )
         finally:
             await db.close()
-        self.log(f"Created subject '{subject_name}' and confirmed {len(staged)} staged source(s).")
+        self.log(f"Created subject '{subject_name}' and monitored {len(staged)} staged source(s).")
         return CommandResult(
             True,
-            f"Created subject '{subject_name}' and confirmed {len(staged)} staged source(s).",
-            {"subject": subject_name, "confirmed_sources": len(staged), "new_routes": new_routes},
+            f"Created subject '{subject_name}' and monitored {len(staged)} staged source(s).",
+            {"subject": subject_name, "monitored_sources": len(staged), "new_routes": new_routes},
         )
 
     async def run_smoke_crawl_and_digest(self) -> CommandResult:

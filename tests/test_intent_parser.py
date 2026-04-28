@@ -8,6 +8,12 @@ def test_parse_create_subject_with_colon() -> None:
     assert parsed.subject_name == "Agentic PM"
 
 
+def test_parse_new_subject_from_free_form_i_want() -> None:
+    parsed = parse_intent("I want practical AI-in-HR case studies, no hype")
+    assert parsed.action is IntentAction.CREATE_SUBJECT
+    assert parsed.subject_name is None
+
+
 def test_parse_list_subjects() -> None:
     parsed = parse_intent("List subjects")
     assert parsed.action is IntentAction.LIST_SUBJECTS

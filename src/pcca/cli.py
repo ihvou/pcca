@@ -368,8 +368,7 @@ async def _confirm_staged_sources(
         onboarding_repo = OnboardingRepository(conn=db.conn)
         staged = await onboarding_repo.list_sources(status="pending")
         for row in staged:
-            await source_service.add_source_to_subject(
-                subject_name=created.name,
+            await source_service.monitor_source(
                 platform=row.platform,
                 account_or_channel_id=row.account_or_channel_id,
                 display_name=row.display_name,
@@ -399,7 +398,7 @@ async def _confirm_staged_sources(
             high_quality_examples=high_quality_examples,
             completed=True,
         )
-        print(f"Created subject '{created.name}' and confirmed {len(staged)} staged source(s).")
+        print(f"Created subject '{created.name}' and monitored {len(staged)} staged source(s).")
         if new_routes:
             print(f"Linked subject to {new_routes} registered Telegram chat(s) for digest delivery.")
         else:
@@ -495,19 +494,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     stage_follows_parser.add_argument("--limit", required=False, type=int, default=200, help="Maximum follows to stage")
 
-    sub.add_parser("list-staged-sources", help="List pending onboarding sources before subject confirmation")
+    sub.add_parser("list-staged-sources", help="List pending onboarding sources before monitoring confirmation")
 
     remove_staged_parser = sub.add_parser("remove-staged-source", help="Remove one source from onboarding review")
     remove_staged_parser.add_argument("--id", required=True, type=int, help="Staged source id")
 
     confirm_staged_parser = sub.add_parser(
         "confirm-staged-sources",
-        help="Create first subject and attach pending onboarding sources",
+        help="Create first subject and monitor any pending onboarding sources",
     )
     confirm_staged_parser.add_argument("--subject", required=True, help="Subject name")
     confirm_staged_parser.add_argument("--include", action="append", default=[], help="Include term (repeatable)")
     confirm_staged_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
     confirm_staged_parser.add_argument("--high-quality", required=False, help="High quality examples/notes")
+
+    sub.add_parser(
+        "monitor-staged-sources",
+        help="Confirm pending onboarding sources into the global monitored source list",
+    )
 
     login_parser = sub.add_parser(
         "login",
@@ -665,6 +669,11 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "remove-staged-source":
         result = asyncio.run(DesktopCommandService().remove_staged_source(source_id=args.id))
+        print(result.message)
+        return
+
+    if args.command == "monitor-staged-sources":
+        result = asyncio.run(DesktopCommandService().monitor_staged_sources())
         print(result.message)
         return
 

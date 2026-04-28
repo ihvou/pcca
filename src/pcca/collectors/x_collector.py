@@ -39,6 +39,17 @@ class XCollector:
                 """
                 (maxItems) => {
                   const out = [];
+                  const parseCount = (raw) => {
+                    const text = String(raw || "").replace(/,/g, "").trim();
+                    const match = text.match(/([0-9]+(?:\\.[0-9]+)?)\\s*([kKmM]?)/);
+                    if (!match) return null;
+                    const mult = match[2].toLowerCase() === "m" ? 1000000 : match[2].toLowerCase() === "k" ? 1000 : 1;
+                    return Math.round(Number(match[1]) * mult);
+                  };
+                  const metric = (article, testId) => {
+                    const node = article.querySelector(`[data-testid="${testId}"]`);
+                    return parseCount(node?.getAttribute("aria-label") || node?.textContent || "");
+                  };
                   const articles = Array.from(document.querySelectorAll("article"));
                   for (const article of articles) {
                     const statusAnchor = Array.from(article.querySelectorAll('a[href*="/status/"]'))
@@ -63,7 +74,11 @@ class XCollector:
                       author: author,
                       url: absUrl,
                       text: text,
-                      published_at: publishedAt
+                      published_at: publishedAt,
+                      reply_count: metric(article, "reply"),
+                      repost_count: metric(article, "retweet"),
+                      like_count: metric(article, "like"),
+                      view_count: metric(article, "analytics")
                     });
                     if (out.length >= maxItems) break;
                   }
@@ -88,7 +103,13 @@ class XCollector:
                 text=item.get("text"),
                 transcript_text=None,
                 published_at=item.get("published_at"),
-                metadata={"source_id": source_id},
+                metadata={
+                    "source_id": source_id,
+                    "reply_count": item.get("reply_count"),
+                    "repost_count": item.get("repost_count"),
+                    "like_count": item.get("like_count"),
+                    "view_count": item.get("view_count"),
+                },
             )
             for item in raw_items
         ]

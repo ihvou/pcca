@@ -84,7 +84,7 @@ INDEX_HTML = r"""
     <header>
       <div>
         <h1>Personal signal,<br/>not platform noise.</h1>
-        <p>Scenario 1 setup runs locally: connect Telegram, capture sessions from your browser, stage follows, create your first subject, then send a real test digest.</p>
+        <p>First-run dogfood flow: connect Telegram, capture sessions from your browser, choose sources to monitor, create your first subject, then send a real test digest.</p>
       </div>
       <div class="badge" id="agentBadge">agent: checking</div>
     </header>
@@ -126,8 +126,12 @@ INDEX_HTML = r"""
         </section>
         <section data-step="sources_reviewed">
           <h2>4. Review Staged Sources</h2>
-          <p>Remove noisy accounts before attaching the remaining staged sources to your first subject.</p>
-          <div class="actions"><button onclick="loadState()">Refresh Sources</button></div>
+          <p>Sources are monitored globally. Subjects are separate interests that look through the same collected content. Remove noisy accounts, then confirm the remaining sources for monitoring.</p>
+          <div class="actions">
+            <button onclick="monitorSources()">Monitor These Sources</button>
+            <button class="secondary" onclick="loadState()">Refresh Sources</button>
+          </div>
+          <div class="status-line" id="sourceSummary">No pending staged sources yet.</div>
           <div class="sources" id="sources"></div>
         </section>
         <section data-step="subject_confirmed">
@@ -139,7 +143,7 @@ INDEX_HTML = r"""
             <label>Exclude terms <textarea id="exclude" placeholder="biography, generic motivation, listicles"></textarea></label>
           </div>
           <label style="margin-top:12px">High-quality examples <textarea id="examples" placeholder="Examples of posts/videos that would be worth waking up for"></textarea></label>
-          <div class="actions"><button onclick="confirmSubject()">Create Subject + Confirm Sources</button></div>
+          <div class="actions"><button onclick="confirmSubject()">Create Subject</button></div>
         </section>
         <section data-step="completed">
           <h2>6. Smoke Crawl + Test Digest</h2>
@@ -189,6 +193,7 @@ async function loginPlatform() { return postAction('/api/login', {platform: plat
 async function stageFollows() { return postAction('/api/stage-follows', {platform: platform.value, limit: Number(limit.value || 100)}); }
 async function rebuildDigest() { return postAction('/api/digest/rebuild'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
+async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
 async function confirmSubject() {
   return postAction('/api/confirm-staged-sources', {
     subject: subject.value,
@@ -205,9 +210,13 @@ async function smoke() {
     smokeStatus.className = `status-line ${smoke.ok ? 'ok' : 'bad'}`;
   }
 }
-function renderSources(rows) {
+function renderSources(rows, counts={}) {
   const pending = rows.filter(r => r.status === 'pending');
   sources.innerHTML = pending.length ? '' : '<p>No pending staged sources yet.</p>';
+  const countRows = Object.entries(counts).sort().map(([platform, count]) => `${platform}: ${count}`);
+  sourceSummary.textContent = pending.length
+    ? `${pending.length} source(s) waiting to monitor.\n${countRows.join('\n')}`
+    : 'No pending staged sources yet.';
   for (const row of pending) {
     const div = document.createElement('div');
     div.className = 'source';
@@ -247,7 +256,7 @@ async function loadState() {
     timezone.value = s.timezone || 'UTC';
     digestTime.value = s.digest_time || '08:30';
     if (platform.options.length === 0) data.platforms.forEach(p => platform.add(new Option(p, p)));
-    renderSources(data.staged_sources || []);
+    renderSources(data.staged_sources || [], data.staged_counts || {});
     renderReauth(data.reauth_sources || []);
     renderSteps(data.onboarding.current_step || 'start');
     agentBadge.textContent = `agent: ${data.agent_running ? 'running' : 'stopped'}`;
@@ -417,6 +426,10 @@ class DesktopWebServer:
                 request,
             )
 
+        async def monitor_staged_sources(request):
+            assert self.service is not None
+            return await run_result(lambda _p: self.service.monitor_staged_sources(), request)
+
         async def confirm_staged_sources(request):
             assert self.service is not None
             return await run_result(
@@ -462,6 +475,7 @@ class DesktopWebServer:
             Route("/api/stage-follows", stage_follows, methods=["POST"]),
             Route("/api/staged-sources", staged_sources, methods=["GET"]),
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),
+            Route("/api/staged-sources/monitor", monitor_staged_sources, methods=["POST"]),
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),

@@ -14,6 +14,7 @@ class SourceRow:
     display_name: str
     follow_state: str
     last_crawled_at: str | None
+    is_monitored: bool = True
 
 
 @dataclass
@@ -25,17 +26,43 @@ class SubjectSourceRow:
     priority: int
     status: str
     last_crawled_at: str | None
+    follow_state: str = "active"
+    is_monitored: bool = True
 
 
 @dataclass
 class SourceRepository:
     conn: aiosqlite.Connection
 
+    def _source_row(self, row) -> SourceRow:
+        return SourceRow(
+            id=row["id"],
+            platform=row["platform"],
+            account_or_channel_id=row["account_or_channel_id"],
+            display_name=row["display_name"],
+            follow_state=row["follow_state"],
+            last_crawled_at=row["last_crawled_at"],
+            is_monitored=bool(row["is_monitored"]),
+        )
+
+    def _subject_source_row(self, row) -> SubjectSourceRow:
+        return SubjectSourceRow(
+            source_id=row["source_id"],
+            platform=row["platform"],
+            account_or_channel_id=row["account_or_channel_id"],
+            display_name=row["display_name"],
+            priority=int(row["priority"] or 0),
+            status=row["status"],
+            last_crawled_at=row["last_crawled_at"],
+            follow_state=row["follow_state"],
+            is_monitored=bool(row["is_monitored"]),
+        )
+
     async def get_by_identity(self, *, platform: str, account_or_channel_id: str) -> SourceRow | None:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
                 FROM sources
                 WHERE platform = ? AND account_or_channel_id = ?
                 """,
@@ -44,20 +71,20 @@ class SourceRepository:
         ).fetchone()
         if row is None:
             return None
-        return SourceRow(
-            id=row["id"],
-            platform=row["platform"],
-            account_or_channel_id=row["account_or_channel_id"],
-            display_name=row["display_name"],
-            follow_state=row["follow_state"],
-            last_crawled_at=row["last_crawled_at"],
-        )
+        return self._source_row(row)
 
-    async def create_or_get(self, platform: str, account_or_channel_id: str, display_name: str) -> SourceRow:
+    async def create_or_get(
+        self,
+        platform: str,
+        account_or_channel_id: str,
+        display_name: str,
+        *,
+        is_monitored: bool = True,
+    ) -> SourceRow:
         existing = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
                 FROM sources
                 WHERE platform = ? AND account_or_channel_id = ?
                 """,
@@ -65,42 +92,59 @@ class SourceRepository:
             )
         ).fetchone()
         if existing:
-            return SourceRow(
-                id=existing["id"],
-                platform=existing["platform"],
-                account_or_channel_id=existing["account_or_channel_id"],
-                display_name=existing["display_name"],
-                follow_state=existing["follow_state"],
-                last_crawled_at=existing["last_crawled_at"],
+            await self.conn.execute(
+                """
+                UPDATE sources
+                SET display_name = COALESCE(NULLIF(?, ''), display_name),
+                    is_monitored = CASE WHEN ? THEN 1 ELSE is_monitored END
+                WHERE id = ?
+                """,
+                (display_name, int(is_monitored), existing["id"]),
             )
+            await self.conn.commit()
+            refreshed = await (
+                await self.conn.execute(
+                    """
+                    SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                    FROM sources
+                    WHERE id = ?
+                    """,
+                    (existing["id"],),
+                )
+            ).fetchone()
+            return self._source_row(refreshed)
 
         cursor = await self.conn.execute(
             """
-            INSERT INTO sources(platform, account_or_channel_id, display_name, follow_state)
-            VALUES (?, ?, ?, 'active')
+            INSERT INTO sources(platform, account_or_channel_id, display_name, follow_state, is_monitored)
+            VALUES (?, ?, ?, 'active', ?)
             """,
-            (platform, account_or_channel_id, display_name),
+            (platform, account_or_channel_id, display_name, int(is_monitored)),
         )
         await self.conn.commit()
         source_id = cursor.lastrowid
         created = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
                 FROM sources
                 WHERE id = ?
                 """,
                 (source_id,),
             )
         ).fetchone()
-        return SourceRow(
-            id=created["id"],
-            platform=created["platform"],
-            account_or_channel_id=created["account_or_channel_id"],
-            display_name=created["display_name"],
-            follow_state=created["follow_state"],
-            last_crawled_at=created["last_crawled_at"],
+        return self._source_row(created)
+
+    async def mark_monitored(self, source_id: int, monitored: bool = True) -> None:
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET is_monitored = ?
+            WHERE id = ?
+            """,
+            (int(monitored), source_id),
         )
+        await self.conn.commit()
 
     async def link_to_subject(self, subject_id: int, source_id: int, priority: int = 0) -> None:
         await self.conn.execute(
@@ -164,7 +208,7 @@ class SourceRepository:
         rows = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
                 FROM sources
                 WHERE follow_state = 'needs_reauth'
                 ORDER BY platform, display_name
@@ -172,16 +216,33 @@ class SourceRepository:
             )
         ).fetchall()
         return [
-            SourceRow(
-                id=row["id"],
-                platform=row["platform"],
-                account_or_channel_id=row["account_or_channel_id"],
-                display_name=row["display_name"],
-                follow_state=row["follow_state"],
-                last_crawled_at=row["last_crawled_at"],
-            )
+            self._source_row(row)
             for row in rows
         ]
+
+    async def list_monitored(self, *, active_only: bool = True) -> list[SubjectSourceRow]:
+        state_filter = "AND s.follow_state = 'active'" if active_only else ""
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT
+                  s.id AS source_id,
+                  s.platform,
+                  s.account_or_channel_id,
+                  s.display_name,
+                  0 AS priority,
+                  'active' AS status,
+                  s.last_crawled_at,
+                  s.follow_state,
+                  s.is_monitored
+                FROM sources s
+                WHERE s.is_monitored = 1
+                  {state_filter}
+                ORDER BY s.platform ASC, s.display_name ASC
+                """
+            )
+        ).fetchall()
+        return [self._subject_source_row(row) for row in rows]
 
     async def list_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
         rows = await (
@@ -192,28 +253,35 @@ class SourceRepository:
                   s.platform,
                   s.account_or_channel_id,
                   s.display_name,
-                  ss.priority,
-                  ss.status,
-                  s.last_crawled_at
-                FROM subject_sources ss
-                JOIN sources s ON s.id = ss.source_id
-                WHERE ss.subject_id = ?
-                  AND ss.status = 'active'
+                  COALESCE(ss.priority, 0) AS priority,
+                  COALESCE(ss.status, 'active') AS status,
+                  s.last_crawled_at,
+                  s.follow_state,
+                  s.is_monitored
+                FROM sources s
+                LEFT JOIN subject_sources ss
+                  ON ss.source_id = s.id
+                 AND ss.subject_id = ?
+                WHERE s.is_monitored = 1
                   AND s.follow_state = 'active'
-                ORDER BY ss.priority DESC, s.display_name ASC
+                  AND COALESCE(ss.status, 'active') = 'active'
+                ORDER BY COALESCE(ss.priority, 0) DESC, s.display_name ASC
                 """,
                 (subject_id,),
             )
         ).fetchall()
-        return [
-            SubjectSourceRow(
-                source_id=row["source_id"],
-                platform=row["platform"],
-                account_or_channel_id=row["account_or_channel_id"],
-                display_name=row["display_name"],
-                priority=row["priority"],
-                status=row["status"],
-                last_crawled_at=row["last_crawled_at"],
+        return [self._subject_source_row(row) for row in rows]
+
+    async def list_inactive_source_ids_for_subject(self, subject_id: int) -> set[int]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT source_id
+                FROM subject_sources
+                WHERE subject_id = ?
+                  AND status <> 'active'
+                """,
+                (subject_id,),
             )
-            for row in rows
-        ]
+        ).fetchall()
+        return {int(row["source_id"]) for row in rows}

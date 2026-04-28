@@ -24,11 +24,13 @@ from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.repositories.sources import SourceRepository
+from pcca.repositories.subject_drafts import SubjectDraftRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.feedback_service import FeedbackService
 from pcca.scheduler import AgentScheduler, JobRunner
 from pcca.services.follow_import_service import FollowImportService
 from pcca.services.model_router import ModelRouter
+from pcca.services.preference_extraction_service import PreferenceExtractionService
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.session_capture_service import SessionRefreshService
@@ -81,6 +83,12 @@ class PCCAApp:
         feedback_repo = FeedbackRepository(conn=self.db.conn)
         digest_repo = DigestRepository(conn=self.db.conn)
         run_log_repo = RunLogRepository(conn=self.db.conn)
+        subject_draft_repo = SubjectDraftRepository(conn=self.db.conn)
+        model_router = ModelRouter(
+            enabled=self.settings.ollama_enabled,
+            ollama_base_url=self.settings.ollama_base_url,
+            ollama_model=self.settings.ollama_model,
+        )
         self.subject_service = SubjectService(repository=subject_repo)
         self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
         self.preference_service = PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo)
@@ -114,11 +122,7 @@ class PCCAApp:
             item_score_repo=ItemScoreRepository(conn=self.db.conn),
             run_log_repo=run_log_repo,
             preference_service=self.preference_service,
-            model_router=ModelRouter(
-                enabled=self.settings.ollama_enabled,
-                ollama_base_url=self.settings.ollama_base_url,
-                ollama_model=self.settings.ollama_model,
-            ),
+            model_router=model_router,
             session_refresh_service=self.session_refresh_service,
             collectors={
                 "x": XCollector(session_manager=self.browser_session_manager),
@@ -142,6 +146,8 @@ class PCCAApp:
                 feedback_service=self.feedback_service,
                 source_discovery=SourceDiscoveryService(),
                 routing_service=self.routing_service,
+                subject_draft_repo=subject_draft_repo,
+                preference_extractor=PreferenceExtractionService(model_router=model_router),
                 voice_transcriber=VoiceTranscriptionService(),
             )
             await self.telegram_service.start()

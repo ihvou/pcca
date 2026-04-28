@@ -137,7 +137,7 @@ Currently inline in each collector. Deterministic DOM extractors first; structur
 Routes scoring tasks. Default local (Ollama). Optional premium lane for shortlisted items. Enforces cost/time caps and fallback behavior (task T-16).
 
 ### 4.8 Curation Engine (`pipeline/curation.py`)
-Pass-1 keyword-based screening. Pass-2 deep analysis. Ranking and rationale emission. Pass-2 currently runs inline on every item; must be shortlisted (task T-3).
+Pass-1 keyword-based screening. Top-K shortlisting per subject. Pass-2 deep analysis / optional model reranking only runs on shortlisted items. Ranking and rationale emission.
 
 ### 4.9 Subject Service (`services/subject_service.py`)
 Subject creation, lifecycle, routing, isolation.
@@ -145,8 +145,8 @@ Subject creation, lifecycle, routing, isolation.
 ### 4.10 Preference Engine (`services/preference_service.py`)
 Subject-specific profile state. Versioned rule updates. Rollback capable.
 
-### 4.10.1 Preference Extraction Service (planned, task T-46)
-The conversational subject-creation flow described in [scenarios.md §Scenario 2](./scenarios.md#scenario-2-user-starts-a-new-subject-and-sets-preferences) requires turning a free-form user message ("I want practical AI-in-HR case studies, no hype") into PCCA's internal preference shape (title + `include_rules_json` + `exclude_rules_json` + optional `quality_rules_json`). A `PreferenceExtractionService` wraps `ModelRouter` to do this extraction in one LLM call, then renders the extracted shape back to the user for confirmation. The conversational state machine (draft → propose → confirm | correct → save) is held in `pending_subject_drafts` keyed by chat_id with a 1-hour TTL, and the same state-machine primitive is reused for in-flight refinement (Scenario 5). Graceful fallback when Ollama is disabled: today's structured `Refine X: include …; exclude …` syntax keeps working as the developer escape hatch.
+### 4.10.1 Preference Extraction Service (`services/preference_extraction_service.py`)
+The conversational subject-creation flow described in [scenarios.md §Scenario 2](./scenarios.md#scenario-2-user-starts-a-new-subject-and-sets-preferences) turns a free-form user message ("I want practical AI-in-HR case studies, no hype") into PCCA's internal preference shape (title + include terms + exclude terms + optional quality notes). `PreferenceExtractionService` uses `ModelRouter` when Ollama is enabled and falls back to a local heuristic extractor when it is not. The conversational state machine (draft → propose → confirm | correct → save/cancel) is held in `pending_subject_drafts` keyed by chat_id with a 1-hour TTL, and Telegram routes new-subject-shaped free-form text into that flow.
 
 ### 4.11 Telegram Service (`services/telegram_service.py`)
 Digest delivery, button callbacks, conversational control, and on-demand read/digest/rebuild actions. Free-form intent dispatch via `intent_parser.py`. Voice via `voice_transcription_service.py` (placeholder, task T-23).
@@ -171,8 +171,8 @@ Canonical source normalization for imported follows/subscriptions and platform-s
 ### 4.15 Voice Transcription Service (`services/voice_transcription_service.py`)
 Converts Telegram voice notes to text for intent parsing. v1 placeholder (always returns `None`). Local-first path planned (task T-23).
 
-### 4.16 Digest Renderer (planned, task T-48)
-Per [scenarios.md §3.2.7](./scenarios.md#scenario-32-system-finds-subject-relevant-updates-and-builds-output), the user-facing output format will evolve and may become selectable from templates or fully custom per subject. Today the format is hardcoded into `JobRunner.run_morning_digest`, which limits how the format can change. Task T-48 extracts a `DigestRenderer` interface that takes (`subject`, ranked `CandidateItem` list, optional `context`) and returns the full delivery payload (text + inline keyboard markup for Telegram, future formats can return rich-media payloads or other shapes). Today's Telegram-text format becomes the default `TelegramDigestRenderer`. Other renderers and per-subject template configuration plug in without changing the scheduler or pipeline.
+### 4.16 Digest Renderer (`digest_renderer.py`)
+Per [scenarios.md §3.2.7](./scenarios.md#scenario-32-system-finds-subject-relevant-updates-and-builds-output), the user-facing output format will evolve and may become selectable from templates or fully custom per subject. `DigestRenderer` takes (`subject`, ranked `CandidateItem` list, `DigestRenderContext`) and returns a `DeliveryPayload` carrying text lines, inline feedback actions, and digest-item persistence hints. Today's Telegram-text format is the default `TelegramDigestRenderer`; alternate renderers can be injected into `JobRunner` without changing collection, scoring, routing, or Telegram sending.
 
 ---
 
@@ -260,10 +260,10 @@ Today: keyword list in `curation.py`. Target: keep for pre-filter only (task T-1
 ### 6.2 Pass-2 — Deep Curation
 Inputs: full text / transcript segments for **shortlisted** items.
 Outputs: actionable insights extracted, practical-value score, trust assessment, subject-specific explanation.
-Today: same keyword pass as Pass-1 plus optional Ollama delta. Target: Ollama (or premium) as primary scorer on top-K only (tasks T-3, T-16).
+Today: same keyword pass as Pass-1 plus optional Ollama delta on top-K only. Target: Ollama (or premium) as primary scorer on top-K only (task T-16).
 
-### 6.2.1 Engagement Signals as Curation Inputs (planned, task T-47)
-Per [scenarios.md §3.1.4](./scenarios.md#scenario-31-system-collects-fresh-content-from-sources), the system collects rich context — descriptions, authors, timestamps, views, likes, shares, comments, reposts. Today only basic fields are captured. T-47 adds per-platform engagement-signal capture into `items.metadata_json` so "trending / breaking / debatable / reputable" can become real ranking inputs to Pass-1 / Pass-2 instead of being invisible.
+### 6.2.1 Engagement Signals as Curation Inputs (partial, task T-47)
+Per [scenarios.md §3.1.4](./scenarios.md#scenario-31-system-collects-fresh-content-from-sources), the system collects rich context — descriptions, authors, timestamps, views, likes, shares, comments, reposts. `engagement.py` normalizes available counts from `items.metadata_json`, and `curation.py` now uses those signals in trust/novelty scoring rationale. Current collectors capture a first best-effort slice (Reddit score/comments, X like/repost/reply/view counts, LinkedIn reaction/comment/repost counts, YouTube view/duration from rendered metadata, Spotify episode duration). T-47 remains open for live fixture hardening, velocity/baseline calculations, and richer YouTube `ytInitialData` extraction.
 
 ### 6.3 Segment-Level Filtering
 For long-form content (transcripts, long articles):

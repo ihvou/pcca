@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass
 
 from pcca.collectors.base import CollectedItem
+from pcca.engagement import EngagementSignals
 
 
 @dataclass
@@ -96,6 +97,13 @@ class CurationEngine:
                 trust = 0.75
         if item.platform in {"x", "linkedin"} and item.author:
             trust += 0.1
+        engagement = EngagementSignals.from_metadata(item.metadata)
+        engagement_strength = engagement.strength()
+        trust += min(0.15, engagement_strength * 0.10)
+        novelty += min(0.10, engagement_strength * 0.07)
+        if engagement.comments and engagement.comments >= 25:
+            novelty += 0.05
+        novelty = min(1.0, novelty)
         trust = min(1.0, trust)
 
         noise_hits = sum(1 for term in self.noise_terms if term in text)
@@ -124,7 +132,8 @@ class CurationEngine:
         rationale = (
             f"relevance={relevance:.2f}, practicality={practicality:.2f}, "
             f"novelty={novelty:.2f}, trust={trust:.2f}, noise={noise_penalty:.2f}, "
-            f"include_hits={include_hits}, exclude_hits={exclude_hits}"
+            f"include_hits={include_hits}, exclude_hits={exclude_hits}, "
+            f"engagement_strength={engagement_strength:.2f}, engagement={engagement.rationale_fragment()}"
         )
         return ScoredItem(
             pass1_score=pass1_score,

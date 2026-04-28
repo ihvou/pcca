@@ -276,6 +276,39 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON onboarding_imported_sources(status, platform);
         """,
     ),
+    (
+        5,
+        """
+        ALTER TABLE sources ADD COLUMN is_monitored INTEGER NOT NULL DEFAULT 1;
+
+        UPDATE sources
+        SET is_monitored = 1
+        WHERE id IN (
+          SELECT source_id
+          FROM subject_sources
+          WHERE status = 'active'
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_sources_monitored_state
+          ON sources(is_monitored, follow_state, platform);
+        """,
+    ),
+    (
+        6,
+        """
+        CREATE TABLE IF NOT EXISTS pending_subject_drafts (
+          chat_id INTEGER PRIMARY KEY,
+          title TEXT NOT NULL,
+          description_text TEXT NOT NULL,
+          extracted_rules_json TEXT NOT NULL,
+          last_user_message TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pending_subject_drafts_updated_at
+          ON pending_subject_drafts(updated_at);
+        """,
+    ),
 ]
 
 

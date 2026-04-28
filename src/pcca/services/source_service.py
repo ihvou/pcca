@@ -27,8 +27,29 @@ class SourceService:
             platform=platform.strip().lower(),
             account_or_channel_id=account_or_channel_id.strip(),
             display_name=(display_name or account_or_channel_id).strip(),
+            is_monitored=True,
         )
         await self.source_repo.link_to_subject(subject_id=subject.id, source_id=source.id, priority=priority)
+
+    async def monitor_source(
+        self,
+        *,
+        platform: str,
+        account_or_channel_id: str,
+        display_name: str | None = None,
+    ) -> None:
+        await self.source_repo.create_or_get(
+            platform=platform.strip().lower(),
+            account_or_channel_id=account_or_channel_id.strip(),
+            display_name=(display_name or account_or_channel_id).strip(),
+            is_monitored=True,
+        )
+
+    async def list_monitored_sources(self) -> list[SubjectSourceRow]:
+        return await self.source_repo.list_monitored(active_only=True)
+
+    async def list_inactive_source_ids_for_subject(self, subject_id: int) -> set[int]:
+        return await self.source_repo.list_inactive_source_ids_for_subject(subject_id)
 
     async def list_sources_for_subject(self, subject_name: str) -> list[SubjectSourceRow]:
         subject = await self.subject_repo.get_by_name(subject_name)

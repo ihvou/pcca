@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 from pcca.browser.session_manager import BrowserSessionManager
@@ -10,6 +11,34 @@ from pcca.collectors.youtube_utils import build_channel_videos_url, extract_vide
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 
 logger = logging.getLogger(__name__)
+
+
+def parse_count_text(value: str | None) -> int | None:
+    if not value:
+        return None
+    match = re.search(r"([0-9][0-9,.]*)([kKmM]?)", value)
+    if not match:
+        return None
+    number = float(match.group(1).replace(",", ""))
+    suffix = match.group(2).lower()
+    multiplier = 1_000_000 if suffix == "m" else 1_000 if suffix == "k" else 1
+    return int(number * multiplier)
+
+
+def parse_youtube_meta(meta_text: str | None) -> dict:
+    text = meta_text or ""
+    views_match = re.search(r"([0-9][0-9,.]*[kKmM]?)\s+views?", text)
+    duration_match = re.search(r"\b(?:(\d+):)?(\d{1,2}):(\d{2})\b", text)
+    duration_seconds = None
+    if duration_match:
+        hours = int(duration_match.group(1) or 0)
+        minutes = int(duration_match.group(2))
+        seconds = int(duration_match.group(3))
+        duration_seconds = hours * 3600 + minutes * 60 + seconds
+    return {
+        "view_count": parse_count_text(views_match.group(1)) if views_match else None,
+        "duration_seconds": duration_seconds,
+    }
 
 
 def is_youtube_login_url(url: str) -> bool:
@@ -86,6 +115,12 @@ class YouTubeCollector:
             if transcript_text:
                 snippet = transcript_text[:1200]
                 text = f"{text}\n\n{snippet}".strip()
+            metadata = {
+                "source_id": source_id,
+                "title": row.get("title"),
+                "meta_text": row.get("meta_text"),
+                **parse_youtube_meta(row.get("meta_text")),
+            }
             results.append(
                 CollectedItem(
                     platform=self.platform,
@@ -95,7 +130,7 @@ class YouTubeCollector:
                     text=text,
                     transcript_text=transcript_text,
                     published_at=None,
-                    metadata={"source_id": source_id, "title": row.get("title"), "meta_text": row.get("meta_text")},
+                    metadata=metadata,
                 )
             )
         return results
