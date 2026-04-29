@@ -162,6 +162,11 @@ INDEX_HTML = r"""
           <div class="status-line" id="stateBox">Loading...</div>
         </section>
         <section>
+          <h2>Telegram Routes</h2>
+          <p>One row means one subject delivers Briefs into one Telegram chat.</p>
+          <div class="sources" id="routesBox"></div>
+        </section>
+        <section>
           <h2>Logs</h2>
           <div class="logs status-line" id="logs"></div>
         </section>
@@ -195,6 +200,8 @@ async function stageFollows() { return postAction('/api/stage-follows', {platfor
 async function getBriefs() { return postAction('/api/briefs'); }
 async function rebuildDigest() { return postAction('/api/digest/rebuild'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
+async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
+async function moveRoute(subjectId, fromChatId, fromThreadId, toChatId) { return postAction('/api/routes/move', {subject_id: subjectId, from_chat_id: fromChatId, from_thread_id: fromThreadId || '', to_chat_id: Number(toChatId)}); }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
 async function confirmSubject() {
   return postAction('/api/confirm-staged-sources', {
@@ -242,6 +249,36 @@ function renderReauth(rows) {
   ].join('\n');
   reauthSources.className = 'status-line bad';
 }
+function renderRoutes(rows=[], chats=[]) {
+  routesBox.innerHTML = rows.length ? '' : '<p>No Telegram routes yet. Send /start to the bot from the group/chat you want to use.</p>';
+  for (const row of rows) {
+    const div = document.createElement('div');
+    div.className = 'source';
+    const title = row.chat_title || `chat ${row.chat_id}`;
+    const thread = row.thread_id ? ` · topic ${row.thread_id}` : '';
+    div.innerHTML = `<div><strong>${row.subject_name}</strong><small>${title} · ${row.chat_id}${thread}</small></div><div class="actions" style="margin:0"></div>`;
+    const actions = div.querySelector('.actions');
+    if (chats.length > 1) {
+      const select = document.createElement('select');
+      for (const chat of chats) {
+        select.add(new Option(chat.title || `chat ${chat.chat_id}`, chat.chat_id));
+      }
+      select.value = row.chat_id;
+      const move = document.createElement('button');
+      move.className = 'warn';
+      move.textContent = 'Move';
+      move.onclick = () => moveRoute(row.subject_id, row.chat_id, row.thread_id || '', select.value);
+      actions.appendChild(select);
+      actions.appendChild(move);
+    }
+    const unlink = document.createElement('button');
+    unlink.className = 'secondary';
+    unlink.textContent = 'Unlink';
+    actions.appendChild(unlink);
+    unlink.onclick = () => unlinkRoute(row.subject_id, row.chat_id, row.thread_id || '');
+    routesBox.appendChild(div);
+  }
+}
 function renderSteps(current) {
   const order = ['runtime_configured','db_initialized','sources_imported','sources_reviewed','subject_confirmed','completed'];
   const index = Math.max(0, order.indexOf(current));
@@ -260,9 +297,10 @@ async function loadState() {
     if (platform.options.length === 0) data.platforms.forEach(p => platform.add(new Option(p, p)));
     renderSources(data.staged_sources || [], data.staged_counts || {});
     renderReauth(data.reauth_sources || []);
+    renderRoutes(data.routes || [], data.chats || []);
     renderSteps(data.onboarding.current_step || 'start');
     agentBadge.textContent = `agent: ${data.agent_running ? 'running' : 'stopped'}`;
-    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, session_refresh: `${s.session_refresh_enabled ? 'on' : 'off'} (${s.session_refresh_browser}, ${s.session_refresh_cooldown_seconds}s)`, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name)}, null, 2);
+    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, session_refresh: `${s.session_refresh_enabled ? 'on' : 'off'} (${s.session_refresh_browser}, ${s.session_refresh_cooldown_seconds}s)`, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name), routes: (data.routes || []).length}, null, 2);
     logs.textContent = (data.logs || []).slice().reverse().join('\n');
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
@@ -456,6 +494,29 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(lambda _p: self.service.rebuild_todays_digest(), request)
 
+        async def unlink_route(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.unlink_subject_route(
+                    subject_id=int(p.get("subject_id") or 0),
+                    chat_id=int(p.get("chat_id") or 0),
+                    thread_id=str(p.get("thread_id") or "") or None,
+                ),
+                request,
+            )
+
+        async def move_route(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.move_subject_route(
+                    subject_id=int(p.get("subject_id") or 0),
+                    from_chat_id=int(p.get("from_chat_id") or 0),
+                    from_thread_id=str(p.get("from_thread_id") or "") or None,
+                    to_chat_id=int(p.get("to_chat_id") or 0),
+                ),
+                request,
+            )
+
         async def shutdown_service() -> None:
             if self.service is not None:
                 await self.service.shutdown()
@@ -486,6 +547,8 @@ class DesktopWebServer:
             Route("/api/smoke", smoke, methods=["POST"]),
             Route("/api/briefs", briefs, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
+            Route("/api/routes/unlink", unlink_route, methods=["POST"]),
+            Route("/api/routes/move", move_route, methods=["POST"]),
         ]
         app = Starlette(routes=routes, lifespan=lifespan)
         app.add_middleware(BaseHTTPMiddleware, dispatch=require_auth)

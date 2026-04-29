@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 
 ManualAction = Callable[[], Awaitable[Any]]
-DigestRebuildAction = Callable[..., Awaitable[Any]]
+SubjectScopedAction = Callable[..., Awaitable[Any]]
 
 
 @dataclass
@@ -51,16 +51,16 @@ class TelegramService:
     preference_extractor: PreferenceExtractionService | None = None
     application: Application | None = None
     read_content_action: ManualAction | None = None
-    get_digest_action: ManualAction | None = None
-    rebuild_digest_action: DigestRebuildAction | None = None
+    get_digest_action: SubjectScopedAction | None = None
+    rebuild_digest_action: SubjectScopedAction | None = None
     _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
 
     def attach_manual_actions(
         self,
         *,
         read_content_action: ManualAction,
-        get_digest_action: ManualAction,
-        rebuild_digest_action: DigestRebuildAction | None = None,
+        get_digest_action: SubjectScopedAction,
+        rebuild_digest_action: SubjectScopedAction | None = None,
     ) -> None:
         self.read_content_action = read_content_action
         self.get_digest_action = get_digest_action
@@ -81,6 +81,8 @@ class TelegramService:
         app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
         app.add_handler(CallbackQueryHandler(self._on_more_callback, pattern=r"^more:"))
+        app.add_handler(CallbackQueryHandler(self._on_route_subject_callback, pattern=r"^route:"))
+        app.add_handler(CallbackQueryHandler(self._on_run_subject_callback, pattern=r"^run_subject:"))
         app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
         app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
@@ -186,22 +188,71 @@ class TelegramService:
             update.effective_chat.id if update.effective_chat else None,
             update.effective_user.id if update.effective_user else None,
         )
-        new_routes = await self.routing_service.ensure_routes_for_chat(
-            chat_id=update.effective_chat.id,
-            title=update.effective_chat.title or update.effective_chat.full_name,
+        if update.effective_chat is None:
+            return
+        chat_id = update.effective_chat.id
+        thread_id = self._message_thread_id(update.message)
+        title = update.effective_chat.title or update.effective_chat.full_name
+        await self.routing_service.register_chat(chat_id=chat_id, title=title)
+        routes = await self.routing_service.list_routes_for_chat(chat_id=chat_id, thread_id=thread_id)
+        subjects = await self.subject_service.list_subjects()
+        logger.info(
+            "Telegram /start routing state chat_id=%s thread_id=%s routes=%d subjects=%d",
+            chat_id,
+            thread_id,
+            len(routes),
+            len(subjects),
         )
-        connect_note = (
-            f"\nLinked {new_routes} existing subject(s) to this chat for Brief delivery."
-            if new_routes
-            else ""
-        )
+        if routes:
+            route_names = ", ".join(route.subject_name for route in routes)
+            await update.message.reply_text(
+                "PCCA is connected.\n"
+                f"This chat is linked to: {route_names}\n"
+                "Use /setup for guided onboarding, or send free-form commands.",
+                reply_markup=self._quick_actions_reply_keyboard(),
+            )
+            await self._send_quick_actions(update.message)
+            return
+
+        if not subjects:
+            await update.message.reply_text(
+                "PCCA is connected.\n"
+                "No subjects exist yet. Create your first subject in the desktop wizard or send a free-form subject request here.",
+                reply_markup=self._quick_actions_reply_keyboard(),
+            )
+            await self._send_quick_actions(update.message)
+            return
+
+        if len(subjects) == 1:
+            subject = await self.routing_service.link_subject_id(
+                subject_id=subjects[0].id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            logger.info(
+                "Telegram /start auto-linked single subject chat_id=%s thread_id=%s subject_id=%s",
+                chat_id,
+                thread_id,
+                subject.id,
+            )
+            await update.message.reply_text(
+                "PCCA is connected.\n"
+                f"This chat is linked to {subject.name} for Brief delivery.\n"
+                "Use /setup for guided onboarding, or send free-form commands.",
+                reply_markup=self._quick_actions_reply_keyboard(),
+            )
+            await self._send_quick_actions(update.message)
+            return
+
         await update.message.reply_text(
             "PCCA is connected.\n"
-            "Use /setup for guided onboarding, or send free-form commands."
-            + connect_note,
+            "Choose which subject this chat should receive Briefs for:",
             reply_markup=self._quick_actions_reply_keyboard(),
         )
-        await self._send_quick_actions(update.message)
+        await update.message.reply_text(
+            "Subject route:",
+            reply_markup=self._subject_picker_keyboard(subjects),
+        )
 
     async def _on_setup(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -246,7 +297,7 @@ class TelegramService:
     async def _on_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
-        await self._run_manual_action_from_message(update.message, action_name="get briefs", action=self.get_digest_action)
+        await self._run_briefs_from_message(update.message)
 
     async def _on_rebuild_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -257,7 +308,7 @@ class TelegramService:
         if update.message is None:
             return
         await update.message.reply_text("`/get_digest` is now `/briefs`. I will run `/briefs` now.", parse_mode="Markdown")
-        await self._run_manual_action_from_message(update.message, action_name="get briefs", action=self.get_digest_action)
+        await self._run_briefs_from_message(update.message)
 
     async def _on_rebuild_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -277,10 +328,11 @@ class TelegramService:
             update.effective_user.id if update.effective_user else None,
             len(update.message.text),
         )
-        await self.routing_service.ensure_routes_for_chat(
-            chat_id=update.effective_chat.id,
-            title=update.effective_chat.title or update.effective_chat.full_name,
-        )
+        if update.effective_chat is not None:
+            await self.routing_service.register_chat(
+                chat_id=update.effective_chat.id,
+                title=update.effective_chat.title or update.effective_chat.full_name,
+            )
         if await self._record_brief_reply_feedback(update, update.message.text):
             return
         await self._handle_text_intent(update, update.message.text)
@@ -525,11 +577,7 @@ class TelegramService:
             return
 
         if intent.action is IntentAction.RUN_GET_DIGEST:
-            await self._run_manual_action_from_message(
-                update.message,
-                action_name="get briefs",
-                action=self.get_digest_action,
-            )
+            await self._run_briefs_from_message(update.message)
             return
 
         if intent.action is IntentAction.RUN_REBUILD_DIGEST:
@@ -695,6 +743,94 @@ class TelegramService:
         )
         await update.callback_query.answer("Expanded.")
 
+    async def _on_route_subject_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query is None:
+            return
+        message = update.callback_query.message
+        if message is None:
+            await update.callback_query.answer("This route picker is no longer available.")
+            return
+        subject_id = self._parse_callback_subject_id(update.callback_query.data or "", expected_parts=2)
+        if subject_id is None:
+            await update.callback_query.answer("This route picker is invalid.")
+            return
+        chat_id = self._message_chat_id(message)
+        if chat_id is None:
+            await update.callback_query.answer("Could not detect this chat.")
+            return
+        chat_title = self._message_chat_title(message)
+        thread_id = self._message_thread_id(message)
+        await self.routing_service.register_chat(chat_id=chat_id, title=chat_title)
+        try:
+            subject = await self.routing_service.link_subject_id(
+                subject_id=subject_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        except ValueError:
+            await update.callback_query.answer("That subject no longer exists.")
+            return
+        logger.info(
+            "Telegram subject route selected chat_id=%s thread_id=%s subject_id=%s subject=%s",
+            chat_id,
+            thread_id,
+            subject.id,
+            subject.name,
+        )
+        await update.callback_query.answer(f"Linked {subject.name}.")
+        await update.callback_query.edit_message_text(
+            f"This chat is now linked to {subject.name} for Brief delivery.",
+            reply_markup=self._quick_actions_inline_keyboard(),
+        )
+
+    async def _on_run_subject_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query is None:
+            return
+        message = update.callback_query.message
+        if message is None:
+            await update.callback_query.answer("This action is no longer available.")
+            return
+        parts = (update.callback_query.data or "").split(":")
+        if len(parts) != 3:
+            await update.callback_query.answer("This action is invalid.")
+            return
+        action_name = parts[1]
+        try:
+            subject_id = int(parts[2])
+        except ValueError:
+            await update.callback_query.answer("This subject selection is invalid.")
+            return
+        chat_id = self._message_chat_id(message)
+        if chat_id is None:
+            await update.callback_query.answer("Could not detect this chat.")
+            return
+        thread_id = self._message_thread_id(message)
+        await self.routing_service.register_chat(chat_id=chat_id, title=self._message_chat_title(message))
+        try:
+            subject = await self.routing_service.link_subject_id(
+                subject_id=subject_id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+        except ValueError:
+            await update.callback_query.answer("That subject no longer exists.")
+            return
+        await update.callback_query.answer(f"Selected {subject.name}.")
+        logger.info(
+            "Telegram subject-scoped action selected action=%s chat_id=%s thread_id=%s subject_id=%s",
+            action_name,
+            chat_id,
+            thread_id,
+            subject.id,
+        )
+        if action_name == "briefs":
+            await self._run_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            return
+        if action_name == "rebuild":
+            await self._run_rebuild_digest_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            return
+        await message.reply_text("That subject action is not supported yet.")
+
     async def _on_run_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is None:
             return
@@ -707,38 +843,118 @@ class TelegramService:
             await self._run_manual_action_from_message(message, action_name="read content", action=self.read_content_action)
             return
         if data in {"run:briefs", "run:digest"}:
-            await self._run_manual_action_from_message(message, action_name="get briefs", action=self.get_digest_action)
+            await self._run_briefs_from_message(message)
             return
         if data in {"run:rebuild", "run:rebuild_briefs"}:
             await self._run_rebuild_digest_from_message(message)
             return
 
-    async def _run_rebuild_digest_from_message(self, message) -> None:
+    async def _run_briefs_from_message(
+        self,
+        message,
+        subject_ids: set[int] | None = None,
+        subject_name: str | None = None,
+    ) -> None:
+        if self.get_digest_action is None:
+            await message.reply_text(
+                "`get briefs` action is not available yet in this runtime.",
+                parse_mode="Markdown",
+            )
+            return
+        if subject_ids is None:
+            resolved = await self._resolve_subject_ids_for_message(
+                message,
+                action_label="Briefs",
+                callback_action="briefs",
+            )
+            if resolved is None:
+                return
+            subject_ids, subject_name = resolved
+
+        async def action() -> Any:
+            return await self.get_digest_action(subject_ids=subject_ids)
+
+        action_name = f"get briefs for {subject_name}" if subject_name else "get briefs"
+        await self._run_manual_action_from_message(message, action_name=action_name, action=action)
+
+    async def _run_rebuild_digest_from_message(
+        self,
+        message,
+        subject_ids: set[int] | None = None,
+        subject_name: str | None = None,
+    ) -> None:
         if self.rebuild_digest_action is None:
             await message.reply_text(
                 "`rebuild briefs` action is not available yet in this runtime.",
                 parse_mode="Markdown",
             )
             return
-        chat = getattr(message, "chat", None)
-        chat_id = getattr(message, "chat_id", None) or getattr(chat, "id", None)
-        thread_id_raw = getattr(message, "message_thread_id", None)
-        thread_id = str(thread_id_raw) if thread_id_raw else None
-        subject_ids: set[int] | None = None
-        if chat_id is not None:
-            subject = await self.routing_service.resolve_subject_for_chat(chat_id=chat_id, thread_id=thread_id)
-            if subject is None:
-                await message.reply_text(
-                    "I do not know which subject to rebuild from this chat yet. "
-                    "Send /start or create/link a subject first."
-                )
+        if subject_ids is None:
+            resolved = await self._resolve_subject_ids_for_message(
+                message,
+                action_label="rebuild Briefs",
+                callback_action="rebuild",
+            )
+            if resolved is None:
                 return
-            subject_ids = {subject.id}
+            subject_ids, subject_name = resolved
 
         async def action() -> Any:
             return await self.rebuild_digest_action(subject_ids=subject_ids)
 
-        await self._run_manual_action_from_message(message, action_name="rebuild briefs", action=action)
+        action_name = f"rebuild briefs for {subject_name}" if subject_name else "rebuild briefs"
+        await self._run_manual_action_from_message(message, action_name=action_name, action=action)
+
+    async def _resolve_subject_ids_for_message(
+        self,
+        message,
+        *,
+        action_label: str,
+        callback_action: str,
+    ) -> tuple[set[int], str | None] | None:
+        chat_id = self._message_chat_id(message)
+        if chat_id is None:
+            await message.reply_text(f"I could not detect the chat for {action_label}.")
+            return None
+        thread_id = self._message_thread_id(message)
+        await self.routing_service.register_chat(chat_id=chat_id, title=self._message_chat_title(message))
+        routes = await self.routing_service.list_routes_for_chat(chat_id=chat_id, thread_id=thread_id)
+        if len(routes) == 1:
+            route = routes[0]
+            return {route.subject_id}, route.subject_name
+        if len(routes) > 1:
+            await message.reply_text(
+                f"This chat is linked to multiple subjects. Choose which subject should run {action_label}:",
+                reply_markup=self._subject_action_keyboard_from_routes(routes, callback_action),
+            )
+            return None
+
+        subjects = await self.subject_service.list_subjects()
+        if not subjects:
+            await message.reply_text(
+                "No subjects exist yet. Create your first subject in the desktop wizard or send a free-form subject request here."
+            )
+            return None
+        if len(subjects) == 1:
+            subject = await self.routing_service.link_subject_id(
+                subject_id=subjects[0].id,
+                chat_id=chat_id,
+                thread_id=thread_id,
+            )
+            logger.info(
+                "Telegram action auto-linked single subject action=%s chat_id=%s thread_id=%s subject_id=%s",
+                callback_action,
+                chat_id,
+                thread_id,
+                subject.id,
+            )
+            return {subject.id}, subject.name
+
+        await message.reply_text(
+            f"This chat is not linked to a subject yet. Choose one and I will link it before running {action_label}:",
+            reply_markup=self._subject_action_keyboard(subjects, callback_action),
+        )
+        return None
 
     async def _run_manual_action_from_message(
         self,
@@ -846,6 +1062,58 @@ class TelegramService:
             resize_keyboard=True,
             one_time_keyboard=False,
         )
+
+    @staticmethod
+    def _subject_picker_keyboard(subjects) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(subject.name, callback_data=f"route:{subject.id}")] for subject in subjects]
+        )
+
+    @staticmethod
+    def _subject_action_keyboard(subjects, action: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(subject.name, callback_data=f"run_subject:{action}:{subject.id}")]
+                for subject in subjects
+            ]
+        )
+
+    @staticmethod
+    def _subject_action_keyboard_from_routes(routes, action: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(route.subject_name, callback_data=f"run_subject:{action}:{route.subject_id}")]
+                for route in routes
+            ]
+        )
+
+    @staticmethod
+    def _parse_callback_subject_id(data: str, *, expected_parts: int) -> int | None:
+        parts = data.split(":")
+        if len(parts) != expected_parts:
+            return None
+        try:
+            return int(parts[-1])
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _message_chat_id(message) -> int | None:
+        chat = getattr(message, "chat", None)
+        chat_id = getattr(message, "chat_id", None) or getattr(chat, "id", None)
+        return int(chat_id) if chat_id is not None else None
+
+    @staticmethod
+    def _message_chat_title(message) -> str | None:
+        chat = getattr(message, "chat", None)
+        if chat is None:
+            return None
+        return getattr(chat, "title", None) or getattr(chat, "full_name", None)
+
+    @staticmethod
+    def _message_thread_id(message) -> str | None:
+        thread_id = getattr(message, "message_thread_id", None)
+        return str(thread_id) if thread_id else None
 
     async def _link_source(self, *, subject_name: str, platform: str, source_value: str) -> list[str]:
         candidate = source_value.strip()

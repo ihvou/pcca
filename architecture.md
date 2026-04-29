@@ -201,7 +201,7 @@ Per the group-per-subject UX, users typically create one Telegram group per subj
 Inline buttons attached to Briefs are declarative shortcuts to text reactions, never hardcoded action mappings ([§3.2](#32-explicit-vs-implicit-feedback)). Each button is a `(label, text_macro)` pair — for example `("👎", "less like this")` or `("🚫", "this is spam, downgrade source")`. When a user taps a button:
 
 1. The callback fires with `{item_id, button_label}`.
-2. The bot resolves the label to its current macro text and **stores the same kind of `feedback_events` row** that a free-form text reply would produce: `feedback_type='button_<label>'`, `comment_text=<macro>`, plus `subject_id`, `item_id`, and `created_at`.
+2. The bot resolves the label to its current macro text and **stores the same kind of `feedback_events` row** that a free-form text reply would produce: `feedback_type='button_macro'`, `comment_text=<macro>`, plus `subject_id`, `item_id`, and `created_at`.
 3. The Learning Strategy ([§4.20](#420-learning-strategy)) is the only thing that decides whether and how to act on that record.
 
 Default global button set: 👍 / 👎 / 🔖 / 🚫 / 📖 More. The 📖 More button is a UI action (triggers `editMessageText` to expand to the full view); the others record feedback. Per-subject overrides live in `subjects.button_shortcuts_json`. Adding or relabeling a button is a configuration change with no code edits.

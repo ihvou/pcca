@@ -206,6 +206,12 @@ class DesktopCommandService:
                 subject_repo=subject_repo,
             )
             subjects = await SubjectService(repository=subject_repo).list_subjects()
+            routing_service = RoutingService(
+                routing_repo=RoutingRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            routes = await routing_service.list_all_routes()
+            chats = await routing_service.list_registered_chats()
             reauth_sources = await source_service.list_sources_needing_reauth()
             pending_staged = [row for row in staged if row.status == "pending"]
             staged_counts: dict[str, int] = {}
@@ -241,6 +247,8 @@ class DesktopCommandService:
                 "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
                 "subjects": [asdict(subject) for subject in subjects],
+                "routes": [asdict(route) for route in routes],
+                "chats": [asdict(chat) for chat in chats],
                 "platforms": SUPPORTED_ONBOARDING_PLATFORMS,
                 "agent_running": self.agent_running,
                 "logs": self.logs,
@@ -417,6 +425,65 @@ class DesktopCommandService:
             self.log(f"Removed staged source id={source_id}.")
             return CommandResult(True, f"Removed staged source id={source_id}.")
         return CommandResult(False, f"No pending staged source found for id={source_id}.")
+
+    async def unlink_subject_route(
+        self,
+        *,
+        subject_id: int,
+        chat_id: int,
+        thread_id: str | None = None,
+    ) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            removed = await RoutingService(
+                routing_repo=RoutingRepository(conn=db.conn),
+                subject_repo=SubjectRepository(conn=db.conn),
+            ).unlink_subject_route(subject_id=subject_id, chat_id=chat_id, thread_id=thread_id)
+        finally:
+            await db.close()
+        if removed:
+            self.log(f"Unlinked subject_id={subject_id} from chat_id={chat_id} thread_id={thread_id or ''}.")
+            return CommandResult(True, "Route unlinked.")
+        return CommandResult(False, "Route was already absent.")
+
+    async def move_subject_route(
+        self,
+        *,
+        subject_id: int,
+        from_chat_id: int,
+        from_thread_id: str | None,
+        to_chat_id: int,
+    ) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            moved = await RoutingService(
+                routing_repo=RoutingRepository(conn=db.conn),
+                subject_repo=SubjectRepository(conn=db.conn),
+            ).move_subject_route(
+                subject_id=subject_id,
+                from_chat_id=from_chat_id,
+                from_thread_id=from_thread_id,
+                to_chat_id=to_chat_id,
+                to_thread_id=None,
+            )
+        finally:
+            await db.close()
+        if moved:
+            self.log(f"Moved subject_id={subject_id} route from chat_id={from_chat_id} to chat_id={to_chat_id}.")
+            return CommandResult(True, "Route moved.")
+        return CommandResult(True, "Route already points there.")
 
     async def monitor_staged_sources(self) -> CommandResult:
         settings = self.settings()
