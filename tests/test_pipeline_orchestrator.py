@@ -44,6 +44,43 @@ class CountingCollector(DummyRSSCollector):
         return await super().collect_from_source(source_id)
 
 
+class EmptyCollector:
+    def __init__(self, platform: str = "linkedin") -> None:
+        self.platform = platform
+        self.calls: list[str] = []
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.calls.append(source_id)
+        return []
+
+
+class SequenceCollector:
+    def __init__(self, outcomes: list[str], platform: str = "linkedin") -> None:
+        self.outcomes = outcomes
+        self.platform = platform
+        self.calls: list[str] = []
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.calls.append(source_id)
+        outcome = self.outcomes.pop(0) if self.outcomes else "empty"
+        if outcome == "exception":
+            raise RuntimeError("boom")
+        if outcome == "empty":
+            return []
+        return [
+            CollectedItem(
+                platform=self.platform,
+                external_id=f"{source_id}-ok",
+                author="dummy",
+                url=f"https://example.com/{source_id}",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+
+
 class FakeModelRouter:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -459,5 +496,102 @@ async def test_pipeline_marks_challenged_sources_for_reauth(tmp_path: Path) -> N
     assert activated == 1
     active_sources = await source_service.list_sources_for_subject("Vibe Coding")
     assert len(active_sources) == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_platform_circuit_breaker_stops_remaining_sources_and_records_metadata(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    for idx in range(6):
+        await source_service.monitor_source(
+            platform="linkedin",
+            account_or_channel_id=f"person-{idx}",
+            display_name=f"Person {idx}",
+        )
+
+    collector = EmptyCollector(platform="linkedin")
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"linkedin": collector},
+        circuit_threshold=3,
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert collector.calls == ["person-0", "person-1", "person-2"]
+    assert stats["circuit_broken"] == ["linkedin"]
+    assert stats["sources_skipped_circuit_breaker"] == 3
+    row = await (
+        await db.conn.execute("SELECT metadata_json FROM run_logs WHERE run_type = 'nightly_collection'")
+    ).fetchone()
+    assert row is not None
+    assert row["metadata_json"]
+    assert '"circuit_broken": ["linkedin"]' in row["metadata_json"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_platform_circuit_breaker_resets_after_success_and_isolates_platforms(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    for idx in range(5):
+        await source_service.monitor_source(
+            platform="linkedin",
+            account_or_channel_id=f"person-{idx}",
+            display_name=f"Person {idx}",
+        )
+    await source_service.monitor_source(
+        platform="youtube",
+        account_or_channel_id="@openai",
+        display_name="OpenAI",
+    )
+
+    linkedin = SequenceCollector(["empty", "ok", "empty", "empty", "empty"], platform="linkedin")
+    youtube = SequenceCollector(["ok"], platform="youtube")
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"linkedin": linkedin, "youtube": youtube},
+        circuit_threshold=3,
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert linkedin.calls == ["person-0", "person-1", "person-2", "person-3", "person-4"]
+    assert youtube.calls == ["@openai"]
+    assert stats["circuit_broken"] == ["linkedin"]
+    assert stats["sources_skipped_circuit_breaker"] == 0
+    assert stats["items_collected"] == 2
+
+    second = await orchestrator.run_nightly_collection()
+    assert second["sources_seen"] == 6
 
     await db.close()

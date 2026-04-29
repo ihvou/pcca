@@ -19,6 +19,7 @@ from pcca.repositories.digests import DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.items import ItemRepository
+from pcca.repositories.lookup_cache import LookupCacheRepository
 from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.routing import RoutingRepository
@@ -84,6 +85,7 @@ class PCCAApp:
         digest_repo = DigestRepository(conn=self.db.conn)
         run_log_repo = RunLogRepository(conn=self.db.conn)
         subject_draft_repo = SubjectDraftRepository(conn=self.db.conn)
+        lookup_cache_repo = LookupCacheRepository(conn=self.db.conn)
         model_router = ModelRouter(
             enabled=self.settings.ollama_enabled,
             ollama_base_url=self.settings.ollama_base_url,
@@ -111,7 +113,7 @@ class PCCAApp:
         self.follow_import_service = FollowImportService(
             session_manager=self.browser_session_manager,
             source_service=self.source_service,
-            source_discovery=SourceDiscoveryService(),
+            source_discovery=SourceDiscoveryService(cache_repo=lookup_cache_repo),
             session_refresh_service=self.session_refresh_service,
         )
 
@@ -124,6 +126,7 @@ class PCCAApp:
             preference_service=self.preference_service,
             model_router=model_router,
             session_refresh_service=self.session_refresh_service,
+            circuit_threshold=self.settings.platform_circuit_threshold,
             collectors={
                 "x": XCollector(session_manager=self.browser_session_manager),
                 "linkedin": LinkedInCollector(session_manager=self.browser_session_manager),

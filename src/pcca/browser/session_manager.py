@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import random
 import signal
 import sys
 from dataclasses import dataclass, field
@@ -450,6 +452,109 @@ class BrowserSessionManager:
             "Browser debug snapshot saved platform=%s label=%s url=%s metadata=%s screenshot=%s",
             platform,
             label,
+            payload["url"],
+            metadata_path,
+            screenshot_path if screenshot_saved else "<not captured>",
+        )
+        return metadata_path
+
+    async def capture_empty_result_snapshot(
+        self,
+        page,
+        *,
+        platform: str,
+        source_id: str,
+        sample_rate: float | None = None,
+    ) -> Path | None:
+        """Persist breadcrumbs for "page loaded but selectors found nothing" cases."""
+        if page is None or getattr(page, "is_closed", lambda: True)():
+            return None
+        rate = sample_rate
+        if rate is None:
+            try:
+                rate = float(os.getenv("PCCA_EMPTY_RESULT_SNAPSHOT_RATE", "0.33"))
+            except ValueError:
+                rate = 0.33
+        rate = max(0.0, min(1.0, rate))
+        if rate <= 0:
+            return None
+        if rate < 1.0 and random.random() >= rate:
+            return None
+
+        debug_root = self.effective_debug_dir
+        debug_root.mkdir(parents=True, exist_ok=True)
+        normalized_platform = slugify(platform or getattr(page, "_pcca_platform", "unknown"))
+        source_hash = hashlib.sha256(source_id.encode("utf-8", errors="replace")).hexdigest()[:12]
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stem = f"{normalized_platform}_empty_{timestamp}_{source_hash}"
+        screenshot_path = debug_root / f"{stem}.png"
+        metadata_path = debug_root / f"{stem}.json"
+
+        title = None
+        meta_title = None
+        html_preview = ""
+        dom_summary: dict[str, Any] = {}
+        try:
+            title = await page.title()
+        except Exception:
+            logger.debug("Could not read page title for empty-result snapshot.", exc_info=True)
+        try:
+            meta_title = await page.evaluate(
+                """() => document.querySelector('meta[name="title"], meta[property="og:title"]')?.getAttribute('content') || null"""
+            )
+        except Exception:
+            logger.debug("Could not read page meta title for empty-result snapshot.", exc_info=True)
+        try:
+            html_preview = (await page.content())[:4096]
+        except Exception:
+            logger.debug("Could not read page HTML for empty-result snapshot.", exc_info=True)
+        try:
+            dom_summary = await page.evaluate(
+                """
+                () => ({
+                  readyState: document.readyState,
+                  url: location.href,
+                  bodyTextLength: document.body ? document.body.innerText.length : 0,
+                  bodyPreview: document.body ? document.body.innerText.slice(0, 1000) : "",
+                  articles: document.querySelectorAll('article').length,
+                  anchors: document.querySelectorAll('a[href]').length,
+                  buttons: document.querySelectorAll('button').length,
+                  inputs: document.querySelectorAll('input, textarea, select').length,
+                  h1: Array.from(document.querySelectorAll('h1')).slice(0, 3).map(n => n.innerText.trim()).filter(Boolean),
+                })
+                """
+            )
+        except Exception:
+            logger.debug("Could not read DOM summary for empty-result snapshot.", exc_info=True)
+
+        screenshot_saved = False
+        if self.screenshots_on_failure:
+            try:
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                screenshot_saved = True
+            except Exception:
+                logger.debug("Could not capture empty-result screenshot.", exc_info=True)
+
+        payload = {
+            "label": "empty_result",
+            "platform": platform,
+            "source_hash": source_hash,
+            "url": sanitize_url(getattr(page, "url", "")),
+            "title": safe_value(title),
+            "meta_title": safe_value(meta_title),
+            "html_preview": safe_value(html_preview, max_chars=4096),
+            "screenshot": str(screenshot_path) if screenshot_saved else None,
+            "dom_summary": safe_value(dom_summary),
+            "recent_events": [
+                safe_value(event, max_chars=1000)
+                for event in list(getattr(page, "_pcca_debug_events", []))[-40:]
+            ],
+        }
+        metadata_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        logger.warning(
+            "Browser empty-result snapshot saved platform=%s source_hash=%s url=%s metadata=%s screenshot=%s",
+            platform,
+            source_hash,
             payload["url"],
             metadata_path,
             screenshot_path if screenshot_saved else "<not captured>",

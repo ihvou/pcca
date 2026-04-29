@@ -265,10 +265,24 @@ function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classL
 function notice(id, text, kind='') { const el = document.getElementById(id); el.style.display = text ? 'block' : 'none'; el.className = `notice ${kind}`.trim(); el.textContent = text || ''; }
 function logLine(line) { const el = document.getElementById('logsBox'); el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent; }
 async function request(path, opts={}) {
-  const res = await fetch(path, {...opts, headers: {...headers, ...(opts.headers || {})}});
-  const data = await res.json();
-  if (!res.ok || data.ok === false) throw new Error(data.message || data.detail || `Request failed: ${path}`);
-  return data;
+  const timeoutMs = opts.timeoutMs || 120000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const cleanOpts = {...opts};
+    delete cleanOpts.timeoutMs;
+    const res = await fetch(path, {...cleanOpts, signal: controller.signal, headers: {...headers, ...(opts.headers || {})}});
+    const data = await res.json();
+    if (!res.ok || data.ok === false) throw new Error(data.message || data.detail || `Request failed: ${path}`);
+    return data;
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`Still working after ${Math.round(timeoutMs / 1000)}s. Check Debug logs; avoid retrying immediately so the current import can finish.`);
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 async function postAction(path, body={}) {
   try { setBusy(true); const data = await request(path, {method:'POST', body: JSON.stringify(body)}); logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'ok'}`); await loadState(); return data; }
@@ -283,7 +297,7 @@ async function getSources() {
   notice('sourceStatus', `Importing ${platform.value} sources...`, '');
   try {
     setBusy(true);
-    const data = await request('/api/stage-follows', {method:'POST', body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
     logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
     notice('sourceStatus', data.message, 'ok');
     await loadState();
@@ -294,7 +308,7 @@ async function getSources() {
       try {
         notice('sourceStatus', `Repairing ${platform.value} session...`, '');
         await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platform.value})});
-        const retry = await request('/api/stage-follows', {method:'POST', body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
         notice('sourceStatus', retry.message, 'ok');
         await loadState();
       } catch (repairErr) {
@@ -484,11 +498,12 @@ async function loadState() {
     compactState.textContent = JSON.stringify({agent: data.agent_running ? 'running' : 'stopped', token: s.telegram_token_configured ? 'configured' : 'missing', subjects: (data.subjects || []).map(x => x.name), routes: (data.routes || []).length}, null, 2);
     stateBox.textContent = JSON.stringify(data, null, 2);
     pathsBox.textContent = JSON.stringify({data_dir: s.data_dir, db_path: s.db_path, log_file: s.log_file, debug_dir: s.debug_dir, browser_channel: s.browser_channel}, null, 2);
-    debugFiles.textContent = JSON.stringify({log_file: s.log_file, debug_dir: s.debug_dir}, null, 2);
+    debugFiles.textContent = JSON.stringify({log_file: s.log_file, debug_dir: s.debug_dir, recent_run_logs: data.recent_run_logs || []}, null, 2);
     logsBox.textContent = (data.logs || []).slice().reverse().join('\n');
     const failures = [];
     if (s.telegram_token_missing) failures.push(s.telegram_status);
     if ((data.reauth_sources || []).length) failures.push(`${data.reauth_sources.length} source(s) need re-login.`);
+    if ((data.circuit_broken || []).length) failures.push(`Collection paused for: ${(data.circuit_broken || []).join(', ')}. Check debug bundle snapshots before retrying.`);
     failureBox.className = failures.length ? 'notice bad' : 'notice ok';
     failureBox.textContent = failures.join('\n') || 'No visible failures.';
     if (!document.body.dataset.initialTab) { showTab(defaultTab(data)); document.body.dataset.initialTab = '1'; }

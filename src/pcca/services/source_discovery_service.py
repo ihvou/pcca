@@ -8,6 +8,8 @@ from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
+from pcca.repositories.lookup_cache import LookupCacheRepository
+
 logger = logging.getLogger(__name__)
 
 
@@ -46,6 +48,9 @@ class _FeedLinkParser(HTMLParser):
 
 @dataclass
 class SourceDiscoveryService:
+    cache_repo: LookupCacheRepository | None = None
+    apple_lookup_ttl_days: int = 30
+
     async def discover(self, raw_input: str) -> list[DiscoveredSource]:
         value = raw_input.strip()
         if not value:
@@ -299,6 +304,19 @@ class SourceDiscoveryService:
         if not match:
             return None
         podcast_id = match.group(1)
+        cache_key = f"apple_podcast_lookup:{podcast_id}"
+        if self.cache_repo is not None:
+            cached = await self.cache_repo.get_json(cache_key, ttl_days=self.apple_lookup_ttl_days)
+            if cached:
+                feed_url = cached.get("feed_url")
+                display_name = cached.get("display_name")
+                if isinstance(feed_url, str) and feed_url.startswith(("http://", "https://")):
+                    logger.debug("Apple Podcasts lookup cache hit podcast_id=%s", podcast_id)
+                    return ApplePodcastLookup(
+                        feed_url=feed_url,
+                        display_name=str(display_name or "apple-podcast-feed").strip() or "apple-podcast-feed",
+                    )
+
         lookup_url = f"https://itunes.apple.com/lookup?id={podcast_id}"
         try:
             async with httpx.AsyncClient(timeout=12.0) as client:
@@ -316,7 +334,17 @@ class SourceDiscoveryService:
                     or results[0].get("artistName")
                     or "apple-podcast-feed"
                 )
-                return ApplePodcastLookup(feed_url=feed, display_name=str(display_name).strip() or "apple-podcast-feed")
+                lookup = ApplePodcastLookup(
+                    feed_url=feed,
+                    display_name=str(display_name).strip() or "apple-podcast-feed",
+                )
+                if self.cache_repo is not None:
+                    await self.cache_repo.set_json(
+                        cache_key,
+                        {"feed_url": lookup.feed_url, "display_name": lookup.display_name},
+                    )
+                    logger.debug("Apple Podcasts lookup cached podcast_id=%s", podcast_id)
+                return lookup
             return None
         except Exception:
             return None

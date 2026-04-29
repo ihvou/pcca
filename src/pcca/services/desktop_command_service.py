@@ -253,6 +253,37 @@ class DesktopCommandService:
             routes = await routing_service.list_all_routes()
             chats = await routing_service.list_registered_chats()
             reauth_sources = await source_service.list_sources_needing_reauth()
+            run_log_rows = await (
+                await db.conn.execute(
+                    """
+                    SELECT id, run_type, started_at, ended_at, status, stats_json, metadata_json
+                    FROM run_logs
+                    ORDER BY id DESC
+                    LIMIT 10
+                    """
+                )
+            ).fetchall()
+            recent_run_logs = []
+            circuit_broken: list[str] = []
+            for row in run_log_rows:
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                if row["run_type"] == "nightly_collection" and not circuit_broken:
+                    broken = metadata.get("circuit_broken") if isinstance(metadata, dict) else None
+                    if isinstance(broken, list):
+                        circuit_broken = [str(item) for item in broken]
+                recent_run_logs.append(
+                    {
+                        "id": row["id"],
+                        "run_type": row["run_type"],
+                        "started_at": row["started_at"],
+                        "ended_at": row["ended_at"],
+                        "status": row["status"],
+                        "metadata": metadata,
+                    }
+                )
             pending_staged = [row for row in staged if row.status == "pending"]
             staged_counts: dict[str, int] = {}
             for row in pending_staged:
@@ -276,6 +307,7 @@ class DesktopCommandService:
                     "session_refresh_enabled": settings.session_refresh_enabled,
                     "session_refresh_cooldown_seconds": settings.session_refresh_cooldown_seconds,
                     "session_refresh_browser": settings.session_refresh_browser or "auto",
+                    "platform_circuit_threshold": settings.platform_circuit_threshold,
                 },
                 "onboarding": {
                     "current_step": state.current_step,
@@ -292,6 +324,8 @@ class DesktopCommandService:
                 "staged_counts": staged_counts,
                 "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
+                "recent_run_logs": recent_run_logs,
+                "circuit_broken": circuit_broken,
                 "subjects": [asdict(subject) for subject in subjects],
                 "subject_preferences": subject_preferences,
                 "subject_source_overrides": subject_source_overrides,

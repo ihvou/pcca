@@ -30,6 +30,24 @@ def _format_sent_time(sent_at: str | None) -> str:
     return sent_at
 
 
+def _combine_footer(*parts: str | None) -> str | None:
+    cleaned = [part.strip().rstrip(".") for part in parts if part and part.strip()]
+    return "\n\n".join(cleaned) + "." if cleaned else None
+
+
+def _format_circuit_breaker_footer(metadata: dict) -> str | None:
+    broken = metadata.get("circuit_broken") if isinstance(metadata, dict) else None
+    if not isinstance(broken, list) or not broken:
+        return None
+    skipped = metadata.get("circuit_skipped") if isinstance(metadata.get("circuit_skipped"), dict) else {}
+    lines = []
+    for platform in sorted(str(item) for item in broken):
+        skipped_count = int(skipped.get(platform) or 0)
+        suffix = f" {skipped_count} source(s) skipped." if skipped_count else ""
+        lines.append(f"{platform} paused after consecutive collection failures.{suffix}")
+    return "Collection safety note: " + " ".join(lines)
+
+
 @dataclass
 class JobRunner:
     subject_service: SubjectService
@@ -105,6 +123,14 @@ class JobRunner:
                 stats["skipped_missing_dependencies"] = True
                 return stats
 
+            circuit_footer = None
+            if self.run_log_repo is not None:
+                circuit_footer = _format_circuit_breaker_footer(
+                    await self.run_log_repo.latest_run_metadata(run_type="nightly_collection")
+                )
+                if circuit_footer:
+                    stats["collection_safety_note"] = circuit_footer
+
             if force_rebuild:
                 rebuilt = await self.digest_repo.delete_digests_for_date(
                     run_date=date.today(),
@@ -163,7 +189,9 @@ class JobRunner:
                         if preferences_changed:
                             footer_parts.append("preferences changed - re-ranked from current scores")
                         if footer_parts:
-                            no_new_footer = " + ".join(footer_parts).capitalize() + "."
+                            no_new_footer = " + ".join(
+                                part[:1].upper() + part[1:] for part in footer_parts
+                            ) + "."
                         logger.info(
                             "Smart briefs rebuilt run_id=%s subject=%s rebuilt=%d fresh_items=%d preferences_changed=%s latest_config_at=%s sent_at=%s",
                             run_id,
@@ -267,11 +295,11 @@ class JobRunner:
                             first_message_id = await self.telegram_service.send_no_briefs_message(
                                 chat_id=route.chat_id,
                                 subject_name=subject.name,
-                                footer=no_new_footer,
+                                footer=_combine_footer(no_new_footer, circuit_footer),
                                 thread_id=thread_id_int,
                             )
                         for index, brief in enumerate(payload.briefs, start=1):
-                            footer = no_new_footer if index == len(payload.briefs) else None
+                            footer = _combine_footer(no_new_footer, circuit_footer) if index == len(payload.briefs) else None
                             message_id = await self.telegram_service.send_brief_message(
                                 chat_id=route.chat_id,
                                 subject_name=subject.name,

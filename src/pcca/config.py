@@ -57,6 +57,7 @@ class Settings:
     session_refresh_enabled: bool = True
     session_refresh_cooldown_seconds: int = 1800
     session_refresh_browser: str | None = None
+    platform_circuit_threshold: int = 5
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -91,6 +92,10 @@ class Settings:
         session_refresh_browser = _env("PCCA_SESSION_REFRESH_BROWSER", None)
         if session_refresh_browser is not None:
             session_refresh_browser = session_refresh_browser.strip().lower() or None
+        try:
+            platform_circuit_threshold = int(_env("PCCA_PLATFORM_CIRCUIT_THRESHOLD", "5") or "5")
+        except ValueError:
+            platform_circuit_threshold = 5
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -109,6 +114,7 @@ class Settings:
             session_refresh_enabled=session_refresh_enabled,
             session_refresh_cooldown_seconds=max(0, session_refresh_cooldown_seconds),
             session_refresh_browser=session_refresh_browser,
+            platform_circuit_threshold=max(1, platform_circuit_threshold),
         )
 
     def ensure_dirs(self) -> None:

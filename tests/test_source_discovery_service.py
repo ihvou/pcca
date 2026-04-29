@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import pytest
 
+from pcca.db import Database
+from pcca.repositories.lookup_cache import LookupCacheRepository
 from pcca.services.source_discovery_service import ApplePodcastLookup, SourceDiscoveryService
 
 
@@ -82,3 +84,30 @@ async def test_discover_x_profile_url() -> None:
     assert len(discovered) == 1
     assert discovered[0].platform == "x"
     assert discovered[0].source_id == "borischerny"
+
+
+@pytest.mark.asyncio
+async def test_apple_podcast_lookup_uses_local_cache(tmp_path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    cache = LookupCacheRepository(conn=db.conn)
+    await cache.set_json(
+        "apple_podcast_lookup:123456789",
+        {
+            "feed_url": "https://example.com/acquired.xml",
+            "display_name": "Acquired",
+        },
+    )
+
+    service = SourceDiscoveryService(cache_repo=cache)
+    lookup = await service._lookup_apple_podcast_feed(
+        "https://podcasts.apple.com/us/podcast/acquired/id123456789"
+    )
+
+    assert lookup == ApplePodcastLookup(
+        feed_url="https://example.com/acquired.xml",
+        display_name="Acquired",
+    )
+    await db.close()

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
@@ -481,9 +483,7 @@ class FollowImportService:
             supported = ", ".join(self.supported_platforms())
             raise ValueError(f"Supported platforms for follow import: {supported}")
 
-        out: list[ImportedFollowSource] = []
-        for raw_source in imported:
-            out.extend(await self._normalize_imported_source(platform=normalized_platform, raw_source=raw_source))
+        out = await self._normalize_imported_sources(platform=normalized_platform, raw_sources=imported)
         logger.info(
             "Normalized imported follows platform=%s raw_count=%d normalized_count=%d",
             normalized_platform,
@@ -507,6 +507,43 @@ class FollowImportService:
             linked += 1
         logger.info("Imported %d %s follows into subject=%s", linked, normalized_platform, subject_name)
         return linked
+
+    async def _normalize_imported_sources(
+        self,
+        *,
+        platform: str,
+        raw_sources: list[str],
+    ) -> list[ImportedFollowSource]:
+        if platform != "apple_podcasts":
+            out: list[ImportedFollowSource] = []
+            for raw_source in raw_sources:
+                out.extend(await self._normalize_imported_source(platform=platform, raw_source=raw_source))
+            return out
+
+        try:
+            concurrency = max(1, int(os.getenv("PCCA_ITUNES_LOOKUP_CONCURRENCY", "4")))
+        except ValueError:
+            concurrency = 4
+        semaphore = asyncio.Semaphore(concurrency)
+        total = len(raw_sources)
+        completed = 0
+
+        async def normalize_one(raw_source: str) -> list[ImportedFollowSource]:
+            nonlocal completed
+            async with semaphore:
+                result = await self._normalize_imported_source(platform=platform, raw_source=raw_source)
+                completed += 1
+                if completed == total or completed % 10 == 0:
+                    logger.info(
+                        "Apple Podcasts follow normalization progress resolved=%d total=%d concurrency=%d",
+                        completed,
+                        total,
+                        concurrency,
+                    )
+                return result
+
+        rows = await asyncio.gather(*(normalize_one(raw_source) for raw_source in raw_sources))
+        return [source for row in rows for source in row]
 
     async def _normalize_imported_source(self, *, platform: str, raw_source: str) -> list[ImportedFollowSource]:
         source_value = raw_source.strip()

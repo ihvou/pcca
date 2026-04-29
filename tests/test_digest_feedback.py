@@ -319,6 +319,66 @@ async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(t
 
 
 @pytest.mark.asyncio
+async def test_smart_briefs_combines_fresh_and_preference_change_footer(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Older Claude Code workflow detail",
+        url="https://example.com/old",
+        score=0.72,
+        rationale="older but useful",
+    )
+
+    digest_repo = DigestRepository(conn=db.conn)
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=digest_repo,
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    await runner.run_smart_briefs()
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-2",
+        text="Fresh Claude Code release with concrete implementation steps",
+        url="https://example.com/new",
+        score=0.97,
+        rationale="fresh release details",
+    )
+    await db.conn.execute(
+        """
+        UPDATE subject_preferences
+        SET updated_at = datetime('now', '+1 minute')
+        WHERE subject_id = ?
+        """,
+        (subject.id,),
+    )
+    await db.conn.commit()
+
+    stats = await runner.run_smart_briefs()
+
+    assert stats["digests_rebuilt"] == 1
+    footer = fake_telegram.sent_messages[-1]["footer"]
+    assert footer is not None
+    assert "1 new brief since" in footer
+    assert "Preferences changed - re-ranked from current scores" in footer
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

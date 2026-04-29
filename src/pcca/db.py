@@ -350,6 +350,21 @@ MIGRATIONS: list[tuple[int, str]] = [
         SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP);
         """,
     ),
+    (
+        9,
+        """
+        ALTER TABLE run_logs ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+
+        CREATE TABLE IF NOT EXISTS source_lookup_cache (
+          cache_key TEXT PRIMARY KEY,
+          value_json TEXT NOT NULL,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_source_lookup_cache_updated_at
+          ON source_lookup_cache(updated_at);
+        """,
+    ),
 ]
 
 

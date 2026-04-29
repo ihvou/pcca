@@ -50,6 +50,7 @@ def _add_runtime_summary(zf: zipfile.ZipFile, settings: Settings) -> None:
             "session_refresh_enabled": settings.session_refresh_enabled,
             "session_refresh_cooldown_seconds": settings.session_refresh_cooldown_seconds,
             "session_refresh_browser": settings.session_refresh_browser,
+            "platform_circuit_threshold": settings.platform_circuit_threshold,
             "ollama_enabled": settings.ollama_enabled,
             "ollama_base_url": settings.ollama_base_url,
             "ollama_model": settings.ollama_model,
@@ -76,7 +77,7 @@ def _add_db_summary(zf: zipfile.ZipFile, db_path: Path) -> None:
             "path": str(db_path),
             "run_logs": _query_rows(
                 conn,
-                "SELECT id, run_type, started_at, ended_at, status, stats_json FROM run_logs ORDER BY id DESC LIMIT 50",
+                "SELECT id, run_type, started_at, ended_at, status, stats_json, metadata_json FROM run_logs ORDER BY id DESC LIMIT 50",
             ),
             "sources": _query_rows(
                 conn,

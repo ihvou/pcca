@@ -87,6 +87,12 @@ class XCollector:
                 """,
                 self.max_items,
             )
+            if not raw_items:
+                await self.session_manager.capture_empty_result_snapshot(
+                    page,
+                    platform=self.platform,
+                    source_id=source_id,
+                )
         except Exception as exc:
             await self.session_manager.capture_debug_snapshot(page, "x_collect_failed", error=exc)
             logger.exception("X collection failed for source=%s", source_id)
