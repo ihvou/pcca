@@ -45,6 +45,32 @@ class SourceService:
             is_monitored=True,
         )
 
+    async def update_source_identifier(
+        self,
+        *,
+        source_id: int,
+        account_or_channel_id: str,
+        display_name: str | None = None,
+    ) -> SubjectSourceRow | None:
+        row = await self.source_repo.update_identity(
+            source_id=source_id,
+            account_or_channel_id=account_or_channel_id.strip(),
+            display_name=display_name,
+        )
+        if row is None:
+            return None
+        return SubjectSourceRow(
+            source_id=row.id,
+            platform=row.platform,
+            account_or_channel_id=row.account_or_channel_id,
+            display_name=row.display_name,
+            priority=0,
+            status="active",
+            last_crawled_at=row.last_crawled_at,
+            follow_state=row.follow_state,
+            is_monitored=row.is_monitored,
+        )
+
     async def list_monitored_sources(self) -> list[SubjectSourceRow]:
         return await self.source_repo.list_monitored(active_only=True)
 

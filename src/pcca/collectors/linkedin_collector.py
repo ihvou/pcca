@@ -6,6 +6,12 @@ from dataclasses import dataclass
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import SessionChallengedError
+from pcca.collectors.linkedin_utils import (
+    build_linkedin_activity_url,
+    is_opaque_linkedin_member_id,
+    linked_in_profile_url,
+    normalize_linkedin_source_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -16,17 +22,21 @@ class LinkedInCollector:
     max_items: int = 20
     platform: str = "linkedin"
 
-    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
-        source = source_id.strip()
-        if source.startswith("http://") or source.startswith("https://"):
-            url = source
-        elif source.startswith("company/"):
-            url = f"https://www.linkedin.com/{source}/posts/"
-        else:
-            url = f"https://www.linkedin.com/in/{source}/recent-activity/all/"
-
+    async def resolve_source_identifier(self, source_id: str) -> str | None:
+        normalized = normalize_linkedin_source_id(source_id)
+        if not is_opaque_linkedin_member_id(normalized):
+            return normalized
         page = await self.session_manager.new_page(self.platform)
         try:
+            return await self._resolve_source_identifier_with_page(page, normalized)
+        finally:
+            await page.close()
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        page = await self.session_manager.new_page(self.platform)
+        try:
+            source = await self._resolve_source_identifier_with_page(page, source_id) or normalize_linkedin_source_id(source_id)
+            url = build_linkedin_activity_url(source)
             await page.goto(url, wait_until="domcontentloaded", timeout=60000)
             await page.wait_for_timeout(3500)
             current_url = page.url
@@ -113,6 +123,7 @@ class LinkedInCollector:
                 published_at=item.get("published_at"),
                 metadata={
                     "source_id": source_id,
+                    "resolved_source_id": source,
                     "reaction_count": item.get("reaction_count"),
                     "comment_count": item.get("comment_count"),
                     "repost_count": item.get("repost_count"),
@@ -121,3 +132,21 @@ class LinkedInCollector:
             )
             for item in raw_items
         ]
+
+    async def _resolve_source_identifier_with_page(self, page, source_id: str) -> str | None:
+        normalized = normalize_linkedin_source_id(source_id)
+        if not normalized or normalized.startswith("company/") or not is_opaque_linkedin_member_id(normalized):
+            return normalized
+
+        try:
+            await page.goto(linked_in_profile_url(normalized), wait_until="domcontentloaded", timeout=30000)
+            await page.wait_for_timeout(800)
+        except Exception:
+            logger.debug("LinkedIn opaque id redirect resolution failed source=%s", source_id, exc_info=True)
+            return normalized
+
+        resolved = normalize_linkedin_source_id(page.url)
+        if resolved and resolved != normalized and not is_opaque_linkedin_member_id(resolved):
+            logger.info("LinkedIn source resolved opaque_id=%s resolved=%s", normalized, resolved)
+            return resolved
+        return normalized

@@ -153,6 +153,31 @@ class JobRunner:
                     logger.info("Morning digest subject skipped no_routes run_id=%s subject=%s", run_id, subject.name)
                     continue
                 stats["subjects_with_routes"] += 1
+                if await self.digest_repo.subject_preferences_are_empty(subject_id=subject.id):
+                    stats["subjects_skipped_empty_preferences"] = int(stats.get("subjects_skipped_empty_preferences", 0)) + 1
+                    footer = (
+                        "This subject has no preference rules yet, so PCCA skipped Brief generation "
+                        "instead of sending noisy baseline matches. Refine or recreate the subject first."
+                    )
+                    logger.warning(
+                        "Morning digest subject skipped empty_preferences run_id=%s subject=%s",
+                        run_id,
+                        subject.name,
+                    )
+                    for route in routes:
+                        thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None
+                        try:
+                            await self.telegram_service.send_no_briefs_message(
+                                chat_id=route.chat_id,
+                                subject_name=subject.name,
+                                footer=footer,
+                                thread_id=thread_id_int,
+                            )
+                            stats["deliveries_sent"] += 1
+                        except Exception:
+                            logger.exception("Empty-preferences warning delivery failed for subject=%s", subject.name)
+                            stats["deliveries_failed"] += 1
+                    continue
 
                 digest = await self.digest_repo.get_or_create_digest(subject_id=subject.id, run_date=date.today())
                 stats["digests_created_or_reused"] += 1

@@ -8,6 +8,11 @@ from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
 from pcca.browser.session_manager import BrowserSessionManager
+from pcca.collectors.linkedin_utils import (
+    is_opaque_linkedin_member_id,
+    linked_in_profile_url,
+    normalize_linkedin_source_id,
+)
 from pcca.services.session_capture_service import SessionRefreshService
 from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
@@ -188,6 +193,7 @@ class FollowImportService:
                     break
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(800)
+            ids = await self._resolve_linkedin_import_ids(page, ids)
             out = [
                 f"{source_id}{RAW_SOURCE_DISPLAY_SEPARATOR}{display_name}"
                 for source_id, display_name in sorted(ids.items())[:limit]
@@ -200,6 +206,27 @@ class FollowImportService:
             raise
         finally:
             await page.close()
+
+    async def _resolve_linkedin_import_ids(self, page, ids: dict[str, str]) -> dict[str, str]:
+        resolved: dict[str, str] = {}
+        for source_id, display_name in ids.items():
+            normalized = normalize_linkedin_source_id(source_id)
+            if not is_opaque_linkedin_member_id(normalized):
+                resolved[normalized] = display_name
+                continue
+            try:
+                await page.goto(linked_in_profile_url(normalized), wait_until="domcontentloaded", timeout=30000)
+                await page.wait_for_timeout(800)
+                next_id = normalize_linkedin_source_id(page.url)
+            except Exception:
+                logger.debug("LinkedIn import id redirect resolution failed source=%s", source_id, exc_info=True)
+                next_id = normalized
+            if next_id and next_id != normalized and not is_opaque_linkedin_member_id(next_id):
+                logger.info("LinkedIn import resolved opaque_id=%s resolved=%s", normalized, next_id)
+                resolved[next_id] = display_name
+            else:
+                resolved[normalized] = display_name
+        return resolved
 
     async def import_youtube_subscriptions(self, *, limit: int = 200) -> list[str]:
         page = await self.session_manager.new_page("youtube")
@@ -576,6 +603,7 @@ class FollowImportService:
 
         display = display_override or source_value
         if platform == "linkedin":
+            source_value = normalize_linkedin_source_id(source_value)
             display = display_override or re.sub(r"^(in|company)/", "", source_value)
         return [
             ImportedFollowSource(

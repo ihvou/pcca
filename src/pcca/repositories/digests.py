@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import date
 from secrets import token_urlsafe
@@ -167,6 +168,25 @@ class DigestRepository:
             if row is not None and row["updated_at"]
         ]
         return max(candidates) if candidates else None
+
+    async def subject_preferences_are_empty(self, *, subject_id: int) -> bool:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT include_rules_json, exclude_rules_json
+                FROM subject_preferences
+                WHERE subject_id = ?
+                ORDER BY version DESC
+                LIMIT 1
+                """,
+                (subject_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return True
+        include_rules = _json_object(row["include_rules_json"])
+        exclude_rules = _json_object(row["exclude_rules_json"])
+        return not _has_rule_content(include_rules) and not _has_rule_content(exclude_rules)
 
     async def list_digest_items(self, *, digest_id: int) -> list[DigestItemRow]:
         rows = await (
@@ -427,3 +447,22 @@ class DigestRepository:
             thread_id=row["thread_id"],
             message_id=row["message_id"],
         )
+
+
+def _json_object(raw: str | None) -> dict:
+    try:
+        payload = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _has_rule_content(rules: dict) -> bool:
+    for value in rules.values():
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, list) and any(str(item).strip() for item in value):
+            return True
+        if isinstance(value, dict) and _has_rule_content(value):
+            return True
+    return False

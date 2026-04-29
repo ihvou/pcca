@@ -319,6 +319,50 @@ async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(t
 
 
 @pytest.mark.asyncio
+async def test_digest_skips_legacy_empty_rule_subjects_with_warning(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    # Bypass SubjectService to simulate a legacy row created before the
+    # non-empty-preferences invariant existed.
+    subject = await subject_repo.create("Legacy Empty Subject", include_terms=[], exclude_terms=[])
+    subject_service = SubjectService(repository=subject_repo)
+    routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
+    await routing_service.register_chat(chat_id=123, title="Test")
+    await routing_service.link_subject(subject_name="Legacy Empty Subject", chat_id=123)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Unrelated finance item that should not be sent from baseline scoring",
+        url="https://example.com/finance",
+        score=0.99,
+        rationale="legacy noisy baseline",
+    )
+
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    stats = await runner.run_smart_briefs()
+
+    assert stats["subjects_skipped_empty_preferences"] == 1
+    assert fake_telegram.sent_messages[-1]["brief"] is None
+    assert "no preference rules" in fake_telegram.sent_messages[-1]["footer"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_smart_briefs_combines_fresh_and_preference_change_footer(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

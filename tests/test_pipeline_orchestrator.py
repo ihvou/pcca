@@ -81,6 +81,33 @@ class SequenceCollector:
         ]
 
 
+class ResolvingCollector(DummyRSSCollector):
+    platform = "linkedin"
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[str] = []
+        self.collect_calls: list[str] = []
+
+    async def resolve_source_identifier(self, source_id: str) -> str:
+        self.resolve_calls.append(source_id)
+        return "in/boris-cherny"
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.collect_calls.append(source_id)
+        return [
+            CollectedItem(
+                platform="linkedin",
+                external_id="post-1",
+                author="Boris Cherny",
+                url="https://www.linkedin.com/feed/update/activity:1/",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+
+
 class FakeModelRouter:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -212,6 +239,50 @@ async def test_pipeline_refreshes_session_before_collecting_source(tmp_path: Pat
 
     assert refresh_service.platforms == ["x"]
     assert stats["items_collected"] == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_backfills_resolved_linkedin_identifier_before_collecting(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await source_service.monitor_source(
+        platform="linkedin",
+        account_or_channel_id="in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg",
+        display_name="Boris Cherny",
+    )
+
+    collector = ResolvingCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"linkedin": collector},
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert stats["items_collected"] == 1
+    assert collector.resolve_calls == ["in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg"]
+    assert collector.collect_calls == ["in/boris-cherny"]
+    assert await source_repo.get_by_identity(platform="linkedin", account_or_channel_id="in/boris-cherny")
+    old_source = await source_repo.get_by_identity(
+        platform="linkedin",
+        account_or_channel_id="in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg",
+    )
+    assert old_source is None
 
     await db.close()
 
@@ -542,6 +613,45 @@ async def test_platform_circuit_breaker_stops_remaining_sources_and_records_meta
     assert row is not None
     assert row["metadata_json"]
     assert '"circuit_broken": ["linkedin"]' in row["metadata_json"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_platform_circuit_breaker_counts_session_challenges(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    for idx in range(3):
+        await source_service.monitor_source(
+            platform="x",
+            account_or_channel_id=f"person{idx}",
+            display_name=f"Person {idx}",
+        )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"x": ChallengedCollector("x")},
+        circuit_threshold=2,
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert stats["sources_needing_reauth"] == 2
+    assert stats["sources_skipped_circuit_breaker"] == 1
+    assert stats["circuit_broken"] == ["x"]
 
     await db.close()
 

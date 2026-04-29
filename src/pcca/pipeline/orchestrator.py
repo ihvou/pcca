@@ -253,6 +253,29 @@ class PipelineOrchestrator:
                         source.platform,
                         source.account_or_channel_id,
                     )
+                    resolver = getattr(collector, "resolve_source_identifier", None)
+                    if callable(resolver):
+                        resolved_identifier = await resolver(source.account_or_channel_id)
+                        if (
+                            isinstance(resolved_identifier, str)
+                            and resolved_identifier
+                            and resolved_identifier != source.account_or_channel_id
+                        ):
+                            updated_source = await self.source_service.update_source_identifier(
+                                source_id=source.source_id,
+                                account_or_channel_id=resolved_identifier,
+                            )
+                            logger.info(
+                                "Resolved source identifier run_id=%s source_id=%s platform=%s old=%s new=%s",
+                                run_id,
+                                source.source_id,
+                                source.platform,
+                                source.account_or_channel_id,
+                                resolved_identifier,
+                            )
+                            source.account_or_channel_id = resolved_identifier
+                            if updated_source is not None:
+                                source.source_id = updated_source.source_id
                     items = await collector.collect_from_source(source.account_or_channel_id)
                     for item in items:
                         item.metadata = {

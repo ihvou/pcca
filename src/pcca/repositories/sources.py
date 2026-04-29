@@ -146,6 +146,71 @@ class SourceRepository:
         )
         await self.conn.commit()
 
+    async def update_identity(
+        self,
+        *,
+        source_id: int,
+        account_or_channel_id: str,
+        display_name: str | None = None,
+    ) -> SourceRow | None:
+        current = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                FROM sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            )
+        ).fetchone()
+        if current is None:
+            return None
+        platform = current["platform"]
+        existing = await self.get_by_identity(platform=platform, account_or_channel_id=account_or_channel_id)
+        if existing is not None and existing.id != source_id:
+            await self.conn.execute(
+                """
+                INSERT OR IGNORE INTO subject_sources(subject_id, source_id, priority, status, updated_at)
+                SELECT subject_id, ?, priority, status, CURRENT_TIMESTAMP
+                FROM subject_sources
+                WHERE source_id = ?
+                """,
+                (existing.id, source_id),
+            )
+            await self.conn.execute("DELETE FROM subject_sources WHERE source_id = ?", (source_id,))
+            await self.conn.execute(
+                """
+                UPDATE sources
+                SET is_monitored = 0
+                WHERE id = ?
+                """,
+                (source_id,),
+            )
+            await self.conn.commit()
+            return existing
+
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET account_or_channel_id = ?,
+                display_name = COALESCE(NULLIF(?, ''), display_name)
+            WHERE id = ?
+            """,
+            (account_or_channel_id, display_name or "", source_id),
+        )
+        await self.conn.commit()
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                FROM sources
+                WHERE id = ?
+                """,
+                (source_id,),
+            )
+        ).fetchone()
+        return self._source_row(row) if row is not None else None
+
     async def link_to_subject(self, subject_id: int, source_id: int, priority: int = 0) -> None:
         await self.conn.execute(
             """
