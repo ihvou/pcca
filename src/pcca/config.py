@@ -6,6 +6,14 @@ from pathlib import Path
 
 
 def _load_dotenv(path: Path = Path(".env")) -> None:
+    """Populate `os.environ` from `.env` for keys that aren't already set.
+
+    "Already set" means the env var is in `os.environ` AND has a non-empty
+    value. An existing empty placeholder (e.g., `PCCA_TELEGRAM_BOT_TOKEN=`
+    from a previous load against a not-yet-edited `.env`) is treated as
+    unset so the file is allowed to override it on the next load. Non-empty
+    real environment exports still take precedence over `.env`.
+    """
     if not path.exists():
         return
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -14,7 +22,10 @@ def _load_dotenv(path: Path = Path(".env")) -> None:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        if not key or key in os.environ:
+        if not key:
+            continue
+        existing = os.environ.get(key)
+        if existing is not None and existing != "":
             continue
         value = value.strip().strip("\"'")
         os.environ[key] = value
