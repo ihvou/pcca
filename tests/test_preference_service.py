@@ -25,7 +25,7 @@ async def test_refine_preferences_appends_terms(tmp_path: Path) -> None:
         subject_repo=subject_repo,
     )
 
-    await subject_service.create_subject("Agentic PM")
+    await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
     before = await pref_service.get_preferences_for_subject("Agentic PM")
     updated = await pref_service.refine_subject_rules(
         subject_name="Agentic PM",

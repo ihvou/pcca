@@ -101,7 +101,7 @@ async def _seed_subject_with_route(db: Database) -> tuple[SubjectService, Routin
     assert db.conn is not None
     subject_repo = SubjectRepository(conn=db.conn)
     subject_service = SubjectService(repository=subject_repo)
-    subject = await subject_service.create_subject("Agentic PM")
+    subject = await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
     routing_service = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
     await routing_service.register_chat(chat_id=123, title="Test")
     await routing_service.link_subject(subject_name="Agentic PM", chat_id=123)
@@ -234,6 +234,91 @@ async def test_digest_run_sends_one_message_per_brief_and_feedback_buttons_map_t
 
 
 @pytest.mark.asyncio
+async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    first_item_id = await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Old top item",
+        url="https://example.com/old",
+        score=0.95,
+        rationale="old top",
+    )
+    second_item_id = await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-2",
+        text="New preference winner",
+        url="https://example.com/new",
+        score=0.30,
+        rationale="new winner after refinement",
+    )
+
+    item_score_repo = ItemScoreRepository(conn=db.conn)
+    digest_repo = DigestRepository(conn=db.conn)
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=item_score_repo,
+        digest_repo=digest_repo,
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    await runner.run_morning_digest()
+    assert fake_telegram.sent_messages[0]["brief"].item_id == first_item_id
+
+    await item_score_repo.upsert_score(
+        item_id=first_item_id,
+        subject_id=subject.id,
+        pass1_score=0.2,
+        pass2_score=0.2,
+        practicality_score=0.2,
+        novelty_score=0.2,
+        trust_score=0.2,
+        noise_penalty=0.0,
+        final_score=0.2,
+        rationale="downgraded",
+    )
+    await item_score_repo.upsert_score(
+        item_id=second_item_id,
+        subject_id=subject.id,
+        pass1_score=0.99,
+        pass2_score=0.99,
+        practicality_score=0.99,
+        novelty_score=0.99,
+        trust_score=0.99,
+        noise_penalty=0.0,
+        final_score=0.99,
+        rationale="now best",
+    )
+    await db.conn.execute(
+        """
+        UPDATE subject_preferences
+        SET updated_at = datetime('now', '+1 minute')
+        WHERE subject_id = ?
+        """,
+        (subject.id,),
+    )
+    await db.conn.commit()
+
+    stats = await runner.run_smart_briefs()
+
+    assert stats["digests_rebuilt"] == 1
+    assert fake_telegram.sent_messages[-2]["brief"].item_id == second_item_id
+    assert "Preferences changed" in fake_telegram.sent_messages[-1]["footer"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
@@ -334,7 +419,7 @@ async def test_smart_briefs_resends_when_no_new_items_and_rebuilds_when_fresh_it
     assert fresh_stats["digests_rebuilt"] == 1
     assert fresh_stats["deliveries_sent"] == 1
     assert "Fresh Claude Code release" in fake_telegram.sent_messages[-1]["brief"].short_text
-    assert fake_telegram.sent_messages[-1]["footer"] is None
+    assert fake_telegram.sent_messages[-1]["footer"].startswith("1 new brief since ")
 
     digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
     delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()

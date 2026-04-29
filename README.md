@@ -30,25 +30,21 @@ cp .env.example .env
 pcca run-desktop
 ```
 
-The wizard handles everything else. In order:
+The wizard handles everything else through four tabs:
 
-1. **Save runtime settings** — paste the Telegram bot token, set timezone and
-   Brief time. The local agent restarts automatically.
-2. **Connect Telegram** — open your bot in Telegram and send `/start`. The bot
-   replies and links the chat for Brief delivery.
-3. **Capture sessions** — for each social platform you use (X, LinkedIn,
-   YouTube, Spotify, Substack, Medium, Apple Podcasts), make sure you're logged
-   in to it in your normal browser, then click **Capture Session** in the
-   wizard. PCCA reads your existing session cookies; it does not drive
-   anti-bot login flows.
-4. **Stage and monitor sources** — for each platform, click **Stage Follows**
-   to import who you already follow, prune the list, then click
-   **Monitor These Sources**. Sources are global; subjects query them.
-5. **Create your first subject** — describe what you want in free-form English
-   ("Practical AI-in-HR case studies, no hype"). The bot rephrases and
-   confirms.
-6. **Get your first Briefs** — click **Smoke Crawl + Test Briefs** in the
-   wizard, or send `/briefs` in Telegram.
+1. **Config** — paste the Telegram bot token, set timezone and Brief time.
+   Leaving the token field blank later preserves the saved token.
+2. **Use** — start the local agent, send `/start` to your Telegram bot, then
+   describe your first subject in free-form English. Thin one-liners become
+   drafts; the wizard asks for more detail before saving.
+3. **Sources** — choose a platform and click **Get Sources**. PCCA imports
+   follows/subscriptions from your already logged-in normal browser session and
+   asks for inline session repair only if needed.
+4. **Sources** — prune the list if needed, click **Monitor Pending Sources**,
+   then click **Get Content** to collect fresh items.
+5. **Use** — click **Get Brief** next to a subject, or send `/briefs` in
+   Telegram. Get Brief automatically rebuilds when new content or changed
+   preferences require it.
 
 That's it. Briefs arrive as separate Telegram messages with 👍 / 👎 / 🔖 / 🚫 /
 📖 More buttons on each.
@@ -62,7 +58,6 @@ In Telegram, with the bot:
 | You want to… | Do |
 |---|---|
 | Get today's Briefs | `/briefs` |
-| Force a fresh recompute | `/rebuild_briefs` |
 | React to a Brief | Tap 👍 / 👎 / 🔖 / 🚫 on the Brief message |
 | Expand a Brief | Tap 📖 More |
 | Give specific feedback | Reply to the Brief with text — *"less hype like this"*, *"no cursor content"*, etc. |
@@ -74,7 +69,8 @@ In Telegram, with the bot:
 If a session expires (you logged out somewhere), PCCA marks the source as
 `needs_reauth` and the wizard surfaces it. As long as you stay logged in to
 the platform in your normal browser, PCCA auto-refreshes its cookies before
-each scrape — manual re-capture is normally a one-time setup.
+each scrape. Use **Get Sources** again to trigger inline session repair when
+needed.
 
 ---
 
@@ -84,12 +80,10 @@ each scrape — manual re-capture is normally a one-time setup.
   it's empty, paste the token back and restart the agent. Logs at
   `.pcca/logs/pcca.log` will say `Telegram service will be disabled` if the
   token is missing.
-- **Capture Session is asking macOS Keychain repeatedly.** Click **Always
-  Allow** once per browser; subsequent reads stay silent.
 - **No items collected.** Run `/read_content`, then check the wizard's Logs
-  tab. Sources flagged `needs_reauth` need re-capture.
-- **Briefs feel stale after preference change.** Use `/rebuild_briefs` to
-  recompute today's Briefs from current scores.
+  tab. Sources flagged `needs_reauth` need session repair from the Sources tab.
+- **Briefs feel stale after preference change.** Use `/briefs`; it now rebuilds
+  automatically when preferences changed since the last delivered Brief.
 
 For deeper debugging, run `pcca debug-bundle` — it writes a redacted zip with
 logs and DB summaries (no raw cookies).

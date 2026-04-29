@@ -19,11 +19,25 @@ async def test_db_init_and_subject_create(tmp_path: Path) -> None:
     assert db.conn is not None
 
     service = SubjectService(repository=SubjectRepository(conn=db.conn))
-    created = await service.create_subject("Vibe Coding")
+    created = await service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     assert created.name == "Vibe Coding"
 
     listed = await service.list_subjects()
     assert len(listed) == 1
     assert listed[0].name == "Vibe Coding"
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_subject_service_rejects_empty_preferences(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    with pytest.raises(ValueError):
+        await service.create_subject("Thin Subject")
 
     await db.close()

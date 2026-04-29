@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol
@@ -9,6 +10,11 @@ from pcca.models import Subject
 from pcca.repositories.item_scores import CandidateItem
 
 EXPAND_BRIEF_ACTION = "__expand_brief__"
+DEFAULT_FULL_TEXT_CHARS = 1800
+MIN_FULL_TEXT_CHARS = 200
+MAX_FULL_TEXT_CHARS = 4000
+
+logger = logging.getLogger(__name__)
 
 
 class ButtonTokenFactory(Protocol):
@@ -61,6 +67,7 @@ class DigestRenderContext:
     run_date: date
     create_button_token: ButtonTokenFactory
     button_shortcuts: list[ButtonShortcut] = field(default_factory=list)
+    full_text_chars: int = DEFAULT_FULL_TEXT_CHARS
 
     def resolved_button_shortcuts(self) -> list[ButtonShortcut]:
         return self.button_shortcuts or default_button_shortcuts()
@@ -134,6 +141,7 @@ class TelegramDigestRenderer:
         _ = subject, context.run_date
         briefs: list[BriefPayload] = []
         shortcuts = context.resolved_button_shortcuts()
+        full_text_chars = clamp_full_text_chars(context.full_text_chars)
         for idx, candidate in enumerate(ranked_items, start=1):
             title = _first_line(candidate.title_or_text)
             reason = candidate.rationale or f"score={candidate.final_score:.2f}"
@@ -148,7 +156,7 @@ class TelegramDigestRenderer:
                 f"Brief {idx}: {title}\n"
                 f"{metadata_line}{url_line}\n\n"
                 f"Why this matched: {reason}\n\n"
-                f"{_full_body(candidate.title_or_text)}"
+                f"{_full_body(candidate.title_or_text, limit=full_text_chars)}"
             )
             buttons: list[BriefButtonPayload] = []
             for shortcut in shortcuts:
@@ -184,13 +192,34 @@ def _first_line(text: str) -> str:
     return first[:180] if first else "(no title)"
 
 
-def _full_body(text: str) -> str:
+def clamp_full_text_chars(value: int | None) -> int:
+    if value is None:
+        return DEFAULT_FULL_TEXT_CHARS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid brief_full_text_chars=%r; using default=%d", value, DEFAULT_FULL_TEXT_CHARS)
+        return DEFAULT_FULL_TEXT_CHARS
+    clamped = max(MIN_FULL_TEXT_CHARS, min(MAX_FULL_TEXT_CHARS, parsed))
+    if clamped != parsed:
+        logger.warning(
+            "Clamped brief_full_text_chars from %d to %d (allowed range %d-%d).",
+            parsed,
+            clamped,
+            MIN_FULL_TEXT_CHARS,
+            MAX_FULL_TEXT_CHARS,
+        )
+    return clamped
+
+
+def _full_body(text: str, *, limit: int = DEFAULT_FULL_TEXT_CHARS) -> str:
     normalized = "\n".join(line.strip() for line in (text or "").splitlines() if line.strip())
     if not normalized:
         return "(No additional text available.)"
-    if len(normalized) <= 1800:
+    limit = clamp_full_text_chars(limit)
+    if len(normalized) <= limit:
         return normalized
-    return normalized[:1800].rstrip() + "\n\n..."
+    return normalized[:limit].rstrip() + "\n\n..."
 
 
 def _metadata_line(candidate: CandidateItem) -> str:

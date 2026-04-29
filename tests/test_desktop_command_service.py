@@ -9,6 +9,7 @@ from pcca.db import Database
 from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.sources import SourceRepository
+from pcca.repositories.subject_drafts import SubjectDraftRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.desktop_command_service import (
     DesktopCommandService,
@@ -81,6 +82,26 @@ async def test_desktop_service_hides_token_and_persists_runtime_settings(tmp_pat
     assert "super-secret-token" not in str(state)
     assert state["onboarding"]["current_step"] == "runtime_configured"
     assert state["onboarding"]["timezone"] == "Europe/Kyiv"
+
+
+@pytest.mark.asyncio
+async def test_desktop_service_blank_token_preserves_existing_env_token(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text(
+        "PCCA_TELEGRAM_BOT_TOKEN=bot123:existing-token\nPCCA_TIMEZONE=UTC\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("PCCA_TELEGRAM_BOT_TOKEN", raising=False)
+    service = DesktopCommandService()
+
+    result = await service.save_runtime_settings(token="", timezone="Europe/Kyiv", digest_time="06:15")
+
+    assert result.ok is True
+    env_text = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert "PCCA_TELEGRAM_BOT_TOKEN=bot123:existing-token" in env_text
+    assert "PCCA_MORNING_CRON=15 6 * * *" in env_text
+    state = await service.get_state()
+    assert state["settings"]["telegram_token_configured"] is True
 
 
 @pytest.mark.asyncio
@@ -186,6 +207,159 @@ async def test_desktop_service_monitors_staged_sources_without_subject(tmp_path:
 
 
 @pytest.mark.asyncio
+async def test_desktop_subject_draft_requires_actionable_rules(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    thin = await service.draft_subject(text="Create subject: AI jobs")
+    assert thin.ok is True
+    assert thin.data["actionable"] is False
+
+    with pytest.raises(ValueError):
+        await service.confirm_subject_draft()
+
+    rich = await service.draft_subject(
+        text=(
+            "Track AI impact on IT jobs. Include credible labor market data, concrete company hiring changes, "
+            "developer productivity evidence. Avoid generic AI hype and unrelated finance news."
+        )
+    )
+    assert rich.data["actionable"] is True
+
+    saved = await service.confirm_subject_draft()
+    assert saved.ok is True
+
+    state = await service.get_state()
+    assert state["subjects"][0]["name"] == "AI jobs"
+    pref = state["subject_preferences"][str(state["subjects"][0]["id"])]
+    assert pref["include_terms"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_subject_refinement_updates_existing_subject(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject_repo = SubjectRepository(conn=db.conn)
+        subject = await SubjectRepository(conn=db.conn).create("Vibe Coding", include_terms=["claude code"])
+    finally:
+        await db.close()
+
+    draft = await service.draft_subject(
+        subject_id=subject.id,
+        text="Include practical release notes and avoid generic motivation.",
+    )
+    assert draft.data["actionable"] is True
+    saved = await service.confirm_subject_draft()
+    assert saved.ok is True
+
+    state = await service.get_state()
+    assert len(state["subjects"]) == 1
+    pref = state["subject_preferences"][str(subject.id)]
+    assert "claude code" in pref["include_terms"]
+    assert "practical release notes" in pref["include_terms"]
+    assert "generic motivation" in pref["exclude_terms"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_can_confirm_telegram_draft_and_assign_route(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject_repo = SubjectRepository(conn=db.conn)
+        routing = RoutingService(routing_repo=RoutingRepository(conn=db.conn), subject_repo=subject_repo)
+        await routing.register_chat(chat_id=555, title="Telegram Group")
+        await SubjectDraftRepository(conn=db.conn).upsert(
+            chat_id=555,
+            title="Agentic PM",
+            description_text="Track agentic PM workflows. Include practical product operations. Avoid generic PM slogans.",
+            include_terms=["agentic pm workflows", "product operations"],
+            exclude_terms=["generic pm slogans"],
+            quality_notes=None,
+            last_user_message="Create subject",
+        )
+    finally:
+        await db.close()
+
+    state = await service.get_state()
+    assert state["subject_drafts"][0]["chat_id"] == 555
+
+    saved = await service.confirm_subject_draft(chat_id=555)
+    assert saved.ok is True
+    state = await service.get_state()
+    assert state["subjects"][0]["name"] == "Agentic PM"
+    assert state["routes"][0]["chat_id"] == 555
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        routing = RoutingService(
+            routing_repo=RoutingRepository(conn=db.conn),
+            subject_repo=SubjectRepository(conn=db.conn),
+        )
+        await routing.register_chat(chat_id=777, title="Second Group")
+    finally:
+        await db.close()
+
+    reassigned = await service.reassign_subject_route(subject_id=state["subjects"][0]["id"], chat_id=777)
+    assert reassigned.ok is True
+    state = await service.get_state()
+    assert state["routes"][0]["chat_id"] == 777
+
+
+@pytest.mark.asyncio
+async def test_desktop_state_surfaces_subject_source_overrides(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject_repo = SubjectRepository(conn=db.conn)
+        subject = await subject_repo.create("Vibe Coding", include_terms=["vibe coding"])
+        source_service = SourceService(
+            source_repo=SourceRepository(conn=db.conn),
+            subject_repo=subject_repo,
+        )
+        await source_service.add_source_to_subject(
+            subject_name=subject.name,
+            platform="youtube",
+            account_or_channel_id="@noisy",
+            display_name="Noisy Channel",
+        )
+        await source_service.remove_source_from_subject(
+            subject_name=subject.name,
+            platform="youtube",
+            account_or_channel_id="@noisy",
+        )
+    finally:
+        await db.close()
+
+    state = await service.get_state()
+    overrides = state["subject_source_overrides"][str(subject.id)]
+    assert overrides[0]["display_name"] == "Noisy Channel"
+    assert overrides[0]["status"] == "inactive"
+
+
+@pytest.mark.asyncio
 async def test_desktop_state_surfaces_sources_needing_reauth(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)
@@ -201,7 +375,7 @@ async def test_desktop_state_surfaces_sources_needing_reauth(tmp_path: Path) -> 
             source_repo=SourceRepository(conn=db.conn),
             subject_repo=subject_repo,
         )
-        await SubjectRepository(conn=db.conn).create("Vibe Coding")
+        await SubjectRepository(conn=db.conn).create("Vibe Coding", include_terms=["vibe coding"])
         await source_service.add_source_to_subject(
             subject_name="Vibe Coding",
             platform="youtube",

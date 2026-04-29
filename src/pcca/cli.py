@@ -34,7 +34,14 @@ async def _init_db(settings: Settings) -> None:
         await db.close()
 
 
-async def _create_subject(settings: Settings, name: str, thread_id: str | None) -> None:
+async def _create_subject(
+    settings: Settings,
+    name: str,
+    thread_id: str | None,
+    *,
+    include_terms: list[str],
+    exclude_terms: list[str],
+) -> None:
     settings.ensure_dirs()
     db = Database(path=settings.db_path)
     await db.connect()
@@ -44,7 +51,12 @@ async def _create_subject(settings: Settings, name: str, thread_id: str | None) 
             raise RuntimeError("Database connection unavailable.")
         subject_repo = SubjectRepository(conn=db.conn)
         subject_service = SubjectService(repository=subject_repo)
-        subject = await subject_service.create_subject(name, telegram_thread_id=thread_id)
+        subject = await subject_service.create_subject(
+            name,
+            telegram_thread_id=thread_id,
+            include_terms=include_terms,
+            exclude_terms=exclude_terms,
+        )
         routing_service = RoutingService(
             routing_repo=RoutingRepository(conn=db.conn),
             subject_repo=subject_repo,
@@ -360,7 +372,11 @@ async def _confirm_staged_sources(
             raise RuntimeError("Database connection unavailable.")
         subject_repo = SubjectRepository(conn=db.conn)
         subject_service = SubjectService(repository=subject_repo)
-        created = await subject_service.create_subject(subject)
+        created = await subject_service.create_subject(
+            subject,
+            include_terms=include_terms,
+            exclude_terms=exclude_terms,
+        )
         source_service = SourceService(
             source_repo=SourceRepository(conn=db.conn),
             subject_repo=subject_repo,
@@ -416,9 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("init-db", help="Initialize local database schema")
 
-    create_subject_parser = sub.add_parser("create-subject", help="Create a subject")
+    create_subject_parser = sub.add_parser("create-subject", help="Create a subject with non-empty preferences")
     create_subject_parser.add_argument("--name", required=True, help="Subject name")
     create_subject_parser.add_argument("--thread-id", required=False, help="Optional Telegram thread id")
+    create_subject_parser.add_argument("--include", action="append", default=[], help="Include term (repeatable)")
+    create_subject_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
 
     sub.add_parser("list-subjects", help="List configured subjects")
 
@@ -571,7 +589,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "create-subject":
-        asyncio.run(_create_subject(settings, args.name, args.thread_id))
+        asyncio.run(
+            _create_subject(
+                settings,
+                args.name,
+                args.thread_id,
+                include_terms=args.include,
+                exclude_terms=args.exclude,
+            )
+        )
         return
 
     if args.command == "list-subjects":

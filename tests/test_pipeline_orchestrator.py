@@ -99,7 +99,7 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="rss",
@@ -152,7 +152,7 @@ async def test_pipeline_refreshes_session_before_collecting_source(tmp_path: Pat
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="x",
@@ -191,8 +191,8 @@ async def test_pipeline_collects_source_once_and_scores_for_all_subjects(tmp_pat
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
-    await subject_service.create_subject("Agentic PM")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
     await source_service.monitor_source(
         platform="rss",
         account_or_channel_id="feed://demo",
@@ -232,7 +232,7 @@ async def test_pipeline_backfills_existing_items_for_new_subject(tmp_path: Path)
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.monitor_source(
         platform="rss",
         account_or_channel_id="feed://demo",
@@ -251,7 +251,7 @@ async def test_pipeline_backfills_existing_items_for_new_subject(tmp_path: Path)
     first_stats = await orchestrator.run_nightly_collection()
     assert first_stats["items_scored"] == 1
 
-    await subject_service.create_subject("Agentic PM")
+    await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
     second_stats = await orchestrator.run_nightly_collection()
 
     assert second_stats["items_inserted"] == 0
@@ -275,8 +275,8 @@ async def test_pipeline_respects_inactive_source_override_for_subject(tmp_path: 
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
-    await subject_service.create_subject("Agentic PM")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="rss",
@@ -329,7 +329,7 @@ async def test_pipeline_model_rerank_only_runs_for_subject_shortlist(tmp_path: P
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.monitor_source(
         platform="rss",
         account_or_channel_id="feed://demo",
@@ -386,7 +386,7 @@ async def test_pipeline_marks_youtube_and_spotify_challenges_for_reauth(tmp_path
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform=platform,
@@ -427,7 +427,7 @@ async def test_pipeline_marks_challenged_sources_for_reauth(tmp_path: Path) -> N
     subject_service = SubjectService(repository=subject_repo)
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="x",

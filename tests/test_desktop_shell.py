@@ -84,3 +84,14 @@ def test_desktop_server_rejects_missing_token(tmp_path) -> None:
         response = client.get("/api/state", headers={"Authorization": "Bearer secret-token"})
         assert response.status_code == 200
     assert fake_service.stopped is True
+
+
+def test_desktop_wizard_has_tabbed_product_surface() -> None:
+    from pcca.desktop_web.server import INDEX_HTML
+
+    for tab in ("use", "sources", "config", "debug"):
+        assert f'data-tab="{tab}"' in INDEX_HTML
+    assert "Capture Session" not in INDEX_HTML
+    assert "Rebuild" not in INDEX_HTML
+    assert "Include terms" not in INDEX_HTML
+    assert "High-quality examples" not in INDEX_HTML

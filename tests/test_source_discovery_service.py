@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import pytest
 
-from pcca.services.source_discovery_service import SourceDiscoveryService
+from pcca.services.source_discovery_service import ApplePodcastLookup, SourceDiscoveryService
 
 
 class FakeAppleDiscoveryService(SourceDiscoveryService):
-    async def _lookup_apple_podcast_feed(self, apple_url: str) -> str | None:
+    async def _lookup_apple_podcast_feed(self, apple_url: str) -> ApplePodcastLookup:
         _ = apple_url
-        return "https://feeds.soundcloud.com/users/soundcloud:users:123/sounds.rss"
+        return ApplePodcastLookup(
+            feed_url="https://feeds.soundcloud.com/users/soundcloud:users:123/sounds.rss",
+            display_name="Acquired",
+        )
 
     async def _discover_rss_links(self, url: str) -> list[str]:
         _ = url
@@ -60,6 +63,7 @@ async def test_discover_apple_podcast_via_lookup() -> None:
     assert len(discovered) == 1
     assert discovered[0].platform == "apple_podcasts"
     assert "soundcloud" in discovered[0].source_id
+    assert discovered[0].display_name == "Acquired"
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,12 @@ class DiscoveredSource:
     reason: str
 
 
+@dataclass
+class ApplePodcastLookup:
+    feed_url: str
+    display_name: str
+
+
 class _FeedLinkParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__()
@@ -220,13 +226,19 @@ class SourceDiscoveryService:
                 return out
 
         if host == "podcasts.apple.com":
-            feed_url = await self._lookup_apple_podcast_feed(raw_url)
-            if feed_url:
+            lookup = await self._lookup_apple_podcast_feed(raw_url)
+            if lookup:
+                if isinstance(lookup, ApplePodcastLookup):
+                    feed_url = lookup.feed_url
+                    display_name = lookup.display_name
+                else:
+                    feed_url = lookup
+                    display_name = "apple-podcast-feed"
                 out.append(
                     DiscoveredSource(
                         platform="apple_podcasts",
                         source_id=feed_url,
-                        display_name="apple-podcast-feed",
+                        display_name=display_name,
                         confidence=0.92,
                         reason="apple podcasts iTunes lookup",
                     )
@@ -282,7 +294,7 @@ class SourceDiscoveryService:
         resolved = [urljoin(str(response.url), href) for href in parser.feed_hrefs]
         return self._dedupe_urls(resolved)
 
-    async def _lookup_apple_podcast_feed(self, apple_url: str) -> str | None:
+    async def _lookup_apple_podcast_feed(self, apple_url: str) -> ApplePodcastLookup | str | None:
         match = re.search(r"/id(\d+)", apple_url)
         if not match:
             return None
@@ -298,7 +310,13 @@ class SourceDiscoveryService:
                 return None
             feed = results[0].get("feedUrl")
             if isinstance(feed, str) and feed.startswith(("http://", "https://")):
-                return feed
+                display_name = (
+                    results[0].get("trackName")
+                    or results[0].get("collectionName")
+                    or results[0].get("artistName")
+                    or "apple-podcast-feed"
+                )
+                return ApplePodcastLookup(feed_url=feed, display_name=str(display_name).strip() or "apple-podcast-feed")
             return None
         except Exception:
             return None

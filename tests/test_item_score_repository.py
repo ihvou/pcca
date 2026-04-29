@@ -22,8 +22,8 @@ async def test_top_unsent_candidates_filters_only_current_subject_digest_history
     assert db.conn is not None
 
     subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
-    subject_a = await subject_service.create_subject("Agentic PM")
-    subject_b = await subject_service.create_subject("Vibe Coding")
+    subject_a = await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
+    subject_b = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
 
     item_repo = ItemRepository(conn=db.conn)
     item_stats = await item_repo.upsert_many(

@@ -40,3 +40,4 @@ class Subject:
     telegram_thread_id: str | None
     status: str
     created_at: str
+    brief_full_text_chars: int = 1800

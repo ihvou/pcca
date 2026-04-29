@@ -25,7 +25,7 @@ async def test_routing_service_links_subject_to_chat(tmp_path: Path) -> None:
         subject_repo=subject_repo,
     )
 
-    subject = await subject_service.create_subject("Vibe Coding")
+    subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await routing_service.register_chat(chat_id=123, title="Test")
     await routing_service.link_subject("Vibe Coding", chat_id=123, thread_id=None)
     await routing_service.link_subject("Vibe Coding", chat_id=123, thread_id=None)
@@ -55,8 +55,8 @@ async def test_ensure_routes_for_chat_links_to_existing_subjects(tmp_path: Path)
         subject_repo=subject_repo,
     )
 
-    subject_a = await subject_service.create_subject("Agentic PM")
-    subject_b = await subject_service.create_subject("Vibe Coding")
+    subject_a = await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
+    subject_b = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
 
     new_routes = await routing_service.ensure_routes_for_chat(chat_id=999, title="Test")
     assert new_routes == 2
@@ -87,8 +87,8 @@ async def test_register_chat_does_not_link_subjects_until_picker_selection(tmp_p
         subject_repo=subject_repo,
     )
 
-    subject_a = await subject_service.create_subject("Agentic PM")
-    subject_b = await subject_service.create_subject("Vibe Coding")
+    subject_a = await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
+    subject_b = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await routing_service.register_chat(chat_id=999, title="Subject Group")
 
     assert await routing_service.list_routes_for_chat(chat_id=999) == []
@@ -120,7 +120,7 @@ async def test_route_can_be_moved_and_unlinked(tmp_path: Path) -> None:
         subject_repo=subject_repo,
     )
 
-    subject = await subject_service.create_subject("Vibe Coding")
+    subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await routing_service.register_chat(chat_id=111, title="Old Group")
     await routing_service.register_chat(chat_id=222, title="New Group")
     await routing_service.link_subject_id(subject_id=subject.id, chat_id=111)
@@ -177,7 +177,7 @@ async def test_ensure_routes_for_subject_links_to_single_existing_chat(tmp_path:
 
     await routing_service.register_chat(chat_id=111, title="Personal")
 
-    subject = await subject_service.create_subject("Vibe Coding")
+    subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     new_routes = await routing_service.ensure_routes_for_subject(subject_name="Vibe Coding")
     assert new_routes == 1
 
@@ -209,7 +209,7 @@ async def test_ensure_routes_for_subject_does_not_auto_link_multiple_chats(tmp_p
 
     await routing_service.register_chat(chat_id=111, title="Agentic PM Group")
     await routing_service.register_chat(chat_id=222, title="Vibe Coding Group")
-    subject = await subject_service.create_subject("Vibe Coding")
+    subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
 
     new_routes = await routing_service.ensure_routes_for_subject(subject_name="Vibe Coding")
 
@@ -234,8 +234,8 @@ async def test_ensure_routes_for_subject_does_not_auto_link_second_subject(tmp_p
     )
 
     await routing_service.register_chat(chat_id=111, title="Only Registered Group")
-    first_subject = await subject_service.create_subject("Agentic PM")
-    second_subject = await subject_service.create_subject("Vibe Coding")
+    first_subject = await subject_service.create_subject("Agentic PM", include_terms=["agentic pm"])
+    second_subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
 
     new_routes = await routing_service.ensure_routes_for_subject(subject_name="Vibe Coding")
 
@@ -261,7 +261,7 @@ async def test_ensure_routes_preserves_thread_specific_routes(tmp_path: Path) ->
         subject_repo=subject_repo,
     )
 
-    subject = await subject_service.create_subject("Vibe Coding")
+    subject = await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await routing_service.register_chat(chat_id=42, title="Group")
     await routing_service.link_subject("Vibe Coding", chat_id=42, thread_id="7")
     new_routes = await routing_service.ensure_routes_for_subject(subject_name="Vibe Coding")

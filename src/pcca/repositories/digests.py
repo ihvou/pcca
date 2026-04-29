@@ -140,6 +140,34 @@ class DigestRepository:
         ).fetchone()
         return str(row["button_shortcuts_json"]) if row is not None and row["button_shortcuts_json"] else None
 
+    async def latest_subject_config_updated_at(self, *, subject_id: int) -> str | None:
+        pref_row = await (
+            await self.conn.execute(
+                """
+                SELECT MAX(updated_at) AS updated_at
+                FROM subject_preferences
+                WHERE subject_id = ?
+                """,
+                (subject_id,),
+            )
+        ).fetchone()
+        source_row = await (
+            await self.conn.execute(
+                """
+                SELECT MAX(updated_at) AS updated_at
+                FROM subject_sources
+                WHERE subject_id = ?
+                """,
+                (subject_id,),
+            )
+        ).fetchone()
+        candidates = [
+            str(row["updated_at"])
+            for row in (pref_row, source_row)
+            if row is not None and row["updated_at"]
+        ]
+        return max(candidates) if candidates else None
+
     async def list_digest_items(self, *, digest_id: int) -> list[DigestItemRow]:
         rows = await (
             await self.conn.execute(

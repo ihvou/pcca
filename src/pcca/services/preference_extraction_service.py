@@ -38,6 +38,20 @@ class ExtractedSubjectDraft:
     quality_notes: str | None = None
 
 
+def draft_has_actionable_rules(draft: ExtractedSubjectDraft | SubjectDraft) -> bool:
+    """Return True when a subject draft is specific enough to create a subject."""
+    include_terms = [term for term in draft.include_terms if term.strip()]
+    exclude_terms = [term for term in draft.exclude_terms if term.strip()]
+    if not include_terms and not exclude_terms:
+        return False
+    if exclude_terms or draft.quality_notes:
+        return True
+    word_count = len(re.findall(r"[^\W_]+", draft.description_text or "", flags=re.UNICODE))
+    # A bare "Create subject: Vibe Coding" produces title-shaped terms, but it
+    # does not say what to keep, drop, or consider high quality yet.
+    return word_count >= 8
+
+
 @dataclass
 class PreferenceExtractionService:
     model_router: ModelRouter | None = None

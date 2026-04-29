@@ -22,164 +22,248 @@ INDEX_HTML = r"""
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PCCA Onboarding</title>
+  <title>PCCA Wizard</title>
   <style>
     :root {
-      --ink: #17201a;
-      --muted: #637069;
-      --paper: #fffaf0;
-      --panel: rgba(255,255,255,.76);
-      --line: rgba(23,32,26,.14);
-      --accent: #1f7a5a;
-      --accent-2: #d9743f;
-      --bad: #b3261e;
-      --ok: #176b45;
-      --shadow: 0 24px 80px rgba(35, 45, 38, .18);
+      --bg: #08110f;
+      --panel: rgba(241, 247, 239, .08);
+      --panel-strong: rgba(241, 247, 239, .13);
+      --ink: #eef7ef;
+      --muted: #9ab0a3;
+      --line: rgba(238, 247, 239, .16);
+      --accent: #73f2b5;
+      --accent-2: #ffb86c;
+      --bad: #ff7777;
+      --ok: #73f2b5;
+      --shadow: 0 28px 90px rgba(0, 0, 0, .36);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
       min-height: 100vh;
-      font-family: ui-serif, Georgia, Cambria, "Times New Roman", serif;
       color: var(--ink);
+      font-family: Avenir Next, Trebuchet MS, Verdana, sans-serif;
       background:
-        radial-gradient(circle at 12% 18%, rgba(217,116,63,.22), transparent 28rem),
-        radial-gradient(circle at 82% 8%, rgba(31,122,90,.20), transparent 24rem),
-        linear-gradient(135deg, #f4ead7, #eef4df 52%, #e4efe9);
+        radial-gradient(circle at 12% 8%, rgba(115, 242, 181, .18), transparent 28rem),
+        radial-gradient(circle at 84% 18%, rgba(255, 184, 108, .15), transparent 24rem),
+        linear-gradient(135deg, #07100e 0%, #10211d 54%, #07100e 100%);
     }
-    .shell { max-width: 1180px; margin: 0 auto; padding: 36px 28px 28px; }
-    header { display: flex; justify-content: space-between; gap: 24px; align-items: flex-start; margin-bottom: 26px; }
-    h1 { font-size: clamp(36px, 6vw, 72px); line-height: .9; margin: 0; letter-spacing: -.055em; }
-    h2 { font-size: 24px; margin: 0 0 6px; letter-spacing: -.02em; }
-    p { color: var(--muted); line-height: 1.45; }
-    .badge { display: inline-flex; gap: 8px; align-items: center; border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; background: rgba(255,255,255,.55); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 18px; align-items: start; }
-    .steps { display: grid; gap: 14px; }
-    section { background: var(--panel); border: 1px solid var(--line); border-radius: 28px; padding: 20px; box-shadow: var(--shadow); backdrop-filter: blur(18px); }
-    section.done { opacity: .72; box-shadow: none; }
-    section.active { outline: 3px solid rgba(31,122,90,.22); }
-    .row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-    label { display: grid; gap: 6px; font-weight: 700; font-size: 14px; }
-    input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 15px; padding: 12px 13px; background: rgba(255,255,255,.82); color: var(--ink); font: 15px ui-sans-serif, system-ui, sans-serif; }
-    textarea { min-height: 76px; resize: vertical; }
-    button { border: 0; border-radius: 16px; padding: 12px 15px; color: white; background: var(--accent); cursor: pointer; font: 700 14px ui-sans-serif, system-ui, sans-serif; box-shadow: 0 10px 24px rgba(31,122,90,.22); }
-    button.secondary { background: #39463f; }
-    button.warn { background: var(--accent-2); }
-    button:disabled { opacity: .45; cursor: wait; }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
-    .sources { display: grid; gap: 8px; margin-top: 12px; }
-    .source { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid var(--line); background: rgba(255,255,255,.55); padding: 10px; border-radius: 16px; font: 13px ui-sans-serif, system-ui, sans-serif; }
-    .source strong { display: block; font-size: 14px; }
-    .source small { color: var(--muted); }
-    aside { position: sticky; top: 20px; display: grid; gap: 14px; }
-    .status-line { padding: 12px; border-radius: 16px; background: rgba(255,255,255,.55); border: 1px solid var(--line); font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
-    .ok { color: var(--ok); }
-    .bad { color: var(--bad); }
-    .logs { max-height: 300px; overflow: auto; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } aside { position: static; } .row { grid-template-columns: 1fr; } }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: .28;
+      background-image: linear-gradient(rgba(238,247,239,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(238,247,239,.05) 1px, transparent 1px);
+      background-size: 42px 42px;
+      mask-image: radial-gradient(circle at 50% 20%, black, transparent 74%);
+    }
+    .shell { max-width: 1160px; margin: 0 auto; padding: 24px; position: relative; }
+    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 18px; }
+    .brand h1 { margin: 0; font-size: clamp(30px, 5vw, 58px); line-height: .88; letter-spacing: -.055em; }
+    .brand p { max-width: 640px; margin: 12px 0 0; color: var(--muted); line-height: 1.45; }
+    .pill { border: 1px solid var(--line); background: rgba(8,17,15,.52); border-radius: 999px; padding: 9px 12px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
+    .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0; padding: 6px; border: 1px solid var(--line); background: rgba(8,17,15,.42); border-radius: 22px; box-shadow: var(--shadow); }
+    .tab { box-shadow: none; background: transparent; color: var(--muted); border-radius: 16px; padding: 12px; }
+    .tab.active { background: var(--accent); color: #07100e; }
+    .view { display: none; }
+    .view.active { display: block; animation: rise .24s ease-out; }
+    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 14px; align-items: start; }
+    .stack { display: grid; gap: 14px; }
+    .card { border: 1px solid var(--line); background: var(--panel); border-radius: 24px; padding: 18px; box-shadow: var(--shadow); backdrop-filter: blur(18px); }
+    .card.tight { padding: 14px; }
+    h2, h3 { margin: 0 0 8px; letter-spacing: -.025em; }
+    h2 { font-size: 24px; }
+    h3 { font-size: 17px; }
+    p { color: var(--muted); line-height: 1.45; margin: 0 0 12px; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
+    input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 15px; padding: 12px 13px; background: rgba(238,247,239,.08); color: var(--ink); font: 14px Avenir Next, Trebuchet MS, Verdana, sans-serif; outline: none; }
+    textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
+    input:focus, select:focus, textarea:focus { border-color: rgba(115,242,181,.72); box-shadow: 0 0 0 3px rgba(115,242,181,.12); }
+    button { border: 0; border-radius: 15px; padding: 11px 13px; color: #07100e; background: var(--accent); cursor: pointer; font: 700 13px Avenir Next, Trebuchet MS, Verdana, sans-serif; box-shadow: 0 12px 28px rgba(115,242,181,.16); }
+    button.secondary { background: rgba(238,247,239,.13); color: var(--ink); border: 1px solid var(--line); box-shadow: none; }
+    button.warn { background: var(--accent-2); color: #1d1208; }
+    button:disabled { opacity: .42; cursor: wait; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 18px; background: rgba(238,247,239,.06); }
+    .row.clickable { cursor: pointer; }
+    .row.selected { border-color: rgba(115,242,181,.7); background: rgba(115,242,181,.1); }
+    .row strong { display: block; font-size: 14px; }
+    .row small, .fine { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
+    .notice { border: 1px solid rgba(255,184,108,.34); background: rgba(255,184,108,.09); color: #ffd9ad; border-radius: 18px; padding: 12px; white-space: pre-wrap; }
+    .notice.bad { border-color: rgba(255,119,119,.38); background: rgba(255,119,119,.1); color: #ffc4c4; }
+    .notice.ok { border-color: rgba(115,242,181,.34); background: rgba(115,242,181,.09); color: #c8ffe0; }
+    .list { display: grid; gap: 8px; }
+    .logs, pre { max-height: 360px; overflow: auto; white-space: pre-wrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8d8ce; }
+    .source-toolbar { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; }
+    @media (max-width: 860px) { .grid, .split, .source-toolbar { grid-template-columns: 1fr; } header { display: block; } .tabs { grid-template-columns: repeat(2, 1fr); } }
   </style>
 </head>
 <body>
   <div class="shell">
     <header>
-      <div>
-        <h1>Personal signal,<br/>not platform noise.</h1>
-        <p>First-run dogfood flow: connect Telegram, capture sessions from your browser, choose sources to monitor, create your first subject, then send real test Briefs.</p>
+      <div class="brand">
+        <h1>Cut through<br/>the feed fog.</h1>
+        <p>A local-first curation agent: import followed sources, collect fresh content, and send Telegram Briefs shaped by your subject preferences.</p>
       </div>
-      <div class="badge" id="agentBadge">agent: checking</div>
+      <div class="pill" id="agentBadge">agent: checking</div>
     </header>
-    <div class="grid">
-      <main class="steps">
-        <section data-step="runtime_configured">
-          <h2>1. Runtime</h2>
-          <p>Set timezone, morning Brief time, and your individual Telegram bot token. The token is stored locally and never echoed back.</p>
-          <div class="row">
+
+    <nav class="tabs" aria-label="Wizard sections">
+      <button class="tab active" data-tab="use" onclick="showTab('use')">Use</button>
+      <button class="tab" data-tab="sources" onclick="showTab('sources')">Sources</button>
+      <button class="tab" data-tab="config" onclick="showTab('config')">Config</button>
+      <button class="tab" data-tab="debug" onclick="showTab('debug')">Debug</button>
+    </nav>
+
+    <section id="view-use" class="view active">
+      <div class="grid">
+        <div class="stack">
+          <div class="card">
+            <h2>Daily Control</h2>
+            <p>Start or stop the local agent, then ask for a fresh Brief per subject. Get Brief automatically rebuilds when new content or changed preferences require it.</p>
+            <div id="tokenWarning" class="notice bad" style="display:none"></div>
+            <div class="actions">
+              <button onclick="postAction('/api/agent/start')">Start</button>
+              <button class="secondary" onclick="postAction('/api/agent/stop')">Stop</button>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Subjects</h2>
+            <p id="subjectHint">Describe your first subject in plain language. The Wizard will draft rules first; it will not save an empty-preference subject.</p>
+            <div class="list" id="subjectsBox"></div>
+          </div>
+          <div class="card">
+            <h2>Pending Drafts</h2>
+            <p>Drafts from the Wizard and Telegram live in one queue. You can save or cancel them here; desktop drafts can also be confirmed from Telegram.</p>
+            <div class="list" id="pendingDraftsBox"></div>
+          </div>
+          <div class="card">
+            <h2>Add Subject</h2>
+            <p>Say what should be included, avoided, and what would count as a high-quality update. A thin one-liner becomes a draft, not a saved subject.</p>
+            <label>Free-form subject description
+              <textarea id="subjectText" placeholder="Example: Track practical Claude Code / agentic coding updates. Include concrete workflow tips, release details, evals, and examples from builders. Avoid biography, generic AI hype, Skills tutorials with no real lesson, and listicles."></textarea>
+            </label>
+            <div class="actions" style="margin-top:10px">
+              <button onclick="draftSubject()">Draft Subject</button>
+              <button id="saveDraftButton" onclick="confirmSubjectDraft()" disabled>Save Draft</button>
+              <button class="secondary" onclick="cancelSubjectDraft()">Cancel</button>
+            </div>
+            <div id="draftBox" class="notice" style="display:none; margin-top:12px"></div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card tight">
+            <h3>Subject Detail</h3>
+            <div id="subjectDetailBox" class="notice">Select a subject to inspect preferences, refine it, or reassign its Telegram route.</div>
+          </div>
+          <div class="card tight">
+            <h3>Telegram Routes</h3>
+            <p>Send /start to your bot from the chat or topic where Briefs should land.</p>
+            <div class="list" id="routesBox"></div>
+          </div>
+          <div class="card tight">
+            <h3>Current Status</h3>
+            <pre id="compactState">Loading...</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-sources" class="view">
+      <div class="grid">
+        <div class="stack">
+          <div class="card">
+            <h2>Get Sources</h2>
+            <p>Choose a platform and import follows/subscriptions from the logged-in browser session. If the session is missing, the Wizard will ask to run a repair flow inline.</p>
+            <div class="source-toolbar">
+              <label>Platform <select id="platform"></select></label>
+              <label>Limit <input id="limit" type="number" min="1" max="500" value="100" /></label>
+              <button onclick="getSources()">Get Sources</button>
+            </div>
+            <div class="actions" style="margin-top:10px"><button class="secondary" onclick="readContent()">Get Content</button></div>
+            <div id="sourceStatus" class="notice" style="display:none; margin-top:12px"></div>
+          </div>
+          <div class="card">
+            <h2>Source List</h2>
+            <div class="split">
+              <label>Filter platform <select id="sourceFilter" onchange="renderSources(lastState)"><option value="">All</option></select></label>
+              <label>Status <select id="statusFilter" onchange="renderSources(lastState)"><option value="">All</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="removed">Removed</option></select></label>
+            </div>
+            <div class="actions" style="margin-top:10px"><button class="secondary" onclick="monitorSources()">Monitor Pending Sources</button></div>
+            <div class="list" id="sourcesBox" style="margin-top:12px"></div>
+          </div>
+        </div>
+        <div class="stack">
+          <div class="card tight">
+            <h3>Needs Re-login</h3>
+            <div id="reauthBox" class="notice ok">No sources currently need re-login.</div>
+          </div>
+          <div class="card tight">
+            <h3>Import Counts</h3>
+            <pre id="sourceCounts">No imported sources yet.</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-config" class="view">
+      <div class="grid">
+        <div class="card">
+          <h2>Configuration</h2>
+          <p>The token field is intentionally blank on reload. Leaving it blank preserves the existing token; entering a new value replaces it.</p>
+          <div class="split">
             <label>Timezone <input id="timezone" value="UTC" /></label>
             <label>Brief time <input id="digestTime" value="08:30" /></label>
           </div>
-          <label style="margin-top:12px">Telegram bot token <input id="telegramToken" type="password" placeholder="123456:ABC..." /></label>
-          <div class="actions"><button onclick="saveSettings()">Save Runtime Settings</button></div>
-        </section>
-        <section data-step="db_initialized">
-          <h2>2. Local Agent</h2>
-          <p>Local storage and the Telegram/scheduler agent start automatically when this wizard opens. Closing the wizard stops the local agent. Then send <code>/start</code> to your Telegram bot.</p>
-          <div class="actions">
-            <button onclick="postAction('/api/agent/start')">Start Agent If Stopped</button>
-            <button class="secondary" onclick="postAction('/api/agent/stop')">Stop Agent</button>
+          <label style="margin-top:10px">Telegram bot token <input id="telegramToken" type="password" placeholder="Leave blank to keep existing token" /></label>
+          <div class="actions" style="margin-top:12px"><button onclick="saveSettings()">Save Config</button></div>
+          <div id="configStatus" class="notice" style="display:none; margin-top:12px"></div>
+        </div>
+        <div class="card tight">
+          <h3>Local Paths</h3>
+          <pre id="pathsBox">Loading...</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="view-debug" class="view">
+      <div class="grid">
+        <div class="stack">
+          <div class="card">
+            <h2>State</h2>
+            <pre id="stateBox">Loading...</pre>
           </div>
-        </section>
-        <section data-step="sources_imported">
-          <h2>3. Connect Sources</h2>
-          <p>Log into the platform in your normal browser first, then capture the local session. Use Auto unless you know exactly which browser/profile contains the login. PCCA does not drive social-login flows.</p>
-          <div class="row">
-            <label>Platform <select id="platform"></select></label>
-            <label>Browser for capture <select id="browser"><option value="">Auto (all Chromium browsers)</option><option value="chrome">Chrome</option><option value="arc">Arc</option><option value="brave">Brave</option><option value="edge">Edge</option></select></label>
+          <div class="card">
+            <h2>Logs</h2>
+            <pre id="logsBox" class="logs"></pre>
           </div>
-          <div class="row" style="margin-top:12px">
-            <label>Import limit <input id="limit" type="number" value="100" min="1" max="500" /></label>
+        </div>
+        <div class="stack">
+          <div class="card tight">
+            <h3>Debug Files</h3>
+            <pre id="debugFiles">Loading...</pre>
           </div>
-          <div class="actions">
-            <button class="warn" onclick="captureSession()">Capture Session</button>
-            <button onclick="stageFollows()">Stage Follows</button>
+          <div class="card tight">
+            <h3>Failures</h3>
+            <div id="failureBox" class="notice ok">No visible failures.</div>
           </div>
-          <div class="status-line" id="reauthSources">No sources currently need re-login.</div>
-        </section>
-        <section data-step="sources_reviewed">
-          <h2>4. Review Staged Sources</h2>
-          <p>Sources are monitored globally. Subjects are separate interests that look through the same collected content. Remove noisy accounts, then confirm the remaining sources for monitoring.</p>
-          <div class="actions">
-            <button onclick="monitorSources()">Monitor These Sources</button>
-            <button class="secondary" onclick="loadState()">Refresh Sources</button>
-          </div>
-          <div class="status-line" id="sourceSummary">No pending staged sources yet.</div>
-          <div class="sources" id="sources"></div>
-        </section>
-        <section data-step="subject_confirmed">
-          <h2>5. First Subject</h2>
-          <p>Describe what you want. This is the seed of the taste model for this topic.</p>
-          <label>Subject name <input id="subject" value="Vibe Coding" /></label>
-          <div class="row" style="margin-top:12px">
-            <label>Include terms <textarea id="include" placeholder="claude code, release notes, practical agent workflows"></textarea></label>
-            <label>Exclude terms <textarea id="exclude" placeholder="biography, generic motivation, listicles"></textarea></label>
-          </div>
-          <label style="margin-top:12px">High-quality examples <textarea id="examples" placeholder="Examples of posts/videos that would be worth waking up for"></textarea></label>
-          <div class="actions"><button onclick="confirmSubject()">Create Subject</button></div>
-        </section>
-        <section data-step="completed">
-          <h2>6. Smoke Crawl + Test Briefs</h2>
-          <p>The wizard only completes if at least one item is collected and at least one Telegram delivery succeeds.</p>
-          <div class="actions">
-            <button onclick="smoke()">Smoke Crawl + Test Briefs</button>
-            <button class="secondary" onclick="getBriefs()">Get Briefs</button>
-            <button class="secondary" onclick="rebuildDigest()">Rebuild Today's Briefs</button>
-          </div>
-          <div class="status-line" id="smokeStatus">Not run yet.</div>
-        </section>
-      </main>
-      <aside>
-        <section>
-          <h2>State</h2>
-          <div class="status-line" id="stateBox">Loading...</div>
-        </section>
-        <section>
-          <h2>Telegram Routes</h2>
-          <p>One row means one subject delivers Briefs into one Telegram chat.</p>
-          <div class="sources" id="routesBox"></div>
-        </section>
-        <section>
-          <h2>Logs</h2>
-          <div class="logs status-line" id="logs"></div>
-        </section>
-      </aside>
-    </div>
+        </div>
+      </div>
+    </section>
   </div>
 <script>
 const token = new URLSearchParams(location.search).get('token');
 const headers = {'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json'};
+let lastState = null;
 let busy = false;
-function splitTerms(value) { return value.split(',').map(v => v.trim()).filter(Boolean); }
-function setBusy(next) { busy = next; document.querySelectorAll('button').forEach(b => b.disabled = next); }
-function logLine(line) { const el = document.getElementById('logs'); el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent; }
+let selectedSubjectId = null;
+function setBusy(next) { busy = next; document.querySelectorAll('button').forEach(b => b.disabled = next && !b.classList.contains('tab')); if (lastState) renderDraft(lastState.subject_draft, lastState.subject_draft_actionable); }
+function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`)); }
+function notice(id, text, kind='') { const el = document.getElementById(id); el.style.display = text ? 'block' : 'none'; el.className = `notice ${kind}`.trim(); el.textContent = text || ''; }
+function logLine(line) { const el = document.getElementById('logsBox'); el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent; }
 async function request(path, opts={}) {
   const res = await fetch(path, {...opts, headers: {...headers, ...(opts.headers || {})}});
   const data = await res.json();
@@ -192,116 +276,222 @@ async function postAction(path, body={}) {
   finally { setBusy(false); }
 }
 async function saveSettings() {
-  return postAction('/api/settings', {token: telegramToken.value, timezone: timezone.value, digest_time: digestTime.value});
+  const data = await postAction('/api/settings', {token: telegramToken.value, timezone: timezone.value, digest_time: digestTime.value});
+  if (data) notice('configStatus', data.message, 'ok');
 }
-async function captureSession() { return postAction('/api/session/capture', {platform: platform.value, browser: browser.value}); }
-async function loginPlatform() { return postAction('/api/login', {platform: platform.value}); }
-async function stageFollows() { return postAction('/api/stage-follows', {platform: platform.value, limit: Number(limit.value || 100)}); }
-async function getBriefs() { return postAction('/api/briefs'); }
-async function rebuildDigest() { return postAction('/api/digest/rebuild'); }
-async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
-async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
-async function moveRoute(subjectId, fromChatId, fromThreadId, toChatId) { return postAction('/api/routes/move', {subject_id: subjectId, from_chat_id: fromChatId, from_thread_id: fromThreadId || '', to_chat_id: Number(toChatId)}); }
+async function getSources() {
+  notice('sourceStatus', `Importing ${platform.value} sources...`, '');
+  try {
+    setBusy(true);
+    const data = await request('/api/stage-follows', {method:'POST', body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+    logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
+    notice('sourceStatus', data.message, 'ok');
+    await loadState();
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    const shouldRepair = confirm(`${err.message}\n\nTry a session repair from your local browser, then import again?`);
+    if (shouldRepair) {
+      try {
+        notice('sourceStatus', `Repairing ${platform.value} session...`, '');
+        await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platform.value})});
+        const retry = await request('/api/stage-follows', {method:'POST', body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+        notice('sourceStatus', retry.message, 'ok');
+        await loadState();
+      } catch (repairErr) {
+        notice('sourceStatus', repairErr.message, 'bad');
+        alert(repairErr.message);
+      }
+    } else {
+      notice('sourceStatus', err.message, 'bad');
+    }
+  } finally {
+    setBusy(false);
+  }
+}
+async function readContent() { const data = await postAction('/api/content/read'); if (data) notice('sourceStatus', data.message, 'ok'); }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
-async function confirmSubject() {
-  return postAction('/api/confirm-staged-sources', {
-    subject: subject.value,
-    include_terms: splitTerms(include.value),
-    exclude_terms: splitTerms(exclude.value),
-    high_quality_examples: examples.value
-  });
+async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
+async function getBrief(subjectId) { return postAction('/api/briefs', {subject_id: subjectId}); }
+async function draftSubject(subjectId=null, text=null) {
+  const data = await postAction('/api/subjects/draft', {text: text || subjectText.value, subject_id: subjectId});
+  if (data && data.data && data.data.draft) renderDraft(data.data.draft, data.data.actionable);
 }
-async function smoke() {
-  const data = await postAction('/api/smoke');
-  if (data) {
-    const smoke = data.data.smoke;
-    smokeStatus.textContent = smoke.message;
-    smokeStatus.className = `status-line ${smoke.ok ? 'ok' : 'bad'}`;
-  }
+async function confirmSubjectDraft(chatId=null) { return postAction('/api/subjects/confirm-draft', chatId === null ? {} : {chat_id: chatId}); }
+async function cancelSubjectDraft(chatId=null) { if (chatId === null) subjectText.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
+async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
+async function assignRoute(subjectId, chatId) { return postAction('/api/routes/assign', {subject_id: subjectId, chat_id: Number(chatId)}); }
+function selectSubject(subjectId) {
+  selectedSubjectId = subjectId;
+  renderSubjects(lastState);
+  renderSubjectDetail(lastState);
 }
-function renderSources(rows, counts={}) {
-  const pending = rows.filter(r => r.status === 'pending');
-  sources.innerHTML = pending.length ? '' : '<p>No pending staged sources yet.</p>';
-  const countRows = Object.entries(counts).sort().map(([platform, count]) => `${platform}: ${count}`);
-  sourceSummary.textContent = pending.length
-    ? `${pending.length} source(s) waiting to monitor.\n${countRows.join('\n')}`
-    : 'No pending staged sources yet.';
-  for (const row of pending) {
+function renderDraft(draft, actionable) {
+  const box = document.getElementById('draftBox');
+  const save = document.getElementById('saveDraftButton');
+  if (!draft) { box.style.display = 'none'; save.disabled = true || busy; return; }
+  const include = (draft.include_terms || []).join(', ') || '(none yet)';
+  const exclude = (draft.exclude_terms || []).join(', ') || '(none yet)';
+  const hasRules = actionable !== undefined ? actionable : ((draft.include_terms || []).length || (draft.exclude_terms || []).length);
+  box.style.display = 'block';
+  box.className = hasRules ? 'notice ok' : 'notice';
+  box.textContent = [`Proposed title: ${draft.title}`, `Include: ${include}`, `Avoid: ${exclude}`, draft.quality_notes ? `Quality notes: ${draft.quality_notes}` : '', hasRules ? 'Ready to save.' : 'Needs more detail before saving.'].filter(Boolean).join('\n');
+  save.disabled = !hasRules || busy;
+}
+function renderSubjects(state) {
+  const subjects = state.subjects || [];
+  const prefs = state.subject_preferences || {};
+  subjectsBox.innerHTML = subjects.length ? '' : '<div class="notice">No subjects yet. Describe your first subject below.</div>';
+  subjectHint.textContent = subjects.length ? 'Each subject has its own preferences and its own Get Brief action.' : 'Describe your first subject in plain language. The Wizard will draft rules first; it will not save an empty-preference subject.';
+  for (const subject of subjects) {
+    const pref = prefs[String(subject.id)] || {};
+    const include = (pref.include_terms || []).join(', ') || 'no include rules shown';
+    const exclude = (pref.exclude_terms || []).join(', ') || 'no avoid rules shown';
     const div = document.createElement('div');
-    div.className = 'source';
-    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.account_or_channel_id}</small></div><button class="secondary">Remove</button>`;
-    div.querySelector('button').onclick = () => removeSource(row.id);
-    sources.appendChild(div);
+    div.className = `row clickable ${selectedSubjectId === subject.id ? 'selected' : ''}`;
+    div.innerHTML = `<div><strong>${subject.name}</strong><small>Include: ${include}</small><small>Avoid: ${exclude}</small><small>Full text cap: ${subject.brief_full_text_chars || 1800} chars</small></div><div class="actions"><button>Get Brief</button></div>`;
+    div.onclick = () => selectSubject(subject.id);
+    div.querySelector('button').onclick = (event) => { event.stopPropagation(); getBrief(subject.id); };
+    subjectsBox.appendChild(div);
+  }
+  if (!selectedSubjectId && subjects.length) selectedSubjectId = subjects[0].id;
+  if (selectedSubjectId && !subjects.some(subject => subject.id === selectedSubjectId)) selectedSubjectId = subjects[0] ? subjects[0].id : null;
+  renderSubjectDetail(state);
+}
+function renderPendingDrafts(state) {
+  const drafts = state.subject_drafts || [];
+  pendingDraftsBox.innerHTML = drafts.length ? '' : '<div class="notice ok">No pending subject drafts.</div>';
+  for (const draft of drafts) {
+    const include = (draft.include_terms || []).join(', ') || '(none yet)';
+    const exclude = (draft.exclude_terms || []).join(', ') || '(none yet)';
+    const origin = draft.chat_id === -1 ? 'Wizard' : `Telegram chat ${draft.chat_id}`;
+    const div = document.createElement('div');
+    div.className = 'row';
+    div.innerHTML = `<div><strong>${draft.title}</strong><small>${origin} · ${draft.updated_at}</small><small>Include: ${include}</small><small>Avoid: ${exclude}</small></div><div class="actions"></div>`;
+    const actions = div.querySelector('.actions');
+    const save = document.createElement('button');
+    save.textContent = 'Save';
+    save.disabled = !draft.actionable;
+    save.onclick = () => confirmSubjectDraft(draft.chat_id);
+    const cancel = document.createElement('button');
+    cancel.className = 'secondary';
+    cancel.textContent = 'Cancel';
+    cancel.onclick = () => cancelSubjectDraft(draft.chat_id);
+    actions.appendChild(save);
+    actions.appendChild(cancel);
+    pendingDraftsBox.appendChild(div);
   }
 }
-function renderReauth(rows) {
-  if (!rows.length) {
-    reauthSources.textContent = 'No sources currently need re-login.';
-    reauthSources.className = 'status-line ok';
+function renderSubjectDetail(state) {
+  if (!state || !selectedSubjectId) {
+    subjectDetailBox.className = 'notice';
+    subjectDetailBox.textContent = 'Select a subject to inspect preferences, refine it, or reassign its Telegram route.';
     return;
   }
-  const lines = rows.map(r => `- ${r.platform}: ${r.display_name} (${r.account_or_channel_id})`);
-  reauthSources.textContent = [
-    'Sources needing re-login:',
-    ...lines,
-    '',
-    'Log into the platform in your normal browser, then run Stage Follows or Read Content again. Capture Session is still available as a repair action.'
-  ].join('\n');
-  reauthSources.className = 'status-line bad';
+  const subject = (state.subjects || []).find(item => item.id === selectedSubjectId);
+  if (!subject) return;
+  const pref = (state.subject_preferences || {})[String(subject.id)] || {};
+  const routes = (state.routes || []).filter(route => route.subject_id === subject.id);
+  const suspended = ((state.subject_source_overrides || {})[String(subject.id)] || []).filter(row => row.status !== 'active');
+  const include = (pref.include_terms || []).join(', ') || '(none yet)';
+  const exclude = (pref.exclude_terms || []).join(', ') || '(none yet)';
+  const routeText = routes.length
+    ? routes.map(route => `${route.chat_title || 'chat'} (${route.chat_id}${route.thread_id ? ', topic ' + route.thread_id : ''})`).join('\\n')
+    : 'No route assigned yet.';
+  const suspendedText = suspended.length
+    ? suspended.map(row => `${row.platform}: ${row.display_name} (${row.status})`).join('\\n')
+    : 'No per-subject suspended sources.';
+  const chatOptions = (state.chats || []).map(chat => `<option value="${chat.chat_id}">${chat.title || 'chat ' + chat.chat_id}</option>`).join('');
+  subjectDetailBox.className = 'notice ok';
+  subjectDetailBox.innerHTML = `
+<strong>${subject.name}</strong>
+<div class="fine">Preferences v${pref.version || 0} · updated ${pref.updated_at || 'unknown'}</div>
+<div style="margin-top:10px"><strong>Include</strong><div class="fine">${include}</div></div>
+<div style="margin-top:10px"><strong>Avoid</strong><div class="fine">${exclude}</div></div>
+<div style="margin-top:10px"><strong>Route</strong><pre>${routeText}</pre></div>
+<div style="margin-top:10px"><strong>Suspended sources</strong><pre>${suspendedText}</pre></div>
+<label style="margin-top:10px">Refine in free form<textarea id="refineText" placeholder="Example: less hype, more primary sources, exclude generic Skills tutorials"></textarea></label>
+<div class="actions" style="margin-top:8px"><button id="refineButton">Draft Refinement</button></div>
+<label style="margin-top:10px">Route to Telegram chat<select id="routeChat">${chatOptions || '<option value="">No Telegram chats registered</option>'}</select></label>
+<div class="actions" style="margin-top:8px"><button id="assignRouteButton" ${chatOptions ? '' : 'disabled'}>Assign Route</button></div>
+  `.trim();
+  document.getElementById('refineButton').onclick = () => draftSubject(subject.id, document.getElementById('refineText').value);
+  document.getElementById('assignRouteButton').onclick = () => assignRoute(subject.id, document.getElementById('routeChat').value);
 }
-function renderRoutes(rows=[], chats=[]) {
-  routesBox.innerHTML = rows.length ? '' : '<p>No Telegram routes yet. Send /start to the bot from the group/chat you want to use.</p>';
+function renderSources(state) {
+  if (!state) return;
+  const platformValue = sourceFilter.value;
+  const statusValue = statusFilter.value;
+  const rows = (state.staged_sources || []).filter(r => (!platformValue || r.platform === platformValue) && (!statusValue || r.status === statusValue));
+  sourcesBox.innerHTML = rows.length ? '' : '<div class="notice">No sources match this filter yet.</div>';
   for (const row of rows) {
     const div = document.createElement('div');
-    div.className = 'source';
-    const title = row.chat_title || `chat ${row.chat_id}`;
-    const thread = row.thread_id ? ` · topic ${row.thread_id}` : '';
-    div.innerHTML = `<div><strong>${row.subject_name}</strong><small>${title} · ${row.chat_id}${thread}</small></div><div class="actions" style="margin:0"></div>`;
-    const actions = div.querySelector('.actions');
-    if (chats.length > 1) {
-      const select = document.createElement('select');
-      for (const chat of chats) {
-        select.add(new Option(chat.title || `chat ${chat.chat_id}`, chat.chat_id));
-      }
-      select.value = row.chat_id;
-      const move = document.createElement('button');
-      move.className = 'warn';
-      move.textContent = 'Move';
-      move.onclick = () => moveRoute(row.subject_id, row.chat_id, row.thread_id || '', select.value);
-      actions.appendChild(select);
-      actions.appendChild(move);
+    div.className = 'row';
+    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.status}</small><small>${row.account_or_channel_id}</small></div><div class="actions"></div>`;
+    if (row.status === 'pending') {
+      const btn = document.createElement('button');
+      btn.className = 'secondary';
+      btn.textContent = 'Remove';
+      btn.onclick = () => removeSource(row.id);
+      div.querySelector('.actions').appendChild(btn);
     }
-    const unlink = document.createElement('button');
-    unlink.className = 'secondary';
-    unlink.textContent = 'Unlink';
-    actions.appendChild(unlink);
-    unlink.onclick = () => unlinkRoute(row.subject_id, row.chat_id, row.thread_id || '');
+    sourcesBox.appendChild(div);
+  }
+  const counts = Object.entries(state.staged_counts || {}).sort().map(([k, v]) => `${k}: ${v}`).join('\n');
+  sourceCounts.textContent = counts || 'No pending imports.';
+}
+function renderRoutes(rows=[]) {
+  routesBox.innerHTML = rows.length ? '' : '<div class="notice">No Telegram routes yet.</div>';
+  for (const row of rows) {
+    const div = document.createElement('div');
+    div.className = 'row';
+    const title = row.chat_title || `chat ${row.chat_id}`;
+    div.innerHTML = `<div><strong>${row.subject_name}</strong><small>${title} · ${row.chat_id}${row.thread_id ? ' · topic ' + row.thread_id : ''}</small></div><div class="actions"><button class="secondary">Unlink</button></div>`;
+    div.querySelector('button').onclick = () => unlinkRoute(row.subject_id, row.chat_id, row.thread_id || '');
     routesBox.appendChild(div);
   }
 }
-function renderSteps(current) {
-  const order = ['runtime_configured','db_initialized','sources_imported','sources_reviewed','subject_confirmed','completed'];
-  const index = Math.max(0, order.indexOf(current));
-  document.querySelectorAll('section[data-step]').forEach(section => {
-    const i = order.indexOf(section.dataset.step);
-    section.classList.toggle('done', i < index);
-    section.classList.toggle('active', i === index || (current === 'start' && i === 0));
-  });
+function renderReauth(rows=[]) {
+  if (!rows.length) { reauthBox.className = 'notice ok'; reauthBox.textContent = 'No sources currently need re-login.'; return; }
+  reauthBox.className = 'notice bad';
+  reauthBox.textContent = ['Sources needing re-login:', ...rows.map(r => `${r.platform}: ${r.display_name}`)].join('\n');
+}
+function fillPlatformSelects(platforms=[]) {
+  if (platform.options.length === 0) platforms.forEach(p => platform.add(new Option(p, p)));
+  if (sourceFilter.options.length === 1) platforms.forEach(p => sourceFilter.add(new Option(p, p)));
+}
+function defaultTab(state) {
+  const hasToken = state.settings && state.settings.telegram_token_configured;
+  if (!hasToken) return 'config';
+  return 'use';
 }
 async function loadState() {
   try {
     const data = await request('/api/state');
-    const s = data.settings;
+    lastState = data;
+    const s = data.settings || {};
     timezone.value = s.timezone || 'UTC';
     digestTime.value = s.digest_time || '08:30';
-    if (platform.options.length === 0) data.platforms.forEach(p => platform.add(new Option(p, p)));
-    renderSources(data.staged_sources || [], data.staged_counts || {});
+    fillPlatformSelects(data.platforms || []);
+    renderSubjects(data);
+    renderDraft(data.subject_draft, data.subject_draft_actionable);
+    renderPendingDrafts(data);
+    renderSources(data);
+    renderRoutes(data.routes || []);
     renderReauth(data.reauth_sources || []);
-    renderRoutes(data.routes || [], data.chats || []);
-    renderSteps(data.onboarding.current_step || 'start');
     agentBadge.textContent = `agent: ${data.agent_running ? 'running' : 'stopped'}`;
-    stateBox.textContent = JSON.stringify({step: data.onboarding.current_step, browser_channel: s.browser_channel, token_configured: s.telegram_token_configured, session_refresh: `${s.session_refresh_enabled ? 'on' : 'off'} (${s.session_refresh_browser}, ${s.session_refresh_cooldown_seconds}s)`, log_file: s.log_file, debug_dir: s.debug_dir, subjects: data.subjects.map(x => x.name), routes: (data.routes || []).length}, null, 2);
-    logs.textContent = (data.logs || []).slice().reverse().join('\n');
+    tokenWarning.style.display = s.telegram_token_missing ? 'block' : 'none';
+    tokenWarning.textContent = s.telegram_status || '';
+    compactState.textContent = JSON.stringify({agent: data.agent_running ? 'running' : 'stopped', token: s.telegram_token_configured ? 'configured' : 'missing', subjects: (data.subjects || []).map(x => x.name), routes: (data.routes || []).length}, null, 2);
+    stateBox.textContent = JSON.stringify(data, null, 2);
+    pathsBox.textContent = JSON.stringify({data_dir: s.data_dir, db_path: s.db_path, log_file: s.log_file, debug_dir: s.debug_dir, browser_channel: s.browser_channel}, null, 2);
+    debugFiles.textContent = JSON.stringify({log_file: s.log_file, debug_dir: s.debug_dir}, null, 2);
+    logsBox.textContent = (data.logs || []).slice().reverse().join('\n');
+    const failures = [];
+    if (s.telegram_token_missing) failures.push(s.telegram_status);
+    if ((data.reauth_sources || []).length) failures.push(`${data.reauth_sources.length} source(s) need re-login.`);
+    failureBox.className = failures.length ? 'notice bad' : 'notice ok';
+    failureBox.textContent = failures.join('\n') || 'No visible failures.';
+    if (!document.body.dataset.initialTab) { showTab(defaultTab(data)); document.body.dataset.initialTab = '1'; }
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
 loadState();
@@ -459,6 +649,34 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(lambda _p: self.service.list_staged_sources(), request)
 
+        async def draft_subject(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.draft_subject(
+                    text=str(p.get("text") or ""),
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None,
+                ),
+                request,
+            )
+
+        async def confirm_subject_draft(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.confirm_subject_draft(
+                    chat_id=int(p.get("chat_id") or 0) if p.get("chat_id") is not None else None,
+                ),
+                request,
+            )
+
+        async def cancel_subject_draft(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.cancel_subject_draft(
+                    chat_id=int(p.get("chat_id") or 0) if p.get("chat_id") is not None else None,
+                ),
+                request,
+            )
+
         async def remove_staged_source(request):
             assert self.service is not None
             return await run_result(
@@ -486,9 +704,18 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(lambda _p: self.service.run_smoke_crawl_and_digest(), request)
 
+        async def read_content(request):
+            assert self.service is not None
+            return await run_result(lambda _p: self.service.read_content(), request)
+
         async def briefs(request):
             assert self.service is not None
-            return await run_result(lambda _p: self.service.get_briefs(), request)
+            return await run_result(
+                lambda p: self.service.get_briefs(
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None
+                ),
+                request,
+            )
 
         async def rebuild_digest(request):
             assert self.service is not None
@@ -517,6 +744,16 @@ class DesktopWebServer:
                 request,
             )
 
+        async def assign_route(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.reassign_subject_route(
+                    subject_id=int(p.get("subject_id") or 0),
+                    chat_id=int(p.get("chat_id") or 0),
+                ),
+                request,
+            )
+
         async def shutdown_service() -> None:
             if self.service is not None:
                 await self.service.shutdown()
@@ -541,14 +778,19 @@ class DesktopWebServer:
             Route("/api/session/capture", capture_session, methods=["POST"]),
             Route("/api/stage-follows", stage_follows, methods=["POST"]),
             Route("/api/staged-sources", staged_sources, methods=["GET"]),
+            Route("/api/subjects/draft", draft_subject, methods=["POST"]),
+            Route("/api/subjects/confirm-draft", confirm_subject_draft, methods=["POST"]),
+            Route("/api/subjects/cancel-draft", cancel_subject_draft, methods=["POST"]),
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),
             Route("/api/staged-sources/monitor", monitor_staged_sources, methods=["POST"]),
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
+            Route("/api/content/read", read_content, methods=["POST"]),
             Route("/api/briefs", briefs, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
             Route("/api/routes/unlink", unlink_route, methods=["POST"]),
             Route("/api/routes/move", move_route, methods=["POST"]),
+            Route("/api/routes/assign", assign_route, methods=["POST"]),
         ]
         app = Starlette(routes=routes, lifespan=lifespan)
         app.add_middleware(BaseHTTPMiddleware, dispatch=require_auth)

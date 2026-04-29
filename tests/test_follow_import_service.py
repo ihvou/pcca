@@ -106,6 +106,20 @@ async def test_import_sources_refreshes_session_before_reading_follows() -> None
 
 
 @pytest.mark.asyncio
+async def test_import_linkedin_sources_preserves_display_name_metadata() -> None:
+    fake_source_service = FakeSourceService(calls=[])
+    service = FakeFollowImportService(session_manager=None, source_service=fake_source_service)  # type: ignore[arg-type]
+
+    imported = await service._normalize_imported_source(
+        platform="linkedin",
+        raw_source="in/andrej-karpathy|||Andrej Karpathy",
+    )
+
+    assert imported[0].account_or_channel_id == "in/andrej-karpathy"
+    assert imported[0].display_name == "Andrej Karpathy"
+
+
+@pytest.mark.asyncio
 async def test_import_youtube_to_subject_wires_sources() -> None:
     fake_source_service = FakeSourceService(calls=[])
     service = FakeFollowImportService(session_manager=None, source_service=fake_source_service)  # type: ignore[arg-type]

@@ -340,6 +340,16 @@ MIGRATIONS: list[tuple[int, str]] = [
         DROP INDEX IF EXISTS idx_feedback_subject_item_type;
         """,
     ),
+    (
+        8,
+        """
+        ALTER TABLE subjects ADD COLUMN brief_full_text_chars INTEGER NOT NULL DEFAULT 1800;
+
+        ALTER TABLE subject_sources ADD COLUMN updated_at TEXT;
+        UPDATE subject_sources
+        SET updated_at = COALESCE(updated_at, CURRENT_TIMESTAMP);
+        """,
+    ),
 ]
 
 

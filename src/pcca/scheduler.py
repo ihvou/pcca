@@ -134,7 +134,10 @@ class JobRunner:
                 no_new_footer = None
                 if smart and existing_items:
                     fresh_candidates = await self.item_score_repo.top_unsent_candidates(subject_id=subject.id, limit=5)
-                    if fresh_candidates:
+                    latest_config_at = await self.digest_repo.latest_subject_config_updated_at(subject_id=subject.id)
+                    preferences_changed = bool(digest.sent_at and latest_config_at and latest_config_at > digest.sent_at)
+                    if fresh_candidates or preferences_changed:
+                        previous_sent_at = digest.sent_at
                         rebuilt = await self.digest_repo.delete_digests_for_date(
                             run_date=date.today(),
                             subject_ids={subject.id},
@@ -146,13 +149,30 @@ class JobRunner:
                         )
                         stats["digests_created_or_reused"] += 1
                         existing_items = []
-                        ordered_candidates = fresh_candidates
+                        ordered_candidates = (
+                            await self.item_score_repo.top_candidates(subject_id=subject.id, limit=5)
+                            if preferences_changed
+                            else fresh_candidates
+                        )
+                        footer_parts: list[str] = []
+                        if fresh_candidates:
+                            noun = "brief" if len(fresh_candidates) == 1 else "briefs"
+                            footer_parts.append(
+                                f"{len(fresh_candidates)} new {noun} since {_format_sent_time(previous_sent_at)}"
+                            )
+                        if preferences_changed:
+                            footer_parts.append("preferences changed - re-ranked from current scores")
+                        if footer_parts:
+                            no_new_footer = " + ".join(footer_parts).capitalize() + "."
                         logger.info(
-                            "Smart briefs found fresh candidates run_id=%s subject=%s rebuilt=%d fresh_items=%d",
+                            "Smart briefs rebuilt run_id=%s subject=%s rebuilt=%d fresh_items=%d preferences_changed=%s latest_config_at=%s sent_at=%s",
                             run_id,
                             subject.name,
                             rebuilt,
                             len(fresh_candidates),
+                            preferences_changed,
+                            latest_config_at,
+                            previous_sent_at,
                         )
                     else:
                         no_new_footer = f"No new briefs since {_format_sent_time(digest.sent_at)}."
@@ -223,6 +243,7 @@ class JobRunner:
                         run_date=date.today(),
                         create_button_token=create_button_token,
                         button_shortcuts=button_shortcuts,
+                        full_text_chars=subject.brief_full_text_chars,
                     ),
                 )
                 renderers_used = stats["renderers_used"]

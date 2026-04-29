@@ -212,11 +212,11 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def run_briefs_once(self) -> dict:
+    async def run_briefs_once(self, *, subject_ids: set[int] | None = None) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)
         try:
-            stats = await self.scheduler.job_runner.run_smart_briefs()
+            stats = await self.scheduler.job_runner.run_smart_briefs(subject_ids=subject_ids)
             logger.info("PCCA one-shot Briefs finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
             return stats
         finally:

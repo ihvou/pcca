@@ -19,10 +19,14 @@ from telegram.ext import (
 
 from pcca.digest_renderer import BriefPayload, EXPAND_BRIEF_ACTION
 from pcca.models import IntentAction
-from pcca.repositories.subject_drafts import SubjectDraft, SubjectDraftRepository
+from pcca.repositories.subject_drafts import DESKTOP_SUBJECT_DRAFT_CHAT_ID, SubjectDraft, SubjectDraftRepository
 from pcca.services.feedback_service import FeedbackService
 from pcca.services.intent_parser import parse_intent
-from pcca.services.preference_extraction_service import ExtractedSubjectDraft, PreferenceExtractionService
+from pcca.services.preference_extraction_service import (
+    ExtractedSubjectDraft,
+    PreferenceExtractionService,
+    draft_has_actionable_rules,
+)
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
@@ -384,7 +388,10 @@ class TelegramService:
         if intent.action is IntentAction.CREATE_SUBJECT:
             if not intent.subject_name:
                 if self.subject_draft_repo is None or self.preference_extractor is None:
-                    await update.message.reply_text("Tell me the subject name, for example: Create subject: Vibe Coding")
+                    await update.message.reply_text(
+                        "Subject creation requires preference extraction. Restart the local agent from the Wizard, "
+                        "then describe what to include and avoid."
+                    )
                     return
             if self.subject_draft_repo is not None and self.preference_extractor is not None:
                 draft = await self.preference_extractor.extract(text)
@@ -393,15 +400,9 @@ class TelegramService:
                 await self._save_subject_draft(update, draft=draft, last_user_message=text)
                 await update.message.reply_text(self._format_subject_draft(draft))
                 return
-            subject = await self.subject_service.create_subject(intent.subject_name, telegram_thread_id=thread_id)
-            await self.routing_service.link_subject(
-                subject_name=subject.name,
-                chat_id=update.effective_chat.id,
-                thread_id=thread_id,
-            )
             await update.message.reply_text(
-                f"Subject ready: {subject.name}\n"
-                "I will include it in nightly runs and morning Briefs."
+                "Subject creation requires preference extraction. Restart the local agent from the Wizard, "
+                "then describe what to include and avoid."
             )
             return
 
@@ -611,28 +612,32 @@ class TelegramService:
         chat_id = update.effective_chat.id
         draft = await self.subject_draft_repo.get(chat_id)
         if draft is None:
+            draft = await self.subject_draft_repo.get(DESKTOP_SUBJECT_DRAFT_CHAT_ID)
+        if draft is None:
             return False
 
         lowered = text.strip().lower()
         if lowered in {"cancel", "cancel subject", "discard subject", "abandon subject"}:
-            await self.subject_draft_repo.delete(chat_id)
+            await self.subject_draft_repo.delete(draft.chat_id)
             await update.message.reply_text("Subject draft discarded.")
             return True
 
         if lowered in {"save", "save it", "save subject", "confirm", "confirm subject", "yes", "looks good"}:
-            subject = await self.subject_service.create_subject(draft.title, telegram_thread_id=thread_id)
-            if draft.include_terms or draft.exclude_terms:
-                await self.preference_service.refine_subject_rules(
-                    subject_name=subject.name,
-                    include_terms=draft.include_terms,
-                    exclude_terms=draft.exclude_terms,
-                )
+            if not draft_has_actionable_rules(draft):
+                await update.message.reply_text(self._format_subject_draft(draft))
+                return True
+            subject = await self.subject_service.create_subject(
+                draft.title,
+                telegram_thread_id=thread_id,
+                include_terms=draft.include_terms,
+                exclude_terms=draft.exclude_terms,
+            )
             await self.routing_service.link_subject(
                 subject_name=subject.name,
                 chat_id=chat_id,
                 thread_id=thread_id,
             )
-            await self.subject_draft_repo.delete(chat_id)
+            await self.subject_draft_repo.delete(draft.chat_id)
             await update.message.reply_text(
                 f"Subject saved: {subject.name}\n"
                 "Future updates for this subject will use these preferences."
@@ -675,6 +680,15 @@ class TelegramService:
         include = ", ".join(draft.include_terms) if draft.include_terms else "(none yet)"
         exclude = ", ".join(draft.exclude_terms) if draft.exclude_terms else "(none yet)"
         quality = f"\nGood looks like: {draft.quality_notes}" if draft.quality_notes else ""
+        if not draft_has_actionable_rules(draft):
+            return (
+                f"I'll call this: {draft.title}\n"
+                f"Include: {include}\n"
+                f"Avoid: {exclude}"
+                f"{quality}\n\n"
+                "Tell me a bit more before I save it: what should I include, what should I avoid, "
+                "or what would be an example of a high-quality update?"
+            )
         return (
             f"I'll call this: {draft.title}\n"
             f"Include: {include}\n"

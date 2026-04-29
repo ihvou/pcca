@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 import aiosqlite
 
+DESKTOP_SUBJECT_DRAFT_CHAT_ID = -1
+
 
 @dataclass
 class SubjectDraft:
@@ -54,6 +56,26 @@ class SubjectDraftRepository:
             await self.conn.commit()
             return None
         return self._row_to_draft(row)
+
+    async def list_all(self) -> list[SubjectDraft]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT chat_id, title, description_text, extracted_rules_json, last_user_message, updated_at
+                FROM pending_subject_drafts
+                WHERE updated_at >= datetime('now', '-1 hour')
+                ORDER BY updated_at DESC
+                """
+            )
+        ).fetchall()
+        await self.conn.execute(
+            """
+            DELETE FROM pending_subject_drafts
+            WHERE updated_at < datetime('now', '-1 hour')
+            """
+        )
+        await self.conn.commit()
+        return [self._row_to_draft(row) for row in rows]
 
     async def upsert(
         self,

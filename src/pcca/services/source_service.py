@@ -57,6 +57,9 @@ class SourceService:
             raise ValueError(f"Subject not found: {subject_name}")
         return await self.source_repo.list_for_subject(subject.id)
 
+    async def list_source_overrides_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
+        return await self.source_repo.list_overrides_for_subject(subject_id)
+
     async def remove_source_from_subject(
         self,
         *,

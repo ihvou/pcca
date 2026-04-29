@@ -149,10 +149,13 @@ class SourceRepository:
     async def link_to_subject(self, subject_id: int, source_id: int, priority: int = 0) -> None:
         await self.conn.execute(
             """
-            INSERT INTO subject_sources(subject_id, source_id, priority, status)
-            VALUES (?, ?, ?, 'active')
+            INSERT INTO subject_sources(subject_id, source_id, priority, status, updated_at)
+            VALUES (?, ?, ?, 'active', CURRENT_TIMESTAMP)
             ON CONFLICT(subject_id, source_id)
-            DO UPDATE SET priority = excluded.priority, status = 'active'
+            DO UPDATE SET
+              priority = excluded.priority,
+              status = 'active',
+              updated_at = CURRENT_TIMESTAMP
             """,
             (subject_id, source_id, priority),
         )
@@ -162,7 +165,8 @@ class SourceRepository:
         cursor = await self.conn.execute(
             """
             UPDATE subject_sources
-            SET status = 'inactive'
+            SET status = 'inactive',
+                updated_at = CURRENT_TIMESTAMP
             WHERE subject_id = ? AND source_id = ? AND status = 'active'
             """,
             (subject_id, source_id),
@@ -266,6 +270,30 @@ class SourceRepository:
                   AND s.follow_state = 'active'
                   AND COALESCE(ss.status, 'active') = 'active'
                 ORDER BY COALESCE(ss.priority, 0) DESC, s.display_name ASC
+                """,
+                (subject_id,),
+            )
+        ).fetchall()
+        return [self._subject_source_row(row) for row in rows]
+
+    async def list_overrides_for_subject(self, subject_id: int) -> list[SubjectSourceRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT
+                  s.id AS source_id,
+                  s.platform,
+                  s.account_or_channel_id,
+                  s.display_name,
+                  ss.priority AS priority,
+                  ss.status AS status,
+                  s.last_crawled_at,
+                  s.follow_state,
+                  s.is_monitored
+                FROM subject_sources ss
+                JOIN sources s ON s.id = ss.source_id
+                WHERE ss.subject_id = ?
+                ORDER BY ss.status ASC, s.platform ASC, s.display_name ASC
                 """,
                 (subject_id,),
             )

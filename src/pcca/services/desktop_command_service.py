@@ -16,7 +16,10 @@ from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.sources import SourceRepository
+from pcca.repositories.subject_drafts import DESKTOP_SUBJECT_DRAFT_CHAT_ID, SubjectDraft, SubjectDraftRepository
 from pcca.repositories.subjects import SubjectRepository
+from pcca.services.model_router import ModelRouter
+from pcca.services.preference_extraction_service import PreferenceExtractionService, draft_has_actionable_rules
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.session_capture_service import SessionCaptureService
@@ -149,6 +152,15 @@ class DesktopCommandService:
     def settings(self) -> Settings:
         return self._settings_factory()
 
+    def preference_extractor(self) -> PreferenceExtractionService:
+        settings = self.settings()
+        model_router = ModelRouter(
+            enabled=settings.ollama_enabled,
+            ollama_base_url=settings.ollama_base_url,
+            ollama_model=settings.ollama_model,
+        )
+        return PreferenceExtractionService(model_router=model_router)
+
     async def startup_for_wizard(self) -> CommandResult:
         self.log("Wizard startup: initializing local storage and starting local agent.")
         try:
@@ -206,6 +218,34 @@ class DesktopCommandService:
                 subject_repo=subject_repo,
             )
             subjects = await SubjectService(repository=subject_repo).list_subjects()
+            preference_repo = SubjectPreferenceRepository(conn=db.conn)
+            subject_preferences = {}
+            subject_source_overrides = {}
+            for subject in subjects:
+                pref = await preference_repo.get_latest(subject.id)
+                if pref is None:
+                    subject_preferences[str(subject.id)] = {
+                        "version": 0,
+                        "include_terms": [],
+                        "exclude_terms": [],
+                        "updated_at": None,
+                    }
+                else:
+                    subject_preferences[str(subject.id)] = {
+                        "version": pref.version,
+                        "include_terms": list(pref.include_rules.get("topics") or []),
+                        "exclude_terms": list(pref.exclude_rules.get("topics") or []),
+                        "quality_rules": pref.quality_rules,
+                        "updated_at": pref.updated_at,
+                    }
+                subject_source_overrides[str(subject.id)] = [
+                    asdict(row)
+                    for row in await source_service.list_source_overrides_for_subject(subject.id)
+                    if row.status != "active"
+                ]
+            draft_repo = SubjectDraftRepository(conn=db.conn)
+            subject_draft = await draft_repo.get(DESKTOP_SUBJECT_DRAFT_CHAT_ID)
+            subject_drafts = await draft_repo.list_all()
             routing_service = RoutingService(
                 routing_repo=RoutingRepository(conn=db.conn),
                 subject_repo=subject_repo,
@@ -222,6 +262,12 @@ class DesktopCommandService:
                     "timezone": settings.timezone,
                     "digest_time": cron_to_digest_time(settings.morning_cron),
                     "telegram_token_configured": bool(settings.telegram_bot_token),
+                    "telegram_status": (
+                        "ready"
+                        if settings.telegram_bot_token
+                        else "Telegram service is disabled - token is missing. Add your bot token in Config."
+                    ),
+                    "telegram_token_missing": not bool(settings.telegram_bot_token),
                     "data_dir": str(settings.data_dir),
                     "db_path": str(settings.db_path),
                     "log_file": str(settings.data_dir / "logs" / "pcca.log"),
@@ -247,6 +293,16 @@ class DesktopCommandService:
                 "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
                 "subjects": [asdict(subject) for subject in subjects],
+                "subject_preferences": subject_preferences,
+                "subject_source_overrides": subject_source_overrides,
+                "subject_draft": asdict(subject_draft) if subject_draft is not None else None,
+                "subject_draft_actionable": (
+                    draft_has_actionable_rules(subject_draft) if subject_draft is not None else False
+                ),
+                "subject_drafts": [
+                    {**asdict(draft), "actionable": draft_has_actionable_rules(draft)}
+                    for draft in subject_drafts
+                ],
                 "routes": [asdict(route) for route in routes],
                 "chats": [asdict(chat) for chat in chats],
                 "platforms": SUPPORTED_ONBOARDING_PLATFORMS,
@@ -262,11 +318,13 @@ class DesktopCommandService:
 
     async def save_runtime_settings(self, *, token: str, timezone: str, digest_time: str) -> CommandResult:
         was_running = self.agent_running
+        stripped_token = token.strip()
         values = {
-            "PCCA_TELEGRAM_BOT_TOKEN": token.strip(),
             "PCCA_TIMEZONE": timezone.strip() or "UTC",
             "PCCA_MORNING_CRON": digest_time_to_cron(digest_time),
         }
+        if stripped_token:
+            values["PCCA_TELEGRAM_BOT_TOKEN"] = stripped_token
         write_env_values(values)
         os.environ.update(values)
         settings = self.settings()
@@ -285,7 +343,10 @@ class DesktopCommandService:
             )
         finally:
             await db.close()
-        self.log("Runtime settings saved. Telegram token is configured but not printed for safety.")
+        if stripped_token:
+            self.log("Runtime settings saved. Telegram token was updated but not printed for safety.")
+        else:
+            self.log("Runtime settings saved. Blank Telegram token field preserved the existing token, if any.")
         restart_warning = ""
         if was_running:
             self.log("Restarting local agent to apply runtime settings.")
@@ -299,7 +360,7 @@ class DesktopCommandService:
         return CommandResult(
             True,
             f"Runtime settings saved.{restart_warning}",
-            {"telegram_token_configured": bool(token.strip()), "agent_running": self.agent_running},
+            {"telegram_token_configured": bool(settings.telegram_bot_token), "agent_running": self.agent_running},
         )
 
     async def start_agent(self) -> CommandResult:
@@ -532,6 +593,8 @@ class DesktopCommandService:
         subject_name = subject.strip()
         if not subject_name:
             raise ValueError("Subject name is required.")
+        if not include_terms and not exclude_terms:
+            raise ValueError("Subject preferences cannot be empty. Use Add Subject and describe what to include/avoid.")
         settings = self.settings()
         settings.ensure_dirs()
         db = Database(path=settings.db_path)
@@ -542,7 +605,11 @@ class DesktopCommandService:
                 raise RuntimeError("Database connection unavailable.")
             subject_repo = SubjectRepository(conn=db.conn)
             subject_service = SubjectService(repository=subject_repo)
-            created = await subject_service.create_subject(subject_name)
+            created = await subject_service.create_subject(
+                subject_name,
+                include_terms=include_terms,
+                exclude_terms=exclude_terms,
+            )
             source_service = SourceService(
                 source_repo=SourceRepository(conn=db.conn),
                 subject_repo=subject_repo,
@@ -587,6 +654,181 @@ class DesktopCommandService:
             {"subject": subject_name, "monitored_sources": len(staged), "new_routes": new_routes},
         )
 
+    async def draft_subject(self, *, text: str, subject_id: int | None = None) -> CommandResult:
+        normalized = " ".join(text.split()).strip()
+        if not normalized:
+            raise ValueError("Describe the subject first.")
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            draft_repo = SubjectDraftRepository(conn=db.conn)
+            previous = await draft_repo.get(DESKTOP_SUBJECT_DRAFT_CHAT_ID)
+            if subject_id is not None and subject_id > 0:
+                subject_repo = SubjectRepository(conn=db.conn)
+                subject = await subject_repo.get_by_id(subject_id)
+                pref = await SubjectPreferenceRepository(conn=db.conn).get_latest(subject.id)
+                previous = SubjectDraft(
+                    chat_id=DESKTOP_SUBJECT_DRAFT_CHAT_ID,
+                    title=subject.name,
+                    description_text=(
+                        f"Existing subject: {subject.name}\n"
+                        f"Include: {', '.join((pref.include_rules.get('topics') if pref else []) or [])}\n"
+                        f"Avoid: {', '.join((pref.exclude_rules.get('topics') if pref else []) or [])}"
+                    ),
+                    include_terms=list((pref.include_rules.get("topics") if pref else []) or []),
+                    exclude_terms=list((pref.exclude_rules.get("topics") if pref else []) or []),
+                    quality_notes=None,
+                    last_user_message="",
+                    updated_at="",
+                )
+            draft = await self.preference_extractor().extract(normalized, previous=previous)
+            if subject_id is not None and subject_id > 0:
+                draft.title = previous.title
+            saved = await draft_repo.upsert(
+                chat_id=DESKTOP_SUBJECT_DRAFT_CHAT_ID,
+                title=draft.title,
+                description_text=draft.description_text,
+                include_terms=draft.include_terms,
+                exclude_terms=draft.exclude_terms,
+                quality_notes=draft.quality_notes,
+                last_user_message=normalized,
+            )
+        finally:
+            await db.close()
+        actionable = draft_has_actionable_rules(saved)
+        message = (
+            "Subject draft ready to save."
+            if actionable
+            else "Tell me more before saving: what should be included, avoided, or considered high quality?"
+        )
+        return CommandResult(
+            True,
+            message,
+            {"draft": asdict(saved), "actionable": actionable},
+        )
+
+    async def confirm_subject_draft(self, *, chat_id: int | None = None) -> CommandResult:
+        draft_chat_id = chat_id if chat_id is not None else DESKTOP_SUBJECT_DRAFT_CHAT_ID
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            draft_repo = SubjectDraftRepository(conn=db.conn)
+            draft = await draft_repo.get(draft_chat_id)
+            if draft is None:
+                raise ValueError("No subject draft is waiting to be saved.")
+            if not draft_has_actionable_rules(draft):
+                raise ValueError(
+                    "Subject preferences are still too thin. Add what to include, what to avoid, "
+                    "or an example of high-quality content."
+                )
+            subject_repo = SubjectRepository(conn=db.conn)
+            subject_service = SubjectService(repository=subject_repo)
+            existing = await subject_repo.get_by_name(draft.title)
+            if existing is None:
+                created = await subject_service.create_subject(
+                    draft.title,
+                    include_terms=draft.include_terms,
+                    exclude_terms=draft.exclude_terms,
+                )
+            else:
+                created = existing
+                await PreferenceService(
+                    preference_repo=SubjectPreferenceRepository(conn=db.conn),
+                    subject_repo=subject_repo,
+                ).refine_subject_rules(
+                    subject_name=created.name,
+                    include_terms=draft.include_terms,
+                    exclude_terms=draft.exclude_terms,
+                )
+            routing_service = RoutingService(
+                routing_repo=RoutingRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            if draft_chat_id > 0:
+                await routing_service.link_subject_id(subject_id=created.id, chat_id=draft_chat_id)
+                new_routes = 1
+            else:
+                new_routes = await routing_service.ensure_routes_for_subject(subject_name=created.name)
+            await draft_repo.delete(draft_chat_id)
+            await OnboardingRepository(conn=db.conn).update_state(
+                current_step="subject_confirmed",
+                subject_name=created.name,
+                include_terms=draft.include_terms,
+                exclude_terms=draft.exclude_terms,
+                high_quality_examples=draft.quality_notes,
+                completed=False,
+            )
+        finally:
+            await db.close()
+        self.log(f"Created subject '{created.name}' from free-form draft.")
+        return CommandResult(
+            True,
+            f"Subject saved: {created.name}.",
+            {"subject": created.name, "new_routes": new_routes},
+        )
+
+    async def cancel_subject_draft(self, *, chat_id: int | None = None) -> CommandResult:
+        draft_chat_id = chat_id if chat_id is not None else DESKTOP_SUBJECT_DRAFT_CHAT_ID
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            await SubjectDraftRepository(conn=db.conn).delete(draft_chat_id)
+        finally:
+            await db.close()
+        return CommandResult(True, "Subject draft cancelled.")
+
+    async def reassign_subject_route(self, *, subject_id: int, chat_id: int) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            subject_repo = SubjectRepository(conn=db.conn)
+            subject = await subject_repo.get_by_id(subject_id)
+            routing_service = RoutingService(
+                routing_repo=RoutingRepository(conn=db.conn),
+                subject_repo=subject_repo,
+            )
+            routes = await routing_service.list_routes_for_subject(subject_id)
+            if routes:
+                moved = await routing_service.move_subject_route(
+                    subject_id=subject_id,
+                    from_chat_id=routes[0].chat_id,
+                    from_thread_id=routes[0].thread_id,
+                    to_chat_id=chat_id,
+                    to_thread_id=None,
+                )
+                changed = 1 if moved else 0
+            else:
+                await routing_service.link_subject_id(subject_id=subject_id, chat_id=chat_id)
+                changed = 1
+        finally:
+            await db.close()
+        self.log(f"Route assigned subject_id={subject_id} chat_id={chat_id}.")
+        return CommandResult(
+            True,
+            f"Route assigned for {subject.name}.",
+            {"subject_id": subject_id, "chat_id": chat_id, "changed": changed},
+        )
+
     async def run_smoke_crawl_and_digest(self) -> CommandResult:
         self.log("Running smoke crawl.")
         nightly_app = PCCAApp(settings=self.settings())
@@ -622,9 +864,20 @@ class DesktopCommandService:
             },
         )
 
-    async def get_briefs(self) -> CommandResult:
-        self.log("Getting Briefs.")
-        stats = await self._run_briefs_with_available_agent()
+    async def read_content(self) -> CommandResult:
+        self.log("Reading content now.")
+        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
+            stats = await self._agent_app.pipeline_orchestrator.run_nightly_collection()
+        else:
+            app = PCCAApp(settings=self.settings())
+            stats = await app.run_nightly_once()
+        self.log(f"Read content finished: {json.dumps(stats or {}, sort_keys=True)}")
+        return CommandResult(True, "Content read finished.", {"nightly_stats": stats or {}})
+
+    async def get_briefs(self, *, subject_id: int | None = None) -> CommandResult:
+        subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
+        self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
+        stats = await self._run_briefs_with_available_agent(subject_ids=subject_ids)
         self.log(f"Briefs finished: {json.dumps(stats or {}, sort_keys=True)}")
         return CommandResult(
             True,
@@ -642,13 +895,13 @@ class DesktopCommandService:
             {"digest_stats": stats or {}},
         )
 
-    async def _run_briefs_with_available_agent(self) -> dict:
+    async def _run_briefs_with_available_agent(self, *, subject_ids: set[int] | None = None) -> dict:
         if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
             self.log("Using running local agent for Brief delivery.")
-            return await self._agent_app.scheduler.job_runner.run_smart_briefs()
+            return await self._agent_app.scheduler.job_runner.run_smart_briefs(subject_ids=subject_ids)
         self.log("Local agent is unavailable; starting one-shot Brief delivery.")
         app = PCCAApp(settings=self.settings())
-        return await app.run_briefs_once()
+        return await app.run_briefs_once(subject_ids=subject_ids)
 
     async def _rebuild_briefs_with_available_agent(self) -> dict:
         if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):

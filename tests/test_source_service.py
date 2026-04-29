@@ -24,7 +24,7 @@ async def test_add_and_list_sources_for_subject(tmp_path: Path) -> None:
         subject_repo=SubjectRepository(conn=db.conn),
     )
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="x",
@@ -54,7 +54,7 @@ async def test_remove_source_from_subject(tmp_path: Path) -> None:
         subject_repo=SubjectRepository(conn=db.conn),
     )
 
-    await subject_service.create_subject("Vibe Coding")
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
     await source_service.add_source_to_subject(
         subject_name="Vibe Coding",
         platform="x",

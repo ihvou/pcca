@@ -11,6 +11,7 @@ from pcca.services.source_discovery_service import SourceDiscoveryService
 from pcca.services.source_service import SourceService
 
 logger = logging.getLogger(__name__)
+RAW_SOURCE_DISPLAY_SEPARATOR = "|||"
 
 
 def normalize_youtube_subscription_href(href: str) -> str | None:
@@ -79,10 +80,8 @@ class FollowImportService:
             if not profile_href:
                 landing_url = page.url
                 hint = (
-                    "Capture your X session via the wizard's 'Capture Session' button "
-                    "before clicking Stage Follows. If you did capture, your saved cookies "
-                    "may have expired — re-log into x.com in "
-                    "your browser, then run Capture Session again."
+                    "Use Get Sources in the wizard; it will offer session repair when needed. "
+                    "If repair still fails, re-log into x.com in your normal browser and try Get Sources again."
                 )
                 raise RuntimeError(
                     f"Could not detect own X profile handle. Page settled at {landing_url}. "
@@ -145,7 +144,7 @@ class FollowImportService:
                 timeout=60000,
             )
             await page.wait_for_timeout(3000)
-            ids: set[str] = set()
+            ids: dict[str, str] = {}
             for iteration in range(20):
                 batch = await page.evaluate(
                     """
@@ -154,16 +153,28 @@ class FollowImportService:
                       const links = Array.from(document.querySelectorAll('a[href*="/in/"], a[href*="/company/"]'));
                       for (const link of links) {
                         const href = link.getAttribute("href") || "";
-                        const mIn = href.match(/linkedin\\.com\\/(in\\/[^\\/?#]+)/);
-                        if (mIn) out.push(mIn[1]);
-                        const mCo = href.match(/linkedin\\.com\\/(company\\/[^\\/?#]+)/);
-                        if (mCo) out.push(mCo[1]);
+                        const mIn = href.match(/(?:linkedin\\.com\\/|^\\/)(in\\/[^\\/?#]+)/);
+                        const mCo = href.match(/(?:linkedin\\.com\\/|^\\/)(company\\/[^\\/?#]+)/);
+                        const id = mIn ? mIn[1] : (mCo ? mCo[1] : null);
+                        if (!id) continue;
+                        const card = link.closest('li, div, article') || link.parentElement;
+                        const candidates = [
+                          link.getAttribute('aria-label'),
+                          link.innerText,
+                          card && card.querySelector('span[aria-hidden="true"]') && card.querySelector('span[aria-hidden="true"]').innerText,
+                          card && card.innerText
+                        ].filter(Boolean).map(v => String(v).trim()).filter(Boolean);
+                        let name = candidates.find(v => v.length >= 2 && !v.includes('linkedin.com')) || id;
+                        name = name.split('\\n').map(v => v.trim()).find(Boolean) || id;
+                        out.push({id, name});
                       }
                       return out;
                     }
                     """
                 )
-                ids.update(str(i) for i in batch)
+                for item in batch:
+                    if (isinstance(item, dict) and item.get("id")):
+                        ids.setdefault(str(item["id"]), str(item.get("name") or item["id"]))
                 logger.debug(
                     "Follow import scroll platform=linkedin iteration=%d batch=%d total=%d url=%s",
                     iteration + 1,
@@ -175,7 +186,10 @@ class FollowImportService:
                     break
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(800)
-            out = sorted(ids)[:limit]
+            out = [
+                f"{source_id}{RAW_SOURCE_DISPLAY_SEPARATOR}{display_name}"
+                for source_id, display_name in sorted(ids.items())[:limit]
+            ]
             logger.info("Follow import finished platform=linkedin count=%d", len(out))
             return out
         except Exception as exc:
@@ -498,6 +512,12 @@ class FollowImportService:
         source_value = raw_source.strip()
         if not source_value:
             return []
+        display_override: str | None = None
+        raw_source_for_storage = source_value
+        if RAW_SOURCE_DISPLAY_SEPARATOR in source_value:
+            source_value, display_override = [
+                part.strip() for part in source_value.split(RAW_SOURCE_DISPLAY_SEPARATOR, 1)
+            ]
 
         # URL-backed platforms resolve into canonical source IDs (feed URLs for some platforms).
         if platform in {"substack", "medium", "apple_podcasts", "spotify"} and source_value.startswith(("http://", "https://")):
@@ -510,22 +530,22 @@ class FollowImportService:
                     ImportedFollowSource(
                         platform=row.platform,
                         account_or_channel_id=row.source_id,
-                        display_name=row.display_name,
-                        raw_source=source_value,
+                        display_name=display_override or row.display_name,
+                        raw_source=raw_source_for_storage,
                     )
                 )
             if normalized:
                 return normalized
 
-        display = source_value
+        display = display_override or source_value
         if platform == "linkedin":
-            display = re.sub(r"^(in|company)/", "", source_value)
+            display = display_override or re.sub(r"^(in|company)/", "", source_value)
         return [
             ImportedFollowSource(
                 platform=platform,
                 account_or_channel_id=source_value,
                 display_name=display,
-                raw_source=source_value,
+                raw_source=raw_source_for_storage,
             )
         ]
 
