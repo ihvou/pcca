@@ -740,6 +740,8 @@ class DesktopCommandService:
             if actionable
             else "Tell me more before saving: what should be included, avoided, or considered high quality?"
         )
+        if draft.extraction_warning:
+            message = f"{message} ⚠️ {draft.extraction_warning}"
         return CommandResult(
             True,
             message,

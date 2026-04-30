@@ -126,7 +126,10 @@ class ModelRouter:
                 len(text),
                 previous_title,
             )
-            async with httpx.AsyncClient(timeout=25.0) as client:
+            # Subject creation is a rare, one-off interaction. The first call
+            # after Ollama startup loads the model into VRAM, which can take
+            # 30-60s on a 7B model — bumped from 25s to tolerate cold start.
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 response = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
                 response.raise_for_status()
                 data = response.json()

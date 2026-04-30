@@ -644,12 +644,13 @@ class TelegramService:
             )
             return True
 
-        if text.startswith("/") or intent.action in {
-            IntentAction.HELP,
-            IntentAction.RUN_READ_CONTENT,
-            IntentAction.RUN_GET_DIGEST,
-            IntentAction.RUN_REBUILD_DIGEST,
-        }:
+        # Only treat the message as a draft refinement when the intent parser
+        # could not classify it (UNKNOWN) and the user did not type a slash
+        # command. Any explicit intent (LIST_SUBJECTS, ADD_SOURCE, CREATE_SUBJECT,
+        # REFINE_PREFERENCES, etc.) belongs to its own handler downstream — the
+        # previous bypass list was too narrow and ate commands like "List
+        # subjects" while a draft was pending.
+        if text.startswith("/") or intent.action is not IntentAction.UNKNOWN:
             return False
 
         updated = await self.preference_extractor.extract(text, previous=draft)
@@ -680,6 +681,7 @@ class TelegramService:
         include = ", ".join(draft.include_terms) if draft.include_terms else "(none yet)"
         exclude = ", ".join(draft.exclude_terms) if draft.exclude_terms else "(none yet)"
         quality = f"\nGood looks like: {draft.quality_notes}" if draft.quality_notes else ""
+        warning = f"\n\n⚠️ {draft.extraction_warning}" if draft.extraction_warning else ""
         if not draft_has_actionable_rules(draft):
             return (
                 f"I'll call this: {draft.title}\n"
@@ -688,6 +690,7 @@ class TelegramService:
                 f"{quality}\n\n"
                 "Tell me a bit more before I save it: what should I include, what should I avoid, "
                 "or what would be an example of a high-quality update?"
+                f"{warning}"
             )
         return (
             f"I'll call this: {draft.title}\n"
@@ -695,6 +698,7 @@ class TelegramService:
             f"Avoid: {exclude}"
             f"{quality}\n\n"
             "Reply `save subject` to create it, send corrections, or `cancel subject`."
+            f"{warning}"
         )
 
     async def _on_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

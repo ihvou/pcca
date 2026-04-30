@@ -151,6 +151,7 @@ INDEX_HTML = r"""
               <button id="saveDraftButton" onclick="confirmSubjectDraft()" disabled>Save Draft</button>
               <button class="secondary" onclick="cancelSubjectDraft()">Cancel</button>
             </div>
+            <div id="subjectDraftStatus" class="notice" style="display:none; margin-top:12px"></div>
             <div id="draftBox" class="notice" style="display:none; margin-top:12px"></div>
           </div>
         </div>
@@ -260,6 +261,30 @@ const headers = {'Authorization': `Bearer ${token}`, 'Content-Type': 'applicatio
 let lastState = null;
 let busy = false;
 let selectedSubjectId = null;
+let refreshPausedUntil = 0;
+function pauseRefresh(ms=15000) { refreshPausedUntil = Math.max(refreshPausedUntil, Date.now() + ms); }
+function byId(id) { return document.getElementById(id); }
+function formSnapshot() {
+  const ids = ['subjectText', 'refineText', 'timezone', 'digestTime', 'telegramToken', 'platform', 'limit', 'sourceFilter', 'statusFilter', 'routeChat'];
+  const out = {};
+  for (const id of ids) {
+    const el = byId(id);
+    if (el) out[id] = el.value;
+  }
+  const active = document.activeElement && document.activeElement.id ? document.activeElement.id : null;
+  return {values: out, active};
+}
+function restoreFormSnapshot(snapshot) {
+  if (!snapshot || !snapshot.values) return;
+  for (const [id, value] of Object.entries(snapshot.values)) {
+    const el = byId(id);
+    if (el && value !== undefined && value !== null) el.value = value;
+  }
+  if (snapshot.active) {
+    const active = byId(snapshot.active);
+    if (active) active.focus();
+  }
+}
 function setBusy(next) { busy = next; document.querySelectorAll('button').forEach(b => b.disabled = next && !b.classList.contains('tab')); if (lastState) renderDraft(lastState.subject_draft, lastState.subject_draft_actionable); }
 function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`)); }
 function notice(id, text, kind='') { const el = document.getElementById(id); el.style.display = text ? 'block' : 'none'; el.className = `notice ${kind}`.trim(); el.textContent = text || ''; }
@@ -284,33 +309,35 @@ async function request(path, opts={}) {
     clearTimeout(timer);
   }
 }
-async function postAction(path, body={}) {
-  try { setBusy(true); const data = await request(path, {method:'POST', body: JSON.stringify(body)}); logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'ok'}`); await loadState(); return data; }
+async function postAction(path, body={}, options={}) {
+  try { setBusy(true); const data = await request(path, {method:'POST', timeoutMs: options.timeoutMs, body: JSON.stringify(body)}); logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'ok'}`); await loadState({force:true}); return data; }
   catch (err) { logLine(`ERROR: ${err.message}`); alert(err.message); }
   finally { setBusy(false); }
 }
 async function saveSettings() {
-  const data = await postAction('/api/settings', {token: telegramToken.value, timezone: timezone.value, digest_time: digestTime.value});
+  const data = await postAction('/api/settings', {token: byId('telegramToken').value, timezone: byId('timezone').value, digest_time: byId('digestTime').value});
   if (data) notice('configStatus', data.message, 'ok');
 }
 async function getSources() {
-  notice('sourceStatus', `Importing ${platform.value} sources...`, '');
+  const platformEl = byId('platform');
+  const limitEl = byId('limit');
+  notice('sourceStatus', `Importing ${platformEl.value} sources...`, '');
   try {
     setBusy(true);
-    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
     logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
     notice('sourceStatus', data.message, 'ok');
-    await loadState();
+    await loadState({force:true});
   } catch (err) {
     logLine(`ERROR: ${err.message}`);
     const shouldRepair = confirm(`${err.message}\n\nTry a session repair from your local browser, then import again?`);
     if (shouldRepair) {
       try {
-        notice('sourceStatus', `Repairing ${platform.value} session...`, '');
-        await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platform.value})});
-        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platform.value, limit: Number(limit.value || 100)})});
+        notice('sourceStatus', `Repairing ${platformEl.value} session...`, '');
+        await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platformEl.value})});
+        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
         notice('sourceStatus', retry.message, 'ok');
-        await loadState();
+        await loadState({force:true});
       } catch (repairErr) {
         notice('sourceStatus', repairErr.message, 'bad');
         alert(repairErr.message);
@@ -327,11 +354,36 @@ async function monitorSources() { return postAction('/api/staged-sources/monitor
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
 async function getBrief(subjectId) { return postAction('/api/briefs', {subject_id: subjectId}); }
 async function draftSubject(subjectId=null, text=null) {
-  const data = await postAction('/api/subjects/draft', {text: text || subjectText.value, subject_id: subjectId});
-  if (data && data.data && data.data.draft) renderDraft(data.data.draft, data.data.actionable);
+  const subjectTextEl = byId('subjectText');
+  const raw = text !== null ? text : (subjectId ? '' : (subjectTextEl ? subjectTextEl.value : ''));
+  const normalized = String(raw || '').trim();
+  const statusId = subjectId ? 'refineStatus' : 'subjectDraftStatus';
+  const status = byId(statusId);
+  if (!normalized) {
+    const message = subjectId ? 'Add refinement text first.' : 'Describe the subject first.';
+    if (status) { status.style.display = 'block'; status.className = 'notice bad'; status.textContent = message; }
+    return null;
+  }
+  pauseRefresh(45000);
+  if (status) { status.style.display = 'block'; status.className = 'notice'; status.textContent = subjectId ? 'Drafting refinement...' : 'Drafting subject...'; }
+  const data = await postAction('/api/subjects/draft', {text: normalized, subject_id: subjectId}, {timeoutMs: 45000});
+  if (data && data.data && data.data.draft) {
+    renderDraft(data.data.draft, data.data.actionable);
+    const currentStatus = byId(statusId);
+    if (currentStatus) {
+      currentStatus.style.display = 'block';
+      currentStatus.className = data.data.actionable ? 'notice ok' : 'notice';
+      currentStatus.textContent = data.message || 'Draft updated.';
+    }
+  } else if (status) {
+    status.style.display = 'block';
+    status.className = 'notice bad';
+    status.textContent = 'Draft request did not finish. Check Debug logs, then try again.';
+  }
+  return data;
 }
 async function confirmSubjectDraft(chatId=null) { return postAction('/api/subjects/confirm-draft', chatId === null ? {} : {chat_id: chatId}); }
-async function cancelSubjectDraft(chatId=null) { if (chatId === null) subjectText.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
+async function cancelSubjectDraft(chatId=null) { const subjectTextEl = byId('subjectText'); if (chatId === null && subjectTextEl) subjectTextEl.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
 async function assignRoute(subjectId, chatId) { return postAction('/api/routes/assign', {subject_id: subjectId, chat_id: Number(chatId)}); }
 function selectSubject(subjectId) {
@@ -340,8 +392,8 @@ function selectSubject(subjectId) {
   renderSubjectDetail(lastState);
 }
 function renderDraft(draft, actionable) {
-  const box = document.getElementById('draftBox');
-  const save = document.getElementById('saveDraftButton');
+  const box = byId('draftBox');
+  const save = byId('saveDraftButton');
   if (!draft) { box.style.display = 'none'; save.disabled = true || busy; return; }
   const include = (draft.include_terms || []).join(', ') || '(none yet)';
   const exclude = (draft.exclude_terms || []).join(', ') || '(none yet)';
@@ -415,6 +467,9 @@ function renderSubjectDetail(state) {
     ? suspended.map(row => `${row.platform}: ${row.display_name} (${row.status})`).join('\\n')
     : 'No per-subject suspended sources.';
   const chatOptions = (state.chats || []).map(chat => `<option value="${chat.chat_id}">${chat.title || 'chat ' + chat.chat_id}</option>`).join('');
+  const existingRefine = document.getElementById('refineText');
+  const refineValue = existingRefine ? existingRefine.value : '';
+  const refineWasFocused = document.activeElement === existingRefine;
   subjectDetailBox.className = 'notice ok';
   subjectDetailBox.innerHTML = `
 <strong>${subject.name}</strong>
@@ -425,11 +480,16 @@ function renderSubjectDetail(state) {
 <div style="margin-top:10px"><strong>Suspended sources</strong><pre>${suspendedText}</pre></div>
 <label style="margin-top:10px">Refine in free form<textarea id="refineText" placeholder="Example: less hype, more primary sources, exclude generic Skills tutorials"></textarea></label>
 <div class="actions" style="margin-top:8px"><button id="refineButton">Draft Refinement</button></div>
+<div id="refineStatus" class="notice" style="display:none; margin-top:8px"></div>
 <label style="margin-top:10px">Route to Telegram chat<select id="routeChat">${chatOptions || '<option value="">No Telegram chats registered</option>'}</select></label>
 <div class="actions" style="margin-top:8px"><button id="assignRouteButton" ${chatOptions ? '' : 'disabled'}>Assign Route</button></div>
   `.trim();
-  document.getElementById('refineButton').onclick = () => draftSubject(subject.id, document.getElementById('refineText').value);
-  document.getElementById('assignRouteButton').onclick = () => assignRoute(subject.id, document.getElementById('routeChat').value);
+  const refineText = document.getElementById('refineText');
+  refineText.value = refineValue;
+  refineText.addEventListener('input', () => pauseRefresh());
+  if (refineWasFocused) refineText.focus();
+  byId('refineButton').onclick = () => draftSubject(subject.id, refineText.value);
+  byId('assignRouteButton').onclick = () => assignRoute(subject.id, byId('routeChat').value);
 }
 function renderSources(state) {
   if (!state) return;
@@ -470,21 +530,30 @@ function renderReauth(rows=[]) {
   reauthBox.textContent = ['Sources needing re-login:', ...rows.map(r => `${r.platform}: ${r.display_name}`)].join('\n');
 }
 function fillPlatformSelects(platforms=[]) {
-  if (platform.options.length === 0) platforms.forEach(p => platform.add(new Option(p, p)));
-  if (sourceFilter.options.length === 1) platforms.forEach(p => sourceFilter.add(new Option(p, p)));
+  const platformEl = byId('platform');
+  const sourceFilterEl = byId('sourceFilter');
+  if (platformEl.options.length === 0) platforms.forEach(p => platformEl.add(new Option(p, p)));
+  if (sourceFilterEl.options.length === 1) platforms.forEach(p => sourceFilterEl.add(new Option(p, p)));
 }
 function defaultTab(state) {
   const hasToken = state.settings && state.settings.telegram_token_configured;
   if (!hasToken) return 'config';
   return 'use';
 }
-async function loadState() {
+async function loadState(options={}) {
+  if (!options.force && (busy || Date.now() < refreshPausedUntil)) return;
+  const active = document.activeElement;
+  if (!options.force && active && ['TEXTAREA', 'INPUT', 'SELECT'].includes(active.tagName)) {
+    pauseRefresh();
+    return;
+  }
+  const snapshot = formSnapshot();
   try {
     const data = await request('/api/state');
     lastState = data;
     const s = data.settings || {};
-    timezone.value = s.timezone || 'UTC';
-    digestTime.value = s.digest_time || '08:30';
+    byId('timezone').value = s.timezone || 'UTC';
+    byId('digestTime').value = s.digest_time || '08:30';
     fillPlatformSelects(data.platforms || []);
     renderSubjects(data);
     renderDraft(data.subject_draft, data.subject_draft_actionable);
@@ -507,10 +576,14 @@ async function loadState() {
     failureBox.className = failures.length ? 'notice bad' : 'notice ok';
     failureBox.textContent = failures.join('\n') || 'No visible failures.';
     if (!document.body.dataset.initialTab) { showTab(defaultTab(data)); document.body.dataset.initialTab = '1'; }
+    restoreFormSnapshot(snapshot);
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
-loadState();
-setInterval(loadState, 5000);
+document.addEventListener('input', event => {
+  if (event.target && ['TEXTAREA', 'INPUT', 'SELECT'].includes(event.target.tagName)) pauseRefresh();
+});
+loadState({force:true});
+setInterval(() => loadState(), 5000);
 </script>
 </body>
 </html>
@@ -594,6 +667,15 @@ class DesktopWebServer:
                     monotonic_ms_since(started_at),
                 )
                 return JSONResponse(body)
+            except ValueError as exc:
+                logger.warning(
+                    "Desktop request rejected action_id=%s path=%s message=%s duration_ms=%d",
+                    action_id,
+                    request.url.path,
+                    str(exc),
+                    monotonic_ms_since(started_at),
+                )
+                return JSONResponse({"ok": False, "message": str(exc), "action_id": action_id}, status_code=400)
             except Exception as exc:
                 logger.exception(
                     "Desktop request failed action_id=%s path=%s duration_ms=%d",

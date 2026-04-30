@@ -86,6 +86,40 @@ def test_desktop_server_rejects_missing_token(tmp_path) -> None:
     assert fake_service.stopped is True
 
 
+def test_desktop_server_reports_validation_errors_without_crashing(tmp_path) -> None:
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+
+    from pcca.desktop_web.server import DesktopWebServer
+
+    class FakeService:
+        async def startup_for_wizard(self):
+            return CommandResult(True, "started")
+
+        async def shutdown(self):
+            return None
+
+        async def draft_subject(self, *, text: str, subject_id: int | None = None):
+            raise ValueError("Describe the subject first.")
+
+    server = DesktopWebServer(
+        settings=make_settings(tmp_path),
+        token="secret-token",
+        port=8765,
+        service=FakeService(),  # type: ignore[arg-type]
+    )
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/subjects/draft",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"text": "", "subject_id": None},
+        )
+        assert response.status_code == 400
+        assert response.json()["message"] == "Describe the subject first."
+
+
 def test_desktop_wizard_has_tabbed_product_surface() -> None:
     from pcca.desktop_web.server import INDEX_HTML
 
@@ -95,3 +129,13 @@ def test_desktop_wizard_has_tabbed_product_surface() -> None:
     assert "Rebuild" not in INDEX_HTML
     assert "Include terms" not in INDEX_HTML
     assert "High-quality examples" not in INDEX_HTML
+
+
+def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
+    from pcca.desktop_web.server import INDEX_HTML
+
+    assert "function pauseRefresh" in INDEX_HTML
+    assert "function formSnapshot" in INDEX_HTML
+    assert "function restoreFormSnapshot" in INDEX_HTML
+    assert "subjectDraftStatus" in INDEX_HTML
+    assert "setInterval(() => loadState(), 5000)" in INDEX_HTML
