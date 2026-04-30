@@ -58,6 +58,7 @@ class Settings:
     session_refresh_cooldown_seconds: int = 1800
     session_refresh_browser: str | None = None
     platform_circuit_threshold: int = 5
+    platform_empty_threshold: int = 25
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -96,6 +97,10 @@ class Settings:
             platform_circuit_threshold = int(_env("PCCA_PLATFORM_CIRCUIT_THRESHOLD", "5") or "5")
         except ValueError:
             platform_circuit_threshold = 5
+        try:
+            platform_empty_threshold = int(_env("PCCA_PLATFORM_EMPTY_THRESHOLD", "25") or "25")
+        except ValueError:
+            platform_empty_threshold = 25
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -115,6 +120,7 @@ class Settings:
             session_refresh_cooldown_seconds=max(0, session_refresh_cooldown_seconds),
             session_refresh_browser=session_refresh_browser,
             platform_circuit_threshold=max(1, platform_circuit_threshold),
+            platform_empty_threshold=max(1, platform_empty_threshold),
         )
 
     def ensure_dirs(self) -> None:

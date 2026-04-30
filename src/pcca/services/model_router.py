@@ -100,17 +100,12 @@ class ModelRouter:
             logger.debug("Preference extraction skipped: model disabled.")
             return None
         started_at = time.monotonic()
-        prompt = (
-            "You turn a user's free-form curation request into a compact subject draft.\n"
-            "Return JSON only with fields:\n"
-            '{"title": "3-5 word title", "include_terms": ["..."], '
-            '"exclude_terms": ["..."], "quality_notes": "optional short note"}\n'
-            "Rules: keep terms specific, prefer practical usefulness, avoid generic words.\n\n"
-            f"PREVIOUS TITLE: {previous_title or ''}\n"
-            f"PREVIOUS INCLUDE: {previous_include_terms or []}\n"
-            f"PREVIOUS EXCLUDE: {previous_exclude_terms or []}\n"
-            f"PREVIOUS QUALITY NOTES: {previous_quality_notes or ''}\n\n"
-            f"USER MESSAGE:\n{text[:4000]}"
+        prompt = build_preference_extraction_prompt(
+            text=text,
+            previous_title=previous_title,
+            previous_include_terms=previous_include_terms,
+            previous_exclude_terms=previous_exclude_terms,
+            previous_quality_notes=previous_quality_notes,
         )
         payload = {
             "model": self.ollama_model,
@@ -170,3 +165,35 @@ class ModelRouter:
                 exc_info=True,
             )
             return None
+
+
+def build_preference_extraction_prompt(
+    *,
+    text: str,
+    previous_title: str | None = None,
+    previous_include_terms: list[str] | None = None,
+    previous_exclude_terms: list[str] | None = None,
+    previous_quality_notes: str | None = None,
+) -> str:
+    return (
+        "You turn a user's free-form curation request into a compact subject draft.\n"
+        "Return JSON only with fields:\n"
+        '{"title": "up to 7 words", "include_terms": ["..."], '
+        '"exclude_terms": ["..."], "quality_notes": "optional short note"}\n\n'
+        "Critical separation rule:\n"
+        "- include_terms and exclude_terms must be literal topic words or phrases likely to appear in matching content: proper nouns, named entities, product names, domain terms.\n"
+        "- Do NOT put quality criteria in include_terms. Terms like reputable sources, high quality analytics, key thoughts, novelty, insight, practical, trustworthy, and useful belong in quality_notes.\n"
+        "- If the user describes an abstract topic, enrich it into 5-10 likely content anchors.\n"
+        "  Example: AI impact on IT jobs -> include_terms=[\"ai\", \"automation\", \"ml\", \"jobs\", \"employment\", \"layoff\", \"displacement\", \"augmentation\"].\n"
+        "  Example: Ukraine war news from reputable sources -> include_terms=[\"ukraine\", \"war\", \"russia\", \"kyiv\"], quality_notes=\"prefer reputable sources; avoid propaganda\".\n"
+        "- If the user names authoritative companies, domains, channels, or people, add a line in quality_notes starting with \"Authority:\".\n"
+        "- Summarize conditional rules in quality_notes, e.g. \"Conditional: exclude X unless it discusses Y\".\n"
+        "- If the user says not to boost likes, virality, drama, or engagement bait, add \"Engagement: do not boost\" to quality_notes.\n"
+        "- Keep title distinctive and no longer than 7 words.\n"
+        "- Keep include_terms/exclude_terms lowercase and concrete.\n\n"
+        f"PREVIOUS TITLE: {previous_title or ''}\n"
+        f"PREVIOUS INCLUDE: {previous_include_terms or []}\n"
+        f"PREVIOUS EXCLUDE: {previous_exclude_terms or []}\n"
+        f"PREVIOUS QUALITY NOTES: {previous_quality_notes or ''}\n\n"
+        f"USER MESSAGE:\n{text[:4000]}"
+    )

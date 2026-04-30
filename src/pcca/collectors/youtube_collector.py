@@ -6,16 +6,22 @@ import re
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import quote
+from xml.etree import ElementTree
+
+import httpx
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import SessionChallengedError
-from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
+from pcca.collectors.youtube_utils import extract_video_id
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 
 logger = logging.getLogger(__name__)
 
 YOUTUBE_VIDEO_SELECTOR = "a#video-title-link, a#video-title"
+YOUTUBE_CHANNEL_ID_RE = re.compile(r"\b(UC[A-Za-z0-9_-]{10,})\b")
+YOUTUBE_RSS_URL = "https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
 YOUTUBE_DOM_EXTRACTION_JS = """
 (maxItems) => {
   const out = [];
@@ -95,6 +101,92 @@ def detect_youtube_interstitial(title: str | None, body_text: str | None = None)
         if any(needle in text for needle in needles):
             return kind
     return None
+
+
+def youtube_rss_url(channel_id: str) -> str:
+    return YOUTUBE_RSS_URL.format(channel_id=quote(channel_id.strip(), safe=""))
+
+
+def is_youtube_channel_id(source_id: str) -> bool:
+    return bool(YOUTUBE_CHANNEL_ID_RE.fullmatch(source_id.strip()))
+
+
+def build_youtube_about_url(source_id: str) -> str:
+    source = source_id.strip()
+    if source.startswith("http://") or source.startswith("https://"):
+        return source.rstrip("/") + "/about"
+    if is_youtube_channel_id(source):
+        return f"https://www.youtube.com/channel/{quote(source, safe='')}/about"
+    handle = source if source.startswith("@") else f"@{source}"
+    return f"https://www.youtube.com/{quote(handle, safe='@')}/about"
+
+
+def extract_youtube_channel_id_from_html(html: str) -> str | None:
+    if not html:
+        return None
+    patterns = [
+        r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']https://www\.youtube\.com/channel/(UC[A-Za-z0-9_-]{10,})["\']',
+        r'<meta[^>]+property=["\']og:url["\'][^>]+content=["\']https://www\.youtube\.com/channel/(UC[A-Za-z0-9_-]{10,})["\']',
+        r'"channelId"\s*:\s*"(UC[A-Za-z0-9_-]{10,})"',
+        r"/channel/(UC[A-Za-z0-9_-]{10,})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html)
+        if match:
+            return match.group(1)
+    fallback = YOUTUBE_CHANNEL_ID_RE.search(html)
+    return fallback.group(1) if fallback else None
+
+
+def _xml_text(node: ElementTree.Element | None) -> str | None:
+    if node is None or node.text is None:
+        return None
+    return node.text.strip() or None
+
+
+def parse_youtube_rss(feed_xml: str, *, max_items: int = 8) -> tuple[str | None, str | None, list[dict[str, Any]]]:
+    root = ElementTree.fromstring(feed_xml)
+    ns = {
+        "atom": "http://www.w3.org/2005/Atom",
+        "yt": "http://www.youtube.com/xml/schemas/2015",
+        "media": "http://search.yahoo.com/mrss/",
+    }
+    channel_id = _xml_text(root.find("yt:channelId", ns))
+    author_name = _xml_text(root.find("atom:author/atom:name", ns)) or _xml_text(root.find("atom:title", ns))
+    rows: list[dict[str, Any]] = []
+    for entry in root.findall("atom:entry", ns):
+        video_id = _xml_text(entry.find("yt:videoId", ns))
+        title = _xml_text(entry.find("atom:title", ns)) or _xml_text(entry.find("media:group/media:title", ns))
+        published_at = _xml_text(entry.find("atom:published", ns))
+        description = _xml_text(entry.find("media:group/media:description", ns))
+        link = entry.find("atom:link", ns)
+        url = link.attrib.get("href") if link is not None else None
+        statistics = entry.find("media:group/media:community/media:statistics", ns)
+        view_count = None
+        if statistics is not None and statistics.attrib.get("views"):
+            try:
+                view_count = int(statistics.attrib["views"])
+            except ValueError:
+                view_count = None
+        if not video_id and url:
+            video_id = extract_video_id(url)
+        if not video_id or not title:
+            continue
+        rows.append(
+            {
+                "video_id": video_id,
+                "channel_id": _xml_text(entry.find("yt:channelId", ns)) or channel_id,
+                "channel_name": author_name,
+                "url": url or f"https://www.youtube.com/watch?v={video_id}",
+                "title": title,
+                "description": description,
+                "published_at": published_at,
+                "view_count": view_count,
+            }
+        )
+        if len(rows) >= max_items:
+            break
+    return channel_id, author_name, rows
 
 
 class _YouTubeVideoLinkParser(HTMLParser):
@@ -246,109 +338,80 @@ def extract_youtube_initial_data_video_rows(data: dict[str, Any] | None, *, max_
 
 @dataclass
 class YouTubeCollector:
-    session_manager: BrowserSessionManager
+    session_manager: BrowserSessionManager | None = None
     transcript_service: YouTubeTranscriptService = field(default_factory=YouTubeTranscriptService)
     max_items: int = 8
     platform: str = "youtube"
+    http_client: httpx.AsyncClient | None = None
+
+    async def _get_text(self, url: str) -> str:
+        if self.http_client is not None:
+            response = await self.http_client.get(url, follow_redirects=True)
+            response.raise_for_status()
+            return response.text
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 PCCA/0.1 (+https://youtube.com)"},
+            )
+            response.raise_for_status()
+            return response.text
+
+    async def resolve_source_identifier(self, source_id: str) -> str:
+        source = source_id.strip()
+        if is_youtube_channel_id(source):
+            return source
+        about_url = build_youtube_about_url(source)
+        html = await self._get_text(about_url)
+        channel_id = extract_youtube_channel_id_from_html(html)
+        if not channel_id:
+            raise RuntimeError(f"Could not resolve YouTube channel id for {source_id}.")
+        logger.info("Resolved YouTube source identifier old=%s new=%s about_url=%s", source_id, channel_id, about_url)
+        return channel_id
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
-        url = build_channel_videos_url(source_id)
-        page = await self.session_manager.new_page(self.platform)
+        channel_id = source_id.strip()
+        if not is_youtube_channel_id(channel_id):
+            channel_id = await self.resolve_source_identifier(source_id)
+        feed_url = youtube_rss_url(channel_id)
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-            current_url = page.url
-            if is_youtube_login_url(current_url):
-                raise SessionChallengedError(
-                    platform=self.platform,
-                    source_id=source_id,
-                    current_url=current_url,
-                    challenge_kind="login_redirect",
-                )
-            try:
-                await page.wait_for_selector(YOUTUBE_VIDEO_SELECTOR, timeout=15000)
-            except Exception:
-                logger.warning(
-                    "YouTube video selector did not appear before fallback source=%s url=%s selector=%s",
-                    source_id,
-                    page.url,
-                    YOUTUBE_VIDEO_SELECTOR,
-                    exc_info=True,
-                )
-
-            raw_videos = await page.evaluate(YOUTUBE_DOM_EXTRACTION_JS, self.max_items)
-            if not raw_videos:
-                html = await page.content()
-                title = await page.title()
-                body_text = await page.evaluate(
-                    "() => document.body ? document.body.innerText.slice(0, 4000) : ''"
-                )
-                interstitial = detect_youtube_interstitial(title, body_text)
-                if interstitial:
-                    logger.warning(
-                        "YouTube interstitial detected source=%s url=%s title=%s interstitial=%s consent_wall=%s",
-                        source_id,
-                        page.url,
-                        title,
-                        interstitial,
-                        interstitial == "consent_wall",
-                    )
-                    await self.session_manager.capture_empty_result_snapshot(
-                        page,
-                        platform=self.platform,
-                        source_id=source_id,
-                        sample_rate=1.0,
-                    )
-                else:
-                    raw_videos = extract_youtube_initial_data_video_rows(
-                        extract_yt_initial_data_from_html(html),
-                        max_items=self.max_items,
-                    )
-                    if raw_videos:
-                        logger.info(
-                            "YouTube ytInitialData fallback extracted source=%s items=%d",
-                            source_id,
-                            len(raw_videos),
-                        )
-                    else:
-                        await self.session_manager.capture_empty_result_snapshot(
-                            page,
-                            platform=self.platform,
-                            source_id=source_id,
-                            sample_rate=1.0,
-                        )
-        except Exception as exc:
-            await self.session_manager.capture_debug_snapshot(page, "youtube_collect_failed", error=exc)
-            logger.exception("YouTube collection failed for source=%s", source_id)
+            feed_xml = await self._get_text(feed_url)
+            parsed_channel_id, channel_name, raw_videos = parse_youtube_rss(feed_xml, max_items=self.max_items)
+            channel_id = parsed_channel_id or channel_id
+        except Exception:
+            logger.exception("YouTube RSS collection failed for source=%s feed_url=%s", source_id, feed_url)
             raise
-        finally:
-            await page.close()
 
         results: list[CollectedItem] = []
         for row in raw_videos:
             video_url = row.get("url")
-            video_id = extract_video_id(video_url or "")
+            video_id = row.get("video_id") or extract_video_id(video_url or "")
             if not video_id:
                 continue
             transcript_text = await self.transcript_service.get_transcript_text(video_id)
-            text = row.get("title") or ""
+            title = row.get("title") or ""
+            description = row.get("description") or ""
+            text = "\n\n".join(part for part in (title, description) if part).strip()
             if transcript_text:
                 snippet = transcript_text[:1200]
                 text = f"{text}\n\n{snippet}".strip()
             metadata = {
                 "source_id": source_id,
-                "title": row.get("title"),
-                "meta_text": row.get("meta_text"),
-                **parse_youtube_meta(row.get("meta_text")),
+                "channel_id": row.get("channel_id") or channel_id,
+                "title": title,
+                "description": description,
+                "rss_feed_url": feed_url,
+                "view_count": row.get("view_count"),
             }
             results.append(
                 CollectedItem(
                     platform=self.platform,
                     external_id=video_id,
-                    author=row.get("channel_name") or source_id,
+                    author=row.get("channel_name") or channel_name or source_id,
                     url=video_url,
                     text=text,
                     transcript_text=transcript_text,
-                    published_at=None,
+                    published_at=row.get("published_at"),
                     metadata=metadata,
                 )
             )

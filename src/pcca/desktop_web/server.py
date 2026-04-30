@@ -180,11 +180,12 @@ INDEX_HTML = r"""
             <h2>Get Sources</h2>
             <p>Choose a platform and import follows/subscriptions from the logged-in browser session. If the session is missing, the Wizard will ask to run a repair flow inline.</p>
             <div class="source-toolbar">
-              <label>Platform <select id="platform"></select></label>
+              <label>Platform <select id="platform" onchange="updateActionControls(lastState || {})"></select></label>
               <label>Limit <input id="limit" type="number" min="1" max="500" value="100" /></label>
-              <button onclick="getSources()">Get Sources</button>
+              <button id="getSourcesButton" onclick="getSources()">Get Sources</button>
             </div>
-            <div class="actions" style="margin-top:10px"><button class="secondary" onclick="readContent()">Get Content</button></div>
+            <p class="fine" style="margin-top:10px">Get Content runs the collector for the selected platform only. To run everything, use Run All Content in Debug.</p>
+            <div class="actions" style="margin-top:10px"><button id="readContentButton" class="secondary" onclick="readContent()">Get Content</button></div>
             <div id="sourceStatus" class="notice" style="display:none; margin-top:12px"></div>
           </div>
           <div class="card">
@@ -248,6 +249,11 @@ INDEX_HTML = r"""
             <pre id="debugFiles">Loading...</pre>
           </div>
           <div class="card tight">
+            <h3>Run Now</h3>
+            <p>Manual all-platform collection escape hatch. The Sources tab button is platform-scoped.</p>
+            <div class="actions"><button id="runAllContentButton" class="secondary" onclick="readContentAll()">Run All Content</button></div>
+          </div>
+          <div class="card tight">
             <h3>Failures</h3>
             <div id="failureBox" class="notice ok">No visible failures.</div>
           </div>
@@ -285,7 +291,7 @@ function restoreFormSnapshot(snapshot) {
     if (active) active.focus();
   }
 }
-function setBusy(next) { busy = next; document.querySelectorAll('button').forEach(b => b.disabled = next && !b.classList.contains('tab')); if (lastState) renderDraft(lastState.subject_draft, lastState.subject_draft_actionable); }
+function setBusy(next) { busy = next; document.querySelectorAll('button').forEach(b => b.disabled = next && !b.classList.contains('tab')); if (lastState) { renderDraft(lastState.subject_draft, lastState.subject_draft_actionable); updateActionControls(lastState); } }
 function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`)); }
 function notice(id, text, kind='') { const el = document.getElementById(id); el.style.display = text ? 'block' : 'none'; el.className = `notice ${kind}`.trim(); el.textContent = text || ''; }
 function logLine(line) { const el = document.getElementById('logsBox'); el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent; }
@@ -298,7 +304,8 @@ async function request(path, opts={}) {
     delete cleanOpts.timeoutMs;
     const res = await fetch(path, {...cleanOpts, signal: controller.signal, headers: {...headers, ...(opts.headers || {})}});
     const data = await res.json();
-    if (!res.ok || data.ok === false) throw new Error(data.message || data.detail || `Request failed: ${path}`);
+    const alreadyRunning = data && data.data && data.data.already_running;
+    if (!res.ok || (data.ok === false && !alreadyRunning)) throw new Error(data.message || data.detail || `Request failed: ${path}`);
     return data;
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -324,9 +331,9 @@ async function getSources() {
   notice('sourceStatus', `Importing ${platformEl.value} sources...`, '');
   try {
     setBusy(true);
-    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
+    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
     logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
-    notice('sourceStatus', data.message, 'ok');
+    notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
     await loadState({force:true});
   } catch (err) {
     logLine(`ERROR: ${err.message}`);
@@ -335,7 +342,7 @@ async function getSources() {
       try {
         notice('sourceStatus', `Repairing ${platformEl.value} session...`, '');
         await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platformEl.value})});
-        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 120000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
+        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
         notice('sourceStatus', retry.message, 'ok');
         await loadState({force:true});
       } catch (repairErr) {
@@ -349,10 +356,21 @@ async function getSources() {
     setBusy(false);
   }
 }
-async function readContent() { const data = await postAction('/api/content/read'); if (data) notice('sourceStatus', data.message, 'ok'); }
+async function readContent() {
+  const platformEl = byId('platform');
+  const platform = platformEl ? platformEl.value : '';
+  notice('sourceStatus', `Running Get Content for ${platformLabel(platform)}...`, '');
+  const data = await postAction('/api/content/read', {platform}, {timeoutMs: 1800000});
+  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+}
+async function readContentAll() {
+  notice('sourceStatus', 'Running all-platform content collection...', '');
+  const data = await postAction('/api/content/read', {}, {timeoutMs: 1800000});
+  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+}
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
-async function getBrief(subjectId) { return postAction('/api/briefs', {subject_id: subjectId}); }
+async function getBrief(subjectId) { return postAction('/api/briefs', {subject_id: subjectId}, {timeoutMs: 1800000}); }
 async function draftSubject(subjectId=null, text=null) {
   const subjectTextEl = byId('subjectText');
   const raw = text !== null ? text : (subjectId ? '' : (subjectTextEl ? subjectTextEl.value : ''));
@@ -535,6 +553,33 @@ function fillPlatformSelects(platforms=[]) {
   if (platformEl.options.length === 0) platforms.forEach(p => platformEl.add(new Option(p, p)));
   if (sourceFilterEl.options.length === 1) platforms.forEach(p => sourceFilterEl.add(new Option(p, p)));
 }
+function platformLabel(value) {
+  if (!value) return 'All';
+  return value.split('_').map(part => part ? part[0].toUpperCase() + part.slice(1) : part).join(' ');
+}
+function actionRunning(state, key) {
+  return (state.inflight_actions || []).find(action => action.key === key);
+}
+function updateActionControls(state) {
+  const platformEl = byId('platform');
+  const selectedPlatform = platformEl ? platformEl.value : '';
+  const readButton = byId('readContentButton');
+  const getSourcesButton = byId('getSourcesButton');
+  const runAllButton = byId('runAllContentButton');
+  const readRunning = actionRunning(state, 'read_content');
+  const stageRunning = actionRunning(state, 'stage_follows');
+  if (readButton) {
+    readButton.textContent = readRunning ? `Running: ${readRunning.label}` : `Get Content (${platformLabel(selectedPlatform)})`;
+    readButton.disabled = busy || Boolean(readRunning);
+  }
+  if (runAllButton) runAllButton.disabled = busy || Boolean(readRunning);
+  if (getSourcesButton) getSourcesButton.disabled = busy || Boolean(stageRunning);
+  const sourceStatusEl = byId('sourceStatus');
+  if ((readRunning || stageRunning) && sourceStatusEl && sourceStatusEl.style.display === 'none') {
+    const running = readRunning || stageRunning;
+    notice('sourceStatus', `Running: ${running.label} (started ${String(running.started_at || '').slice(11, 16) || 'now'}).`, '');
+  }
+}
 function defaultTab(state) {
   const hasToken = state.settings && state.settings.telegram_token_configured;
   if (!hasToken) return 'config';
@@ -555,6 +600,7 @@ async function loadState(options={}) {
     byId('timezone').value = s.timezone || 'UTC';
     byId('digestTime').value = s.digest_time || '08:30';
     fillPlatformSelects(data.platforms || []);
+    updateActionControls(data);
     renderSubjects(data);
     renderDraft(data.subject_draft, data.subject_draft_actionable);
     renderPendingDrafts(data);
@@ -572,7 +618,11 @@ async function loadState(options={}) {
     const failures = [];
     if (s.telegram_token_missing) failures.push(s.telegram_status);
     if ((data.reauth_sources || []).length) failures.push(`${data.reauth_sources.length} source(s) need re-login.`);
-    if ((data.circuit_broken || []).length) failures.push(`Collection paused for: ${(data.circuit_broken || []).join(', ')}. Check debug bundle snapshots before retrying.`);
+    if ((data.circuit_broken || []).length) {
+      const reasons = data.circuit_broken_reasons_by_platform || {};
+      const paused = (data.circuit_broken || []).map(platform => `${platform} (${reasons[platform] || 'bot_shaped'})`).join(', ');
+      failures.push(`Collection paused for: ${paused}. Check debug bundle snapshots before retrying.`);
+    }
     failureBox.className = failures.length ? 'notice bad' : 'notice ok';
     failureBox.textContent = failures.join('\n') || 'No visible failures.';
     if (!document.body.dataset.initialTab) { showTab(defaultTab(data)); document.body.dataset.initialTab = '1'; }
@@ -803,7 +853,12 @@ class DesktopWebServer:
 
         async def read_content(request):
             assert self.service is not None
-            return await run_result(lambda _p: self.service.read_content(), request)
+            return await run_result(
+                lambda p: self.service.read_content(
+                    platform=str(p.get("platform") or "") or None,
+                ),
+                request,
+            )
 
         async def briefs(request):
             assert self.service is not None

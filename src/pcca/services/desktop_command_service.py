@@ -6,6 +6,7 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -58,6 +59,14 @@ class SmokeEvaluation:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+@dataclass
+class InflightAction:
+    key: str
+    label: str
+    started_at: str
+    task: asyncio.Task
 
 
 def cron_to_digest_time(cron: str) -> str:
@@ -139,6 +148,8 @@ class DesktopCommandService:
         self._settings_factory = settings_factory
         self._agent_app: PCCAApp | None = None
         self._agent_task: asyncio.Task | None = None
+        self._inflight_actions: dict[str, InflightAction] = {}
+        self._inflight_lock = asyncio.Lock()
         self._logs: list[str] = []
 
     @property
@@ -148,6 +159,50 @@ class DesktopCommandService:
     def log(self, message: str) -> None:
         self._logs.append(message)
         logger.info("%s", message)
+
+    def inflight_actions(self) -> list[dict[str, str]]:
+        out: list[dict[str, str]] = []
+        stale: list[str] = []
+        for key, action in self._inflight_actions.items():
+            if action.task.done():
+                stale.append(key)
+                continue
+            out.append({"key": action.key, "label": action.label, "started_at": action.started_at})
+        for key in stale:
+            self._inflight_actions.pop(key, None)
+        return out
+
+    async def _run_guarded_action(
+        self,
+        *,
+        key: str,
+        label: str,
+        runner: Callable[[], Awaitable[CommandResult]],
+    ) -> CommandResult:
+        async with self._inflight_lock:
+            existing = self._inflight_actions.get(key)
+            if existing is not None and not existing.task.done():
+                message = f"A {existing.label} run is already in progress; check Logs."
+                self.log(message)
+                return CommandResult(
+                    False,
+                    message,
+                    {"already_running": True, "inflight": self.inflight_actions()},
+                )
+            task = asyncio.create_task(runner())
+            self._inflight_actions[key] = InflightAction(
+                key=key,
+                label=label,
+                started_at=datetime.now(timezone.utc).isoformat(),
+                task=task,
+            )
+        try:
+            return await task
+        finally:
+            async with self._inflight_lock:
+                current = self._inflight_actions.get(key)
+                if current is not None and current.task is task:
+                    self._inflight_actions.pop(key, None)
 
     def settings(self) -> Settings:
         return self._settings_factory()
@@ -265,6 +320,7 @@ class DesktopCommandService:
             ).fetchall()
             recent_run_logs = []
             circuit_broken: list[str] = []
+            circuit_broken_reasons_by_platform: dict[str, str] = {}
             for row in run_log_rows:
                 try:
                     metadata = json.loads(row["metadata_json"] or "{}")
@@ -274,6 +330,11 @@ class DesktopCommandService:
                     broken = metadata.get("circuit_broken") if isinstance(metadata, dict) else None
                     if isinstance(broken, list):
                         circuit_broken = [str(item) for item in broken]
+                    reasons = metadata.get("circuit_broken_reasons_by_platform") if isinstance(metadata, dict) else None
+                    if isinstance(reasons, dict):
+                        circuit_broken_reasons_by_platform = {
+                            str(key): str(value) for key, value in reasons.items()
+                        }
                 recent_run_logs.append(
                     {
                         "id": row["id"],
@@ -308,6 +369,7 @@ class DesktopCommandService:
                     "session_refresh_cooldown_seconds": settings.session_refresh_cooldown_seconds,
                     "session_refresh_browser": settings.session_refresh_browser or "auto",
                     "platform_circuit_threshold": settings.platform_circuit_threshold,
+                    "platform_empty_threshold": settings.platform_empty_threshold,
                 },
                 "onboarding": {
                     "current_step": state.current_step,
@@ -326,6 +388,7 @@ class DesktopCommandService:
                 "reauth_sources": [asdict(row) for row in reauth_sources],
                 "recent_run_logs": recent_run_logs,
                 "circuit_broken": circuit_broken,
+                "circuit_broken_reasons_by_platform": circuit_broken_reasons_by_platform,
                 "subjects": [asdict(subject) for subject in subjects],
                 "subject_preferences": subject_preferences,
                 "subject_source_overrides": subject_source_overrides,
@@ -341,6 +404,7 @@ class DesktopCommandService:
                 "chats": [asdict(chat) for chat in chats],
                 "platforms": SUPPORTED_ONBOARDING_PLATFORMS,
                 "agent_running": self.agent_running,
+                "inflight_actions": self.inflight_actions(),
                 "logs": self.logs,
             }
         finally:
@@ -483,12 +547,16 @@ class DesktopCommandService:
         platform = platform.strip().lower()
         if platform not in SUPPORTED_ONBOARDING_PLATFORMS:
             raise ValueError(f"Unsupported follow-import platform: {platform}")
-        started_at = time.monotonic()
-        self.log(f"Staging follows from {platform} with limit={limit}.")
-        app = PCCAApp(settings=self.settings())
-        count = await app.stage_follows_once(platform=platform, limit=limit)
-        self.log(f"Staged {count} source(s) from {platform} in {int((time.monotonic() - started_at) * 1000)}ms.")
-        return CommandResult(True, f"Staged {count} source(s) from {platform}.", {"count": count})
+
+        async def runner() -> CommandResult:
+            started_at = time.monotonic()
+            self.log(f"Staging follows from {platform} with limit={limit}.")
+            app = PCCAApp(settings=self.settings())
+            count = await app.stage_follows_once(platform=platform, limit=limit)
+            self.log(f"Staged {count} source(s) from {platform} in {int((time.monotonic() - started_at) * 1000)}ms.")
+            return CommandResult(True, f"Staged {count} source(s) from {platform}.", {"count": count})
+
+        return await self._run_guarded_action(key="stage_follows", label="Get Sources", runner=runner)
 
     async def list_staged_sources(self) -> CommandResult:
         settings = self.settings()
@@ -775,6 +843,8 @@ class DesktopCommandService:
                     draft.title,
                     include_terms=draft.include_terms,
                     exclude_terms=draft.exclude_terms,
+                    quality_notes=draft.quality_notes,
+                    description_text=draft.description_text,
                 )
             else:
                 created = existing
@@ -785,7 +855,9 @@ class DesktopCommandService:
                     subject_name=created.name,
                     include_terms=draft.include_terms,
                     exclude_terms=draft.exclude_terms,
+                    quality_notes=draft.quality_notes,
                 )
+                await subject_repo.update_description(created.id, draft.description_text)
             routing_service = RoutingService(
                 routing_repo=RoutingRepository(conn=db.conn),
                 subject_repo=subject_repo,
@@ -827,6 +899,69 @@ class DesktopCommandService:
         finally:
             await db.close()
         return CommandResult(True, "Subject draft cancelled.")
+
+    async def rebuild_subject_rules(self, *, subject_id: int, text: str | None = None) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            subject_repo = SubjectRepository(conn=db.conn)
+            subject = await subject_repo.get_by_id(subject_id)
+            preference_repo = SubjectPreferenceRepository(conn=db.conn)
+            current = await preference_repo.get_latest(subject.id)
+            stored_description = await subject_repo.get_description_text(subject.id)
+            source_text = (text or stored_description or "").strip()
+            if not source_text:
+                include = list((current.include_rules.get("topics") if current else []) or [])
+                exclude = list((current.exclude_rules.get("topics") if current else []) or [])
+                quality_notes = (current.quality_rules.get("notes") if current else None) or ""
+                source_text = "\n".join(
+                    part
+                    for part in (
+                        f"Subject: {subject.name}",
+                        f"Current include terms: {', '.join(include)}" if include else "",
+                        f"Current avoid terms: {', '.join(exclude)}" if exclude else "",
+                        f"Current quality notes: {quality_notes}" if quality_notes else "",
+                        "Rebuild this into literal topic terms that would appear in matching content.",
+                    )
+                    if part
+                )
+            previous = SubjectDraft(
+                chat_id=DESKTOP_SUBJECT_DRAFT_CHAT_ID,
+                title=subject.name,
+                description_text=source_text,
+                include_terms=[],
+                exclude_terms=[],
+                quality_notes=(current.quality_rules.get("notes") if current else None),
+                last_user_message="",
+                updated_at="",
+            )
+            draft = await self.preference_extractor().extract(source_text, previous=previous)
+            pref = await PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo).replace_subject_rules(
+                subject_id=subject.id,
+                include_terms=draft.include_terms,
+                exclude_terms=draft.exclude_terms,
+                quality_notes=draft.quality_notes,
+            )
+            await subject_repo.update_description(subject.id, source_text)
+        finally:
+            await db.close()
+        self.log(f"Rebuilt subject rules for subject_id={subject_id} version={pref.version}.")
+        return CommandResult(
+            True,
+            f"Rebuilt rules for {subject.name} -> version {pref.version}.",
+            {
+                "subject_id": subject.id,
+                "version": pref.version,
+                "include_terms": pref.include_rules.get("topics", []),
+                "exclude_terms": pref.exclude_rules.get("topics", []),
+                "quality_rules": pref.quality_rules,
+            },
+        )
 
     async def reassign_subject_route(self, *, subject_id: int, chat_id: int) -> CommandResult:
         settings = self.settings()
@@ -900,26 +1035,40 @@ class DesktopCommandService:
             },
         )
 
-    async def read_content(self) -> CommandResult:
-        self.log("Reading content now.")
-        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
-            stats = await self._agent_app.pipeline_orchestrator.run_nightly_collection()
-        else:
-            app = PCCAApp(settings=self.settings())
-            stats = await app.run_nightly_once()
-        self.log(f"Read content finished: {json.dumps(stats or {}, sort_keys=True)}")
-        return CommandResult(True, "Content read finished.", {"nightly_stats": stats or {}})
+    async def read_content(self, *, platform: str | None = None) -> CommandResult:
+        platform_filter = platform.strip().lower() if platform and platform.strip() else None
+
+        async def runner() -> CommandResult:
+            label = f" for {platform_filter}" if platform_filter else " for all platforms"
+            self.log(f"Reading content now{label}.")
+            if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
+                stats = await self._agent_app.pipeline_orchestrator.run_nightly_collection(platform=platform_filter)
+            else:
+                app = PCCAApp(settings=self.settings())
+                stats = await app.run_nightly_once(platform=platform_filter)
+            self.log(f"Read content finished: {json.dumps(stats or {}, sort_keys=True)}")
+            message = (
+                f"Content read finished for {platform_filter}."
+                if platform_filter
+                else "Content read finished for all platforms."
+            )
+            return CommandResult(True, message, {"nightly_stats": stats or {}, "platform": platform_filter})
+
+        return await self._run_guarded_action(key="read_content", label="Get Content", runner=runner)
 
     async def get_briefs(self, *, subject_id: int | None = None) -> CommandResult:
-        subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
-        self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
-        stats = await self._run_briefs_with_available_agent(subject_ids=subject_ids)
-        self.log(f"Briefs finished: {json.dumps(stats or {}, sort_keys=True)}")
-        return CommandResult(
-            True,
-            "Briefs sent.",
-            {"digest_stats": stats or {}},
-        )
+        async def runner() -> CommandResult:
+            subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
+            self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
+            stats = await self._run_briefs_with_available_agent(subject_ids=subject_ids)
+            self.log(f"Briefs finished: {json.dumps(stats or {}, sort_keys=True)}")
+            return CommandResult(
+                True,
+                "Briefs sent.",
+                {"digest_stats": stats or {}},
+            )
+
+        return await self._run_guarded_action(key="get_briefs", label="Get Briefs", runner=runner)
 
     async def rebuild_todays_digest(self) -> CommandResult:
         self.log("Rebuilding today's Briefs.")

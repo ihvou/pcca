@@ -71,6 +71,9 @@ class SourceService:
             is_monitored=row.is_monitored,
         )
 
+    async def merge_source_metadata(self, *, source_id: int, values: dict) -> dict:
+        return await self.source_repo.merge_metadata(source_id, values)
+
     async def list_monitored_sources(self) -> list[SubjectSourceRow]:
         return await self.source_repo.list_monitored(active_only=True)
 

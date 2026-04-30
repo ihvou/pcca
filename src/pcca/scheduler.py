@@ -40,11 +40,18 @@ def _format_circuit_breaker_footer(metadata: dict) -> str | None:
     if not isinstance(broken, list) or not broken:
         return None
     skipped = metadata.get("circuit_skipped") if isinstance(metadata.get("circuit_skipped"), dict) else {}
+    reasons_by_platform = (
+        metadata.get("circuit_broken_reasons_by_platform")
+        if isinstance(metadata.get("circuit_broken_reasons_by_platform"), dict)
+        else {}
+    )
     lines = []
     for platform in sorted(str(item) for item in broken):
         skipped_count = int(skipped.get(platform) or 0)
+        reason = str(reasons_by_platform.get(platform) or "bot_shaped")
+        reason_text = "empty results" if reason == "empty_legitimate" else "bot-shaped failures"
         suffix = f" {skipped_count} source(s) skipped." if skipped_count else ""
-        lines.append(f"{platform} paused after consecutive collection failures.{suffix}")
+        lines.append(f"{platform} paused after consecutive {reason_text}.{suffix}")
     return "Collection safety note: " + " ".join(lines)
 
 

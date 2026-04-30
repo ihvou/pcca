@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -278,11 +279,59 @@ async def test_pipeline_backfills_resolved_linkedin_identifier_before_collecting
     assert collector.resolve_calls == ["in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg"]
     assert collector.collect_calls == ["in/boris-cherny"]
     assert await source_repo.get_by_identity(platform="linkedin", account_or_channel_id="in/boris-cherny")
+    metadata_row = await (
+        await db.conn.execute("SELECT metadata_json FROM sources WHERE account_or_channel_id = 'in/boris-cherny'")
+    ).fetchone()
+    assert metadata_row is not None
+    assert json.loads(metadata_row["metadata_json"])["resolved_from"] == "in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg"
     old_source = await source_repo.get_by_identity(
         platform="linkedin",
         account_or_channel_id="in/ACoAAA2WrzMBW0tblYjqmElLdB695E8tu_ZWxqg",
     )
     assert old_source is None
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_can_scope_collection_to_one_platform(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await source_service.monitor_source(platform="youtube", account_or_channel_id="@openai", display_name="OpenAI")
+    await source_service.monitor_source(platform="linkedin", account_or_channel_id="in/demo", display_name="Demo")
+
+    youtube = CountingCollector()
+    youtube.platform = "youtube"
+    linkedin = CountingCollector()
+    linkedin.platform = "linkedin"
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"youtube": youtube, "linkedin": linkedin},
+    )
+
+    scoped = await orchestrator.run_nightly_collection(platform="youtube")
+
+    assert scoped["platform_filter"] == "youtube"
+    assert scoped["sources_seen"] == 1
+    assert youtube.calls == ["@openai"]
+    assert linkedin.calls == []
+
+    unscoped = await orchestrator.run_nightly_collection()
+    assert unscoped["platform_filter"] is None
+    assert linkedin.calls == ["in/demo"]
 
     await db.close()
 
@@ -572,7 +621,7 @@ async def test_pipeline_marks_challenged_sources_for_reauth(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_platform_circuit_breaker_stops_remaining_sources_and_records_metadata(tmp_path: Path) -> None:
+async def test_platform_circuit_breaker_stops_bot_shaped_failures_and_records_metadata(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
     await db.initialize()
@@ -591,7 +640,7 @@ async def test_platform_circuit_breaker_stops_remaining_sources_and_records_meta
             display_name=f"Person {idx}",
         )
 
-    collector = EmptyCollector(platform="linkedin")
+    collector = SequenceCollector(["exception", "exception", "exception"], platform="linkedin")
     orchestrator = PipelineOrchestrator(
         subject_service=subject_service,
         source_service=source_service,
@@ -606,6 +655,7 @@ async def test_platform_circuit_breaker_stops_remaining_sources_and_records_meta
 
     assert collector.calls == ["person-0", "person-1", "person-2"]
     assert stats["circuit_broken"] == ["linkedin"]
+    assert stats["circuit_broken_reason"] == ["bot_shaped"]
     assert stats["sources_skipped_circuit_breaker"] == 3
     row = await (
         await db.conn.execute("SELECT metadata_json FROM run_logs WHERE run_type = 'nightly_collection'")
@@ -613,6 +663,48 @@ async def test_platform_circuit_breaker_stops_remaining_sources_and_records_meta
     assert row is not None
     assert row["metadata_json"]
     assert '"circuit_broken": ["linkedin"]' in row["metadata_json"]
+    assert '"circuit_broken_reason": ["bot_shaped"]' in row["metadata_json"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_platform_empty_results_do_not_trip_bot_shaped_breaker(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    for idx in range(6):
+        await source_service.monitor_source(
+            platform="linkedin",
+            account_or_channel_id=f"quiet-{idx}",
+            display_name=f"Quiet {idx}",
+        )
+
+    collector = EmptyCollector(platform="linkedin")
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"linkedin": collector},
+        circuit_threshold=3,
+        empty_threshold=25,
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert collector.calls == [f"quiet-{idx}" for idx in range(6)]
+    assert stats["circuit_broken"] == []
+    assert stats["sources_skipped_circuit_breaker"] == 0
 
     await db.close()
 
@@ -652,6 +744,7 @@ async def test_platform_circuit_breaker_counts_session_challenges(tmp_path: Path
     assert stats["sources_needing_reauth"] == 2
     assert stats["sources_skipped_circuit_breaker"] == 1
     assert stats["circuit_broken"] == ["x"]
+    assert stats["circuit_broken_reason"] == ["bot_shaped"]
 
     await db.close()
 
@@ -697,7 +790,7 @@ async def test_platform_circuit_breaker_resets_after_success_and_isolates_platfo
 
     assert linkedin.calls == ["person-0", "person-1", "person-2", "person-3", "person-4"]
     assert youtube.calls == ["@openai"]
-    assert stats["circuit_broken"] == ["linkedin"]
+    assert stats["circuit_broken"] == []
     assert stats["sources_skipped_circuit_breaker"] == 0
     assert stats["items_collected"] == 2
 

@@ -17,6 +17,8 @@ class SubjectService:
         *,
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
+        description_text: str | None = None,
         brief_full_text_chars: int = 1800,
         allow_empty_preferences: bool = False,
     ) -> Subject:
@@ -39,6 +41,8 @@ class SubjectService:
             telegram_thread_id=telegram_thread_id,
             include_terms=cleaned_include,
             exclude_terms=cleaned_exclude,
+            quality_notes=quality_notes,
+            description_text=description_text,
             brief_full_text_chars=brief_full_text_chars,
         )
 

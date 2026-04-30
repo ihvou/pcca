@@ -365,6 +365,13 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON source_lookup_cache(updated_at);
         """,
     ),
+    (
+        10,
+        """
+        ALTER TABLE sources ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}';
+        ALTER TABLE subjects ADD COLUMN description_text TEXT;
+        """,
+    ),
 ]
 
 

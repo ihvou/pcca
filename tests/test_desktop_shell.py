@@ -139,3 +139,6 @@ def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     assert "function restoreFormSnapshot" in INDEX_HTML
     assert "subjectDraftStatus" in INDEX_HTML
     assert "setInterval(() => loadState(), 5000)" in INDEX_HTML
+    assert "Get Content (${platformLabel(selectedPlatform)})" in INDEX_HTML
+    assert "timeoutMs: 1800000" in INDEX_HTML
+    assert "inflight_actions" in INDEX_HTML

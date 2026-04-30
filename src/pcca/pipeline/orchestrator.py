@@ -33,6 +33,7 @@ class PipelineOrchestrator:
     session_refresh_service: SessionRefreshService | None = None
     collectors: dict[str, Collector] = field(default_factory=dict)
     circuit_threshold: int | None = None
+    empty_threshold: int | None = None
 
     async def _preference_context(self, subject_id: int) -> tuple[list[str], list[str], float | None, int]:
         include_terms: list[str] = []
@@ -136,10 +137,12 @@ class PipelineOrchestrator:
             )
             stats["items_scored"] += 1
 
-    async def run_nightly_collection(self) -> dict:
+    async def run_nightly_collection(self, *, platform: str | None = None) -> dict:
         run_id = await self.run_log_repo.start_run("nightly_collection")
         run_started_at = time.monotonic()
         threshold = self._effective_circuit_threshold()
+        empty_threshold = self._effective_empty_threshold()
+        platform_filter = platform.strip().lower() if platform and platform.strip() else None
         stats = {
             "subjects_seen": 0,
             "sources_seen": 0,
@@ -156,56 +159,85 @@ class PipelineOrchestrator:
             "items_scored": 0,
             "sources_skipped_circuit_breaker": 0,
             "circuit_broken": [],
+            "circuit_broken_reason": [],
+            "platform_filter": platform_filter,
         }
-        metadata: dict = {"circuit_broken": [], "circuit_skipped": {}}
-        failure_streaks: dict[str, int] = {}
+        metadata: dict = {
+            "circuit_broken": [],
+            "circuit_broken_reason": [],
+            "circuit_broken_reasons_by_platform": {},
+            "circuit_skipped": {},
+            "platform_filter": platform_filter,
+        }
+        bot_failure_streaks: dict[str, int] = {}
+        empty_streaks: dict[str, int] = {}
         circuit_broken: set[str] = set()
+        circuit_broken_reasons: dict[str, str] = {}
         circuit_skipped: dict[str, int] = {}
 
         def record_platform_success(platform: str) -> None:
-            if failure_streaks.get(platform):
+            if bot_failure_streaks.get(platform) or empty_streaks.get(platform):
                 logger.info(
-                    "Platform circuit breaker streak reset run_id=%s platform=%s previous_streak=%d",
+                    "Platform circuit breaker streak reset run_id=%s platform=%s previous_bot_streak=%d previous_empty_streak=%d",
                     run_id,
                     platform,
-                    failure_streaks[platform],
+                    bot_failure_streaks.get(platform, 0),
+                    empty_streaks.get(platform, 0),
                 )
-            failure_streaks[platform] = 0
+            bot_failure_streaks[platform] = 0
+            empty_streaks[platform] = 0
+
+        def failure_class(reason: str) -> str:
+            if reason == "empty_result":
+                return "empty_legitimate"
+            return "bot_shaped"
 
         def record_platform_failure(platform: str, *, reason: str) -> None:
             if platform in circuit_broken:
                 return
-            next_streak = failure_streaks.get(platform, 0) + 1
-            failure_streaks[platform] = next_streak
+            cls = failure_class(reason)
+            active_threshold = empty_threshold if cls == "empty_legitimate" else threshold
+            streaks = empty_streaks if cls == "empty_legitimate" else bot_failure_streaks
+            next_streak = streaks.get(platform, 0) + 1
+            streaks[platform] = next_streak
             logger.warning(
-                "Platform collection failure streak run_id=%s platform=%s streak=%d threshold=%d reason=%s",
+                "Platform collection failure streak run_id=%s platform=%s class=%s streak=%d threshold=%d reason=%s",
                 run_id,
                 platform,
+                cls,
                 next_streak,
-                threshold,
+                active_threshold,
                 reason,
             )
-            if next_streak >= threshold:
+            if next_streak >= active_threshold:
                 circuit_broken.add(platform)
+                circuit_broken_reasons[platform] = cls
                 stats["circuit_broken"] = sorted(circuit_broken)
+                stats["circuit_broken_reason"] = sorted(set(circuit_broken_reasons.values()))
                 metadata["circuit_broken"] = sorted(circuit_broken)
+                metadata["circuit_broken_reason"] = sorted(set(circuit_broken_reasons.values()))
+                metadata["circuit_broken_reasons_by_platform"] = dict(sorted(circuit_broken_reasons.items()))
                 logger.error(
-                    "Platform circuit breaker tripped run_id=%s platform=%s threshold=%d reason=%s",
+                    "Platform circuit breaker tripped run_id=%s platform=%s class=%s threshold=%d reason=%s",
                     run_id,
                     platform,
-                    threshold,
+                    cls,
+                    active_threshold,
                     reason,
                 )
         try:
             subjects = await self.subject_service.list_subjects()
             stats["subjects_seen"] = len(subjects)
             monitored_sources = await self.source_service.list_monitored_sources()
+            if platform_filter:
+                monitored_sources = [source for source in monitored_sources if source.platform == platform_filter]
             stats["sources_seen"] = len(monitored_sources)
             logger.info(
-                "Nightly collection started run_id=%s subjects=%d monitored_sources=%d",
+                "Nightly collection started run_id=%s subjects=%d monitored_sources=%d platform_filter=%s",
                 run_id,
                 len(subjects),
                 len(monitored_sources),
+                platform_filter,
             )
 
             changed_items: dict[int, CollectedItem] = {}
@@ -255,12 +287,23 @@ class PipelineOrchestrator:
                     )
                     resolver = getattr(collector, "resolve_source_identifier", None)
                     if callable(resolver):
+                        original_identifier = source.account_or_channel_id
                         resolved_identifier = await resolver(source.account_or_channel_id)
                         if (
                             isinstance(resolved_identifier, str)
                             and resolved_identifier
                             and resolved_identifier != source.account_or_channel_id
                         ):
+                            metadata_values = {
+                                "resolved_identifier": resolved_identifier,
+                                "resolved_from": original_identifier,
+                            }
+                            if source.platform == "youtube":
+                                metadata_values["resolved_channel_id"] = resolved_identifier
+                            await self.source_service.merge_source_metadata(
+                                source_id=source.source_id,
+                                values=metadata_values,
+                            )
                             updated_source = await self.source_service.update_source_identifier(
                                 source_id=source.source_id,
                                 account_or_channel_id=resolved_identifier,
@@ -356,6 +399,8 @@ class PipelineOrchestrator:
                 )
 
             metadata["circuit_broken"] = sorted(circuit_broken)
+            metadata["circuit_broken_reason"] = sorted(set(circuit_broken_reasons.values()))
+            metadata["circuit_broken_reasons_by_platform"] = dict(sorted(circuit_broken_reasons.items()))
             metadata["circuit_skipped"] = dict(sorted(circuit_skipped.items()))
             await self.run_log_repo.finish_run(run_id, status="success", stats=stats, metadata=metadata)
             logger.info(
@@ -367,6 +412,8 @@ class PipelineOrchestrator:
             return stats
         except Exception:
             metadata["circuit_broken"] = sorted(circuit_broken)
+            metadata["circuit_broken_reason"] = sorted(set(circuit_broken_reasons.values()))
+            metadata["circuit_broken_reasons_by_platform"] = dict(sorted(circuit_broken_reasons.items()))
             metadata["circuit_skipped"] = dict(sorted(circuit_skipped.items()))
             await self.run_log_repo.finish_run(run_id, status="failed", stats=stats, metadata=metadata)
             logger.exception(
@@ -384,3 +431,11 @@ class PipelineOrchestrator:
             return max(1, int(os.getenv("PCCA_PLATFORM_CIRCUIT_THRESHOLD", "5") or "5"))
         except ValueError:
             return 5
+
+    def _effective_empty_threshold(self) -> int:
+        if self.empty_threshold is not None:
+            return max(1, int(self.empty_threshold))
+        try:
+            return max(1, int(os.getenv("PCCA_PLATFORM_EMPTY_THRESHOLD", "25") or "25"))
+        except ValueError:
+            return 25

@@ -479,6 +479,17 @@ def build_parser() -> argparse.ArgumentParser:
     refine_preferences_parser.add_argument("--include", action="append", default=[], help="Include term (repeatable)")
     refine_preferences_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
 
+    rebuild_subject_rules_parser = sub.add_parser(
+        "rebuild-subject-rules",
+        help="Re-run free-form preference extraction for an existing subject",
+    )
+    rebuild_subject_rules_parser.add_argument("subject_id", type=int, help="Subject id")
+    rebuild_subject_rules_parser.add_argument(
+        "--text",
+        required=False,
+        help="Optional original subject description. If omitted, stored description/current rules are used.",
+    )
+
     link_route_parser = sub.add_parser("link-subject-chat", help="Link subject delivery route to Telegram chat/thread")
     link_route_parser.add_argument("--subject", required=True, help="Subject name")
     link_route_parser.add_argument("--chat-id", required=True, type=int, help="Telegram chat id")
@@ -657,6 +668,15 @@ def main(argv: Sequence[str] | None = None) -> None:
                 exclude_terms=args.exclude,
             )
         )
+        return
+
+    if args.command == "rebuild-subject-rules":
+        result = asyncio.run(
+            DesktopCommandService().rebuild_subject_rules(subject_id=args.subject_id, text=args.text)
+        )
+        print(result.message)
+        print(f"include={result.data.get('include_terms', [])}")
+        print(f"exclude={result.data.get('exclude_terms', [])}")
         return
 
     if args.command == "link-subject-chat":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -210,6 +211,33 @@ class SourceRepository:
             )
         ).fetchone()
         return self._source_row(row) if row is not None else None
+
+    async def merge_metadata(self, source_id: int, values: dict) -> dict:
+        row = await (
+            await self.conn.execute(
+                "SELECT metadata_json FROM sources WHERE id = ?",
+                (source_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return {}
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        metadata.update(values)
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET metadata_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(metadata, sort_keys=True), source_id),
+        )
+        await self.conn.commit()
+        return metadata
 
     async def link_to_subject(self, subject_id: int, source_id: int, priority: int = 0) -> None:
         await self.conn.execute(

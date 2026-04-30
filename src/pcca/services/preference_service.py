@@ -29,6 +29,7 @@ class PreferenceService:
         subject_name: str,
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
     ) -> SubjectPreference:
         subject = await self.subject_repo.get_by_name(subject_name)
         if subject is None:
@@ -37,4 +38,21 @@ class PreferenceService:
             subject_id=subject.id,
             include_terms=include_terms or [],
             exclude_terms=exclude_terms or [],
+            quality_notes=quality_notes,
+        )
+
+    async def replace_subject_rules(
+        self,
+        *,
+        subject_id: int,
+        include_terms: list[str] | None = None,
+        exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
+    ) -> SubjectPreference:
+        await self.subject_repo.get_by_id(subject_id)
+        return await self.preference_repo.replace_rules(
+            subject_id=subject_id,
+            include_terms=include_terms or [],
+            exclude_terms=exclude_terms or [],
+            quality_notes=quality_notes,
         )

@@ -52,6 +52,7 @@ class SubjectPreferenceRepository:
         subject_id: int,
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
     ) -> SubjectPreference:
         current = await self.get_latest(subject_id)
         if current is None:
@@ -71,6 +72,8 @@ class SubjectPreferenceRepository:
         merged_exclude = self._merge_terms(exclude_rules.get("topics"), exclude_terms or [])
         include_rules["topics"] = merged_include
         exclude_rules["topics"] = merged_exclude
+        if quality_notes and quality_notes.strip():
+            quality_rules["notes"] = quality_notes.strip()
 
         await self.conn.execute(
             """
@@ -83,6 +86,48 @@ class SubjectPreferenceRepository:
                 version,
                 json.dumps(include_rules),
                 json.dumps(exclude_rules),
+                json.dumps(source_weights),
+                json.dumps(quality_rules),
+            ),
+        )
+        await self.conn.commit()
+        latest = await self.get_latest(subject_id)
+        if latest is None:
+            raise RuntimeError("Failed to persist subject preferences.")
+        return latest
+
+    async def replace_rules(
+        self,
+        *,
+        subject_id: int,
+        include_terms: list[str] | None = None,
+        exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
+    ) -> SubjectPreference:
+        current = await self.get_latest(subject_id)
+        if current is None:
+            source_weights = {}
+            quality_rules = {"min_practicality": 0.5, "max_items": 5}
+            version = 1
+        else:
+            source_weights = dict(current.source_weights)
+            quality_rules = dict(current.quality_rules)
+            version = current.version + 1
+
+        if quality_notes and quality_notes.strip():
+            quality_rules["notes"] = quality_notes.strip()
+
+        await self.conn.execute(
+            """
+            INSERT INTO subject_preferences(
+              subject_id, version, include_rules_json, exclude_rules_json, source_weights_json, quality_rules_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                subject_id,
+                version,
+                json.dumps({"topics": self._merge_terms([], include_terms or []), "formats": []}),
+                json.dumps({"topics": self._merge_terms([], exclude_terms or []), "sources": []}),
                 json.dumps(source_weights),
                 json.dumps(quality_rules),
             ),

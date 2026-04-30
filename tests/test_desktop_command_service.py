@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -269,6 +270,37 @@ async def test_desktop_subject_refinement_updates_existing_subject(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_desktop_rebuild_subject_rules_replaces_preferences(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject = await SubjectRepository(conn=db.conn).create(
+            "Ukraine War News",
+            include_terms=["reputable sources", "high quality analytics"],
+        )
+    finally:
+        await db.close()
+
+    result = await service.rebuild_subject_rules(
+        subject_id=subject.id,
+        text="Subject: Ukraine War News. Include ukraine, russia, kyiv, war. Avoid propaganda.",
+    )
+
+    assert result.ok is True
+    assert result.data["version"] == 2
+    include_terms = result.data["include_terms"]
+    assert "ukraine" in include_terms
+    assert "russia" in include_terms
+    assert "reputable sources" not in include_terms
+
+
+@pytest.mark.asyncio
 async def test_desktop_can_confirm_telegram_draft_and_assign_route(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)
@@ -395,3 +427,72 @@ async def test_desktop_state_surfaces_sources_needing_reauth(tmp_path: Path) -> 
 
     assert state["reauth_sources"][0]["platform"] == "youtube"
     assert state["reauth_sources"][0]["account_or_channel_id"] == "@openai"
+
+
+@pytest.mark.asyncio
+async def test_desktop_read_content_passes_platform_scope_to_running_agent(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    class FakeOrchestrator:
+        def __init__(self) -> None:
+            self.platforms: list[str | None] = []
+
+        async def run_nightly_collection(self, *, platform: str | None = None):
+            self.platforms.append(platform)
+            return {"platform_filter": platform, "items_collected": 1}
+
+    fake_orchestrator = FakeOrchestrator()
+    service._agent_app = type("FakeApp", (), {"pipeline_orchestrator": fake_orchestrator})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        scoped = await service.read_content(platform="youtube")
+        unscoped = await service.read_content()
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+    assert scoped.ok is True
+    assert scoped.data["platform"] == "youtube"
+    assert unscoped.data["platform"] is None
+    assert fake_orchestrator.platforms == ["youtube", None]
+
+
+@pytest.mark.asyncio
+async def test_desktop_read_content_guard_rejects_concurrent_runs(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowOrchestrator:
+        async def run_nightly_collection(self, *, platform: str | None = None):
+            entered.set()
+            await release.wait()
+            return {"platform_filter": platform, "items_collected": 1}
+
+    service._agent_app = type("FakeApp", (), {"pipeline_orchestrator": SlowOrchestrator()})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    first = asyncio.create_task(service.read_content(platform="youtube"))
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        second = await service.read_content(platform="youtube")
+        assert second.ok is False
+        assert second.data["already_running"] is True
+        assert service.inflight_actions()[0]["key"] == "read_content"
+        release.set()
+        first_result = await first
+        assert first_result.ok is True
+        assert service.inflight_actions() == []
+    finally:
+        release.set()
+        if not first.done():
+            first.cancel()
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass

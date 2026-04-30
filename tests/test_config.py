@@ -15,6 +15,8 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
         encoding="utf-8",
     )
     monkeypatch.delenv("PCCA_TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("PCCA_TIMEZONE", raising=False)
+    monkeypatch.delenv("PCCA_PLATFORM_EMPTY_THRESHOLD", raising=False)
     monkeypatch.setenv("PCCA_OLLAMA_ENABLED", "false")
 
     settings = Settings.from_env()
@@ -27,6 +29,7 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     assert settings.session_refresh_enabled is True
     assert settings.session_refresh_cooldown_seconds == 1800
     assert settings.session_refresh_browser is None
+    assert settings.platform_empty_threshold == 25
 
 
 def test_browser_channel_can_use_bundled_chromium(tmp_path, monkeypatch) -> None:
@@ -46,6 +49,7 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
                 "PCCA_SESSION_REFRESH_ENABLED=false",
                 "PCCA_SESSION_REFRESH_COOLDOWN_SECONDS=42",
                 "PCCA_SESSION_REFRESH_BROWSER=arc",
+                "PCCA_PLATFORM_EMPTY_THRESHOLD=42",
             ]
         ),
         encoding="utf-8",
@@ -56,3 +60,4 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
     assert settings.session_refresh_enabled is False
     assert settings.session_refresh_cooldown_seconds == 42
     assert settings.session_refresh_browser == "arc"
+    assert settings.platform_empty_threshold == 42

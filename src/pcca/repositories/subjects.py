@@ -19,14 +19,16 @@ class SubjectRepository:
         *,
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
+        quality_notes: str | None = None,
+        description_text: str | None = None,
         brief_full_text_chars: int = 1800,
     ) -> Subject:
         cursor = await self.conn.execute(
             """
-            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars)
-            VALUES (?, ?, 'active', ?)
+            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars, description_text)
+            VALUES (?, ?, 'active', ?, ?)
             """,
-            (name, telegram_thread_id, brief_full_text_chars),
+            (name, telegram_thread_id, brief_full_text_chars, description_text),
         )
         await self.conn.commit()
         created_id = cursor.lastrowid
@@ -45,11 +47,40 @@ class SubjectRepository:
                 json.dumps({"topics": include_topics, "formats": []}),
                 json.dumps({"topics": exclude_topics, "sources": []}),
                 json.dumps({}),
-                json.dumps({"min_practicality": 0.5, "max_items": 5}),
+                json.dumps(
+                    {
+                        "min_practicality": 0.5,
+                        "max_items": 5,
+                        **({"notes": quality_notes.strip()} if quality_notes and quality_notes.strip() else {}),
+                    }
+                ),
             ),
         )
         await self.conn.commit()
         return await self.get_by_id(created_id)
+
+    async def update_description(self, subject_id: int, description_text: str | None) -> None:
+        await self.conn.execute(
+            """
+            UPDATE subjects
+            SET description_text = COALESCE(NULLIF(?, ''), description_text)
+            WHERE id = ?
+            """,
+            ((description_text or "").strip(), subject_id),
+        )
+        await self.conn.commit()
+
+    async def get_description_text(self, subject_id: int) -> str | None:
+        row = await (
+            await self.conn.execute(
+                "SELECT description_text FROM subjects WHERE id = ?",
+                (subject_id,),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        value = row["description_text"]
+        return str(value).strip() if value else None
 
     async def list_all(self) -> list[Subject]:
         rows = await (

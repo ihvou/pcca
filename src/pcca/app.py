@@ -127,6 +127,7 @@ class PCCAApp:
             model_router=model_router,
             session_refresh_service=self.session_refresh_service,
             circuit_threshold=self.settings.platform_circuit_threshold,
+            empty_threshold=self.settings.platform_empty_threshold,
             collectors={
                 "x": XCollector(session_manager=self.browser_session_manager),
                 "linkedin": LinkedInCollector(session_manager=self.browser_session_manager),
@@ -205,11 +206,11 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def run_nightly_once(self) -> dict:
+    async def run_nightly_once(self, *, platform: str | None = None) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=False)
         try:
-            stats = await self.pipeline_orchestrator.run_nightly_collection()
+            stats = await self.pipeline_orchestrator.run_nightly_collection(platform=platform)
             logger.info("PCCA one-shot nightly finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
             return stats
         finally:

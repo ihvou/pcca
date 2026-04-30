@@ -51,6 +51,7 @@ def _add_runtime_summary(zf: zipfile.ZipFile, settings: Settings) -> None:
             "session_refresh_cooldown_seconds": settings.session_refresh_cooldown_seconds,
             "session_refresh_browser": settings.session_refresh_browser,
             "platform_circuit_threshold": settings.platform_circuit_threshold,
+            "platform_empty_threshold": settings.platform_empty_threshold,
             "ollama_enabled": settings.ollama_enabled,
             "ollama_base_url": settings.ollama_base_url,
             "ollama_model": settings.ollama_model,
