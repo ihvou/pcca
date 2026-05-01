@@ -1086,15 +1086,20 @@ class DesktopCommandService:
     async def backfill_embeddings(
         self,
         *,
-        concurrency: int = 4,
+        concurrency: int | None = None,
         limit: int | None = None,
         rescore: bool = True,
     ) -> CommandResult:
         async def runner() -> CommandResult:
             started_at = time.monotonic()
+            effective_concurrency = (
+                int(concurrency)
+                if concurrency is not None
+                else self.settings().embedding_backfill_concurrency
+            )
             self.log(
                 "Backfilling embeddings "
-                f"concurrency={max(1, int(concurrency))} limit={limit or 'all'} rescore={rescore}."
+                f"concurrency={max(1, effective_concurrency)} limit={limit or 'all'} rescore={rescore}."
             )
 
             def progress(event: dict[str, Any]) -> None:
@@ -1105,7 +1110,7 @@ class DesktopCommandService:
 
             if self._agent_app is not None and self.agent_running:
                 stats = await self._agent_app.backfill_embeddings_current(
-                    concurrency=concurrency,
+                    concurrency=effective_concurrency,
                     limit=limit,
                     rescore=rescore,
                     progress_callback=progress,
@@ -1113,7 +1118,7 @@ class DesktopCommandService:
             else:
                 app = PCCAApp(settings=self.settings())
                 stats = await app.run_embedding_backfill_once(
-                    concurrency=concurrency,
+                    concurrency=effective_concurrency,
                     limit=limit,
                     rescore=rescore,
                     progress_callback=progress,

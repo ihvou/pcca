@@ -587,8 +587,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrency",
         required=False,
         type=int,
-        default=4,
-        help="Maximum concurrent embedding requests",
+        default=None,
+        help=(
+            "Maximum concurrent embedding requests. Defaults to "
+            "PCCA_EMBEDDING_BACKFILL_CONCURRENCY (default 2). Lower values "
+            "produce a cooler chip at the cost of slightly slower backfill."
+        ),
     )
     embed_backfill_parser.add_argument(
         "--no-rescore",
@@ -798,9 +802,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         def progress(event: dict) -> None:
             print(f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}", flush=True)
 
+        effective_concurrency = (
+            int(args.concurrency)
+            if args.concurrency is not None
+            else settings.embedding_backfill_concurrency
+        )
         stats = asyncio.run(
             app.run_embedding_backfill_once(
-                concurrency=max(1, int(args.concurrency or 4)),
+                concurrency=max(1, effective_concurrency),
                 limit=args.limit,
                 rescore=not args.no_rescore,
                 progress_callback=progress,
