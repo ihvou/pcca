@@ -203,7 +203,8 @@ async def test_digest_run_sends_one_message_per_brief_and_feedback_buttons_map_t
     assert int(item_delivery_count["c"]) == 2
     assert int(button_count["c"]) == 5
     assert len(fake_telegram.sent_messages) == 2
-    assert "published 2026-04-24T09:00:00" in fake_telegram.sent_messages[0]["brief"].short_text
+    assert "#AgenticPM" in fake_telegram.sent_messages[0]["brief"].short_text
+    assert "Why this matched:" not in fake_telegram.sent_messages[0]["brief"].short_text
 
     token_row = await (
         await db.conn.execute("SELECT token FROM digest_buttons WHERE action = 'more like this' LIMIT 1")
@@ -512,6 +513,45 @@ async def test_scheduled_morning_digest_runs_rescore_before_sending(tmp_path: Pa
     )
 
     stats = await runner.run_morning_digest()
+
+    assert fake_pipeline.rescore_calls == 1
+    assert stats["pre_send_rescore"] == {"items_scored": 1}
+    assert stats["deliveries_sent"] == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_smart_briefs_rescores_before_sending(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Claude Code release details with practical agent workflow",
+        url="https://example.com/post",
+        score=0.92,
+        rationale="practical release details",
+    )
+
+    fake_pipeline = FakePipelineOrchestrator()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        pipeline_orchestrator=fake_pipeline,  # type: ignore[arg-type]
+        telegram_service=FakeTelegramService(),  # type: ignore[arg-type]
+        digest_renderer=HeadlineOnlyRenderer(),
+    )
+
+    stats = await runner.run_smart_briefs()
 
     assert fake_pipeline.rescore_calls == 1
     assert stats["pre_send_rescore"] == {"items_scored": 1}

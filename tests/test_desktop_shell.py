@@ -148,6 +148,9 @@ def test_desktop_server_rebuild_rules_endpoint(tmp_path) -> None:
             self.rebuilt.append((subject_id, text))
             return CommandResult(True, "Rebuilt rules.", {"subject_id": subject_id})
 
+        async def rebuild_all_subject_rules(self):
+            return CommandResult(True, "Rebuilt all subjects.", {})
+
     fake_service = FakeService()
     server = DesktopWebServer(
         settings=make_settings(tmp_path),
@@ -177,7 +180,9 @@ def test_desktop_wizard_has_tabbed_product_surface() -> None:
     assert "Capture Session" not in INDEX_HTML
     assert "Re-build briefs" not in INDEX_HTML
     assert "Rebuild Rules" in INDEX_HTML
+    assert "Rebuild All Subjects" in INDEX_HTML
     assert "Backfill Embeddings" in INDEX_HTML
+    assert "Embeddings not yet warmed" in INDEX_HTML
     assert "Include terms" not in INDEX_HTML
     assert "High-quality examples" not in INDEX_HTML
 
@@ -194,3 +199,4 @@ def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     assert "timeoutMs: 1800000" in INDEX_HTML
     assert "inflight_actions" in INDEX_HTML
     assert "/api/subjects/rebuild-rules" in INDEX_HTML
+    assert "/api/subjects/rebuild-all-rules" in INDEX_HTML

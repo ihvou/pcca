@@ -120,13 +120,14 @@ class JobRunner:
                 smart,
                 sorted(subject_ids) if subject_ids is not None else None,
             )
-            if run_type == "morning_digest" and self.pipeline_orchestrator is not None:
-                logger.info("Morning digest pre-send rescore started run_id=%s.", run_id)
+            if run_type in {"morning_digest", "briefs"} and self.pipeline_orchestrator is not None:
+                logger.info("Brief pre-send rescore started run_id=%s run_type=%s.", run_id, run_type)
                 rescore_stats = await self.pipeline_orchestrator.rescore_existing_items()
                 stats["pre_send_rescore"] = rescore_stats
                 logger.info(
-                    "Morning digest pre-send rescore finished run_id=%s stats=%s",
+                    "Brief pre-send rescore finished run_id=%s run_type=%s stats=%s",
                     run_id,
+                    run_type,
                     rescore_stats,
                 )
             if (

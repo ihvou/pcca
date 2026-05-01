@@ -251,6 +251,7 @@ INDEX_HTML = r"""
             <div class="actions">
               <button id="runAllContentButton" class="secondary" onclick="readContentAll()">Run All Content</button>
               <button id="backfillEmbeddingsButton" class="secondary" onclick="backfillEmbeddings()">Backfill Embeddings</button>
+              <button id="rebuildAllRulesButton" class="secondary" onclick="rebuildAllSubjectRules()">Rebuild All Subjects</button>
             </div>
           </div>
           <div class="card tight">
@@ -424,6 +425,10 @@ async function rebuildSubjectRules(subjectId) {
   }
   return data;
 }
+async function rebuildAllSubjectRules() {
+  pauseRefresh(1800000);
+  return postAction('/api/subjects/rebuild-all-rules', {}, {timeoutMs: 1800000});
+}
 async function confirmSubjectDraft(chatId=null) { return postAction('/api/subjects/confirm-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function cancelSubjectDraft(chatId=null) { const subjectTextEl = byId('subjectText'); if (chatId === null && subjectTextEl) subjectTextEl.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
@@ -596,9 +601,11 @@ function updateActionControls(state) {
   const getSourcesButton = byId('getSourcesButton');
   const runAllButton = byId('runAllContentButton');
   const backfillButton = byId('backfillEmbeddingsButton');
+  const rebuildAllRulesButton = byId('rebuildAllRulesButton');
   const readRunning = actionRunning(state, 'read_content');
   const stageRunning = actionRunning(state, 'stage_follows');
   const backfillRunning = actionRunning(state, 'embedding_backfill');
+  const rebuildAllRulesRunning = actionRunning(state, 'rebuild_all_subject_rules');
   if (readButton) {
     readButton.textContent = readRunning ? `Running: ${readRunning.label}` : `Get Content (${platformLabel(selectedPlatform)})`;
     readButton.disabled = busy || Boolean(readRunning);
@@ -608,13 +615,17 @@ function updateActionControls(state) {
     backfillButton.textContent = backfillRunning ? `Running: ${backfillRunning.label}` : 'Backfill Embeddings';
     backfillButton.disabled = busy || Boolean(backfillRunning);
   }
+  if (rebuildAllRulesButton) {
+    rebuildAllRulesButton.textContent = rebuildAllRulesRunning ? `Running: ${rebuildAllRulesRunning.label}` : 'Rebuild All Subjects';
+    rebuildAllRulesButton.disabled = busy || Boolean(rebuildAllRulesRunning);
+  }
   if (getSourcesButton) {
     getSourcesButton.textContent = stageRunning ? `Running: ${stageRunning.label}` : `Get Sources (${platformLabel(selectedPlatform)})`;
     getSourcesButton.disabled = busy || Boolean(stageRunning);
   }
   const sourceStatusEl = byId('sourceStatus');
-  if ((readRunning || stageRunning || backfillRunning) && sourceStatusEl) {
-    const running = readRunning || stageRunning || backfillRunning;
+  if ((readRunning || stageRunning || backfillRunning || rebuildAllRulesRunning) && sourceStatusEl) {
+    const running = readRunning || stageRunning || backfillRunning || rebuildAllRulesRunning;
     notice('sourceStatus', `Running: ${running.label} (started ${String(running.started_at || '').slice(11, 16) || 'now'}).`, '');
   }
 }
@@ -664,6 +675,10 @@ async function loadState(options={}) {
     if (data.embedding_degraded && data.embedding_degraded.degraded) {
       const names = (data.embedding_degraded.subjects || []).map(s => s.subject_name || s.subject_id).filter(Boolean).join(', ');
       failures.push(`Embedding scoring degraded${names ? ` for: ${names}` : ''}. Check Ollama and run Backfill Embeddings in Debug.`);
+    }
+    if (data.embedding_not_warmed && data.embedding_not_warmed.not_warmed) {
+      const names = (data.embedding_not_warmed.subjects || []).map(s => s.subject_name || s.subject_id).filter(Boolean).join(', ');
+      failures.push(`Embeddings not yet warmed${names ? ` for: ${names}` : ''}. Run Backfill Embeddings or Rebuild All Subjects in Debug to enable embedding scoring.`);
     }
     failureBox.className = failures.length ? 'notice bad' : 'notice ok';
     failureBox.textContent = failures.join('\n') || 'No visible failures.';
@@ -868,6 +883,10 @@ class DesktopWebServer:
                 request,
             )
 
+        async def rebuild_all_subject_rules(request):
+            assert self.service is not None
+            return await run_result(lambda _p: self.service.rebuild_all_subject_rules(), request)
+
         async def confirm_subject_draft(request):
             assert self.service is not None
             return await run_result(
@@ -1006,6 +1025,7 @@ class DesktopWebServer:
             Route("/api/staged-sources", staged_sources, methods=["GET"]),
             Route("/api/subjects/draft", draft_subject, methods=["POST"]),
             Route("/api/subjects/rebuild-rules", rebuild_subject_rules, methods=["POST"]),
+            Route("/api/subjects/rebuild-all-rules", rebuild_all_subject_rules, methods=["POST"]),
             Route("/api/subjects/confirm-draft", confirm_subject_draft, methods=["POST"]),
             Route("/api/subjects/cancel-draft", cancel_subject_draft, methods=["POST"]),
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),

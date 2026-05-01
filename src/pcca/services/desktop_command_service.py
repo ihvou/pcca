@@ -328,6 +328,7 @@ class DesktopCommandService:
             circuit_broken: list[str] = []
             circuit_broken_reasons_by_platform: dict[str, str] = {}
             embedding_degraded: dict[str, Any] = {"degraded": False}
+            embedding_not_warmed: dict[str, Any] = {"not_warmed": False}
             for row in run_log_rows:
                 try:
                     metadata = json.loads(row["metadata_json"] or "{}")
@@ -352,6 +353,15 @@ class DesktopCommandService:
                             "subjects": subjects_payload if isinstance(subjects_payload, list) else [],
                             "fallback_items": int(metadata.get("embedding_fallback_items") or 0),
                             "items_scored": int(metadata.get("embedding_items_scored") or 0),
+                        }
+                if row["run_type"] in {"nightly_collection", "embedding_rescore"} and not embedding_not_warmed.get("not_warmed"):
+                    if isinstance(metadata, dict) and metadata.get("embedding_not_warmed"):
+                        subjects_payload = metadata.get("embedding_not_warmed_subjects")
+                        embedding_not_warmed = {
+                            "not_warmed": True,
+                            "run_id": row["id"],
+                            "run_type": row["run_type"],
+                            "subjects": subjects_payload if isinstance(subjects_payload, list) else [],
                         }
                 recent_run_logs.append(
                     {
@@ -410,6 +420,7 @@ class DesktopCommandService:
                 "circuit_broken": circuit_broken,
                 "circuit_broken_reasons_by_platform": circuit_broken_reasons_by_platform,
                 "embedding_degraded": embedding_degraded,
+                "embedding_not_warmed": embedding_not_warmed,
                 "subjects": [asdict(subject) for subject in subjects],
                 "subject_preferences": subject_preferences,
                 "subject_source_overrides": subject_source_overrides,
@@ -1019,6 +1030,94 @@ class DesktopCommandService:
             },
         )
 
+    async def rebuild_all_subject_rules(self) -> CommandResult:
+        async def runner() -> CommandResult:
+            settings = self.settings()
+            settings.ensure_dirs()
+            db = Database(path=settings.db_path)
+            await db.connect()
+            await db.initialize()
+            try:
+                if db.conn is None:
+                    raise RuntimeError("Database connection unavailable.")
+                subjects = await SubjectRepository(conn=db.conn).list_all()
+            finally:
+                await db.close()
+
+            rebuilt: list[dict[str, Any]] = []
+            errors: list[dict[str, Any]] = []
+            for index, subject in enumerate(subjects, start=1):
+                self._set_inflight_label(
+                    key="rebuild_all_subject_rules",
+                    label=f"Rebuild All Subjects: rules {index}/{len(subjects)}",
+                )
+                try:
+                    result = await self.rebuild_subject_rules(subject_id=subject.id)
+                    rebuilt.append(
+                        {
+                            "subject_id": subject.id,
+                            "subject_name": subject.name,
+                            "version": (result.data or {}).get("version"),
+                        }
+                    )
+                except Exception as exc:
+                    self.log(f"Failed to rebuild rules for subject_id={subject.id}: {exc}")
+                    logger.exception("Failed to rebuild subject rules subject_id=%s", subject.id)
+                    errors.append({"subject_id": subject.id, "subject_name": subject.name, "error": str(exc)})
+
+            self._set_inflight_label(
+                key="rebuild_all_subject_rules",
+                label="Rebuild All Subjects: warming embeddings",
+            )
+
+            def progress(event: dict[str, Any]) -> None:
+                self.log(
+                    "Embedding backfill after subject rebuild "
+                    f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}"
+                )
+
+            effective_concurrency = self.settings().embedding_backfill_concurrency
+            if self._agent_app is not None and self.agent_running:
+                embedding_stats = await self._agent_app.backfill_embeddings_current(
+                    concurrency=effective_concurrency,
+                    rescore=False,
+                    include_segments=True,
+                    progress_callback=progress,
+                )
+            else:
+                app = PCCAApp(settings=self.settings())
+                embedding_stats = await app.run_embedding_backfill_once(
+                    concurrency=effective_concurrency,
+                    rescore=False,
+                    include_segments=True,
+                    progress_callback=progress,
+                )
+            ok = not errors
+            message = (
+                f"Rebuilt {len(rebuilt)} subject(s) and warmed embeddings."
+                if ok
+                else f"Rebuilt {len(rebuilt)} subject(s), {len(errors)} failed; warmed embeddings afterward."
+            )
+            self.log(message)
+            return CommandResult(
+                ok,
+                message,
+                {
+                    "subjects_total": len(subjects),
+                    "subjects_rebuilt": len(rebuilt),
+                    "subjects_failed": len(errors),
+                    "rebuilt": rebuilt,
+                    "errors": errors,
+                    "embedding_stats": embedding_stats or {},
+                },
+            )
+
+        return await self._run_guarded_action(
+            key="rebuild_all_subject_rules",
+            label="Rebuild All Subjects",
+            runner=runner,
+        )
+
     async def reassign_subject_route(self, *, subject_id: int, chat_id: int) -> CommandResult:
         settings = self.settings()
         settings.ensure_dirs()
@@ -1112,12 +1211,14 @@ class DesktopCommandService:
             if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
                 runner_method = self._agent_app.pipeline_orchestrator.run_nightly_collection
                 kwargs = {"platform": platform_filter}
+                if "score" in inspect.signature(runner_method).parameters:
+                    kwargs["score"] = False
                 if "progress_callback" in inspect.signature(runner_method).parameters:
                     kwargs["progress_callback"] = progress
                 stats = await runner_method(**kwargs)
             else:
                 app = PCCAApp(settings=self.settings())
-                stats = await app.run_nightly_once(platform=platform_filter, progress_callback=progress)
+                stats = await app.run_nightly_once(platform=platform_filter, score=False, progress_callback=progress)
             if stats.get("skipped_already_running"):
                 message = "Content collection is already running; check Logs."
                 self.log(message)

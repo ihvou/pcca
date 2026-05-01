@@ -17,7 +17,7 @@ from telegram.ext import (
     filters,
 )
 
-from pcca.digest_renderer import BriefPayload, EXPAND_BRIEF_ACTION
+from pcca.digest_renderer import BriefPayload, EXPAND_BRIEF_ACTION, escape_markdown_v2
 from pcca.models import IntentAction
 from pcca.repositories.subject_drafts import DESKTOP_SUBJECT_DRAFT_CHAT_ID, SubjectDraft, SubjectDraftRepository
 from pcca.services.feedback_service import FeedbackService
@@ -134,14 +134,15 @@ class TelegramService:
         )
         text = brief.short_text
         if footer:
-            text = f"{text}\n\n{footer}"
+            text = f"{text}\n\n{escape_markdown_v2(footer)}"
         try:
             sent = await self.application.bot.send_message(
                 chat_id=chat_id,
-                text=f"📌 {subject_name}\n\n{text}",
+                text=text,
                 reply_markup=self._brief_inline_keyboard(brief.buttons),
                 message_thread_id=thread_id,
                 disable_web_page_preview=True,
+                parse_mode="MarkdownV2",
             )
             logger.info(
                 "Telegram Brief send finished chat_id=%s subject=%s item_id=%s message_id=%s duration_ms=%d",
@@ -759,6 +760,7 @@ class TelegramService:
                 [row for row in buttons if row.kind == "feedback"]
             ),
             disable_web_page_preview=True,
+            parse_mode="MarkdownV2",
         )
         await update.callback_query.answer("Expanded.")
 

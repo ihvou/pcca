@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 import aiosqlite
@@ -23,13 +24,15 @@ class SubjectRepository:
         quality_notes: str | None = None,
         description_text: str | None = None,
         brief_full_text_chars: int = 1800,
+        telegram_hashtag: str | None = None,
     ) -> Subject:
+        hashtag = telegram_hashtag or self._to_camel_hashtag(name)
         cursor = await self.conn.execute(
             """
-            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars, description_text)
-            VALUES (?, ?, 'active', ?, ?)
+            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars, description_text, telegram_hashtag)
+            VALUES (?, ?, 'active', ?, ?, ?)
             """,
-            (name, telegram_thread_id, brief_full_text_chars, description_text),
+            (name, telegram_thread_id, brief_full_text_chars, description_text, hashtag),
         )
         await self.conn.commit()
         created_id = cursor.lastrowid
@@ -151,7 +154,7 @@ class SubjectRepository:
         rows = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
                 FROM subjects
                 ORDER BY created_at ASC
                 """
@@ -165,6 +168,7 @@ class SubjectRepository:
                 status=row["status"],
                 created_at=row["created_at"],
                 brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
+                telegram_hashtag=row["telegram_hashtag"],
             )
             for row in rows
         ]
@@ -173,7 +177,7 @@ class SubjectRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
                 FROM subjects
                 WHERE id = ?
                 """,
@@ -189,13 +193,14 @@ class SubjectRepository:
             status=row["status"],
             created_at=row["created_at"],
             brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
+            telegram_hashtag=row["telegram_hashtag"],
         )
 
     async def get_by_name(self, name: str) -> Subject | None:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
                 FROM subjects
                 WHERE LOWER(name) = LOWER(?)
                 """,
@@ -211,6 +216,7 @@ class SubjectRepository:
             status=row["status"],
             created_at=row["created_at"],
             brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
+            telegram_hashtag=row["telegram_hashtag"],
         )
 
     @staticmethod
@@ -224,3 +230,10 @@ class SubjectRepository:
             seen.add(normalized)
             out.append(normalized)
         return out
+
+    @staticmethod
+    def _to_camel_hashtag(value: str) -> str:
+        words = re.findall(r"[A-Za-z0-9]+", value or "")
+        if not words:
+            return "#Brief"
+        return "#" + "".join(word[:1].upper() + word[1:] for word in words)

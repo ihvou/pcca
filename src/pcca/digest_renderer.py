@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from typing import Protocol
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -139,28 +140,19 @@ class TelegramDigestRenderer:
         ranked_items: list[CandidateItem],
         context: DigestRenderContext,
     ) -> DeliveryPayload:
-        _ = subject, context.run_date
         briefs: list[BriefPayload] = []
         shortcuts = context.resolved_button_shortcuts()
         full_text_chars = clamp_full_text_chars(context.full_text_chars)
+        hashtag = subject.telegram_hashtag or _to_camel_hashtag(subject.name)
         for idx, candidate in enumerate(ranked_items, start=1):
-            title = _first_line(candidate.title_or_text)
             reason = candidate.rationale or f"score={candidate.final_score:.2f}"
-            metadata_line = _metadata_line(candidate)
-            brief_url = _brief_url(candidate)
-            url_line = f"\n{brief_url}" if brief_url else ""
-            matched_segment = _segment_body(candidate, limit=700)
-            short_text = (
-                f"Brief {idx}: {title}\n"
-                f"{metadata_line}{url_line}\n\n"
-                f"Why this matched: {reason}\n\n"
-                f"Matched segment:\n{matched_segment}"
-            )
-            full_text = (
-                f"Brief {idx}: {title}\n"
-                f"{metadata_line}{url_line}\n\n"
-                f"Why this matched: {reason}\n\n"
-                f"{_segment_body(candidate, limit=full_text_chars)}"
+            short_text = _brief_short_text(candidate, subject_hashtag=hashtag, run_date=context.run_date)
+            full_text = _brief_full_text(
+                candidate,
+                subject_hashtag=hashtag,
+                run_date=context.run_date,
+                reason=reason,
+                full_text_chars=full_text_chars,
             )
             buttons: list[BriefButtonPayload] = []
             for shortcut in shortcuts:
@@ -194,6 +186,14 @@ class TelegramDigestRenderer:
 def _first_line(text: str) -> str:
     first = (text or "").splitlines()[0].strip() if text else ""
     return first[:180] if first else "(no title)"
+
+
+MARKDOWN_V2_RESERVED = set(r"_*[]()~`>#+-=|{}.!")
+
+
+def escape_markdown_v2(text: str | None) -> str:
+    value = "" if text is None else str(text)
+    return "".join(f"\\{char}" if char in MARKDOWN_V2_RESERVED else char for char in value)
 
 
 def clamp_full_text_chars(value: int | None) -> int:
@@ -230,6 +230,149 @@ def _metadata_line(candidate: CandidateItem) -> str:
     author = candidate.author or "unknown"
     published = candidate.published_at or "unknown"
     return f"via {author} - published {published}"
+
+
+def _brief_short_text(candidate: CandidateItem, *, subject_hashtag: str, run_date: date) -> str:
+    parts = [
+        escape_markdown_v2(_key_message(candidate)),
+        "",
+        _source_line(candidate),
+    ]
+    meta = _rich_metadata_line(candidate, run_date=run_date)
+    if meta:
+        parts.append(escape_markdown_v2(meta))
+    url = _brief_url(candidate)
+    if url:
+        parts.append(_markdown_link(url))
+    parts.extend(["", subject_hashtag])
+    return "\n".join(part for part in parts if part is not None)
+
+
+def _brief_full_text(
+    candidate: CandidateItem,
+    *,
+    subject_hashtag: str,
+    run_date: date,
+    reason: str,
+    full_text_chars: int,
+) -> str:
+    full_segment = _segment_body(candidate, limit=full_text_chars)
+    return "\n".join(
+        [
+            _brief_short_text(candidate, subject_hashtag=subject_hashtag, run_date=run_date),
+            "",
+            escape_markdown_v2("Full segment:"),
+            escape_markdown_v2(full_segment),
+            "",
+            escape_markdown_v2(f"Why this matched: {reason}"),
+        ]
+    )
+
+
+def _key_message(candidate: CandidateItem) -> str:
+    if candidate.key_message and candidate.key_message.strip():
+        return candidate.key_message.strip()
+    body = candidate.segment_text or candidate.title_or_text or ""
+    normalized = " ".join(body.split())
+    if not normalized:
+        return "Useful update detected for this subject."
+    return normalized[:260].rstrip() + ("..." if len(normalized) > 260 else "")
+
+
+def _source_line(candidate: CandidateItem) -> str:
+    icon = _platform_icon(candidate.platform)
+    author = escape_markdown_v2(candidate.author or "Unknown source")
+    title = escape_markdown_v2(_first_line(candidate.title_or_text))
+    return f"{icon} {author} — _{title}_"
+
+
+def _rich_metadata_line(candidate: CandidateItem, *, run_date: date) -> str:
+    parts: list[str] = []
+    timestamp = _timestamp_prefix(candidate)
+    if timestamp:
+        parts.append(timestamp)
+    duration = _duration_label(candidate)
+    if duration:
+        parts.append(duration)
+    relative = _relative_date(candidate.published_at, run_date=run_date)
+    if relative:
+        parts.append(relative)
+    return " · ".join(parts)
+
+
+def _duration_label(candidate: CandidateItem) -> str | None:
+    metadata = candidate.metadata if isinstance(candidate.metadata, dict) else {}
+    value = metadata.get("duration_seconds") or metadata.get("duration")
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0:
+        return None
+    return _format_offset(seconds)
+
+
+def _relative_date(published_at: str | None, *, run_date: date) -> str | None:
+    if not published_at:
+        return None
+    parsed = _parse_published_date(published_at)
+    if parsed is None:
+        return None
+    days = (run_date - parsed).days
+    if days <= 0:
+        return "today"
+    if days == 1:
+        return "yesterday"
+    if days < 14:
+        return f"{days} days ago"
+    if days < 60:
+        weeks = max(1, round(days / 7))
+        return f"{weeks} weeks ago"
+    months = max(1, round(days / 30))
+    return f"{months} months ago"
+
+
+def _parse_published_date(value: str) -> date | None:
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _platform_icon(platform: str | None) -> str:
+    return {
+        "apple_podcasts": "🎙",
+        "spotify": "🎙",
+        "youtube": "📺",
+        "x": "𝕏",
+        "linkedin": "💼",
+        "substack": "📰",
+        "medium": "📰",
+        "reddit": "🔗",
+        "rss": "🔗",
+    }.get(platform or "", "🔗")
+
+
+def _to_camel_hashtag(value: str) -> str:
+    words = re.findall(r"[A-Za-z0-9]+", value or "")
+    if not words:
+        return "#Brief"
+    return "#" + "".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _markdown_link(url: str) -> str:
+    visible = escape_markdown_v2(url)
+    target = url.replace("\\", "\\\\").replace(")", "\\)")
+    return f"[{visible}]({target})"
 
 
 def _segment_body(candidate: CandidateItem, *, limit: int) -> str:

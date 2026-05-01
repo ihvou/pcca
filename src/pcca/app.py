@@ -226,6 +226,7 @@ class PCCAApp:
         *,
         platform: str | None = None,
         auto_backfill: bool | None = None,
+        score: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         started_at = time.monotonic()
@@ -234,6 +235,7 @@ class PCCAApp:
             stats = await self.pipeline_orchestrator.run_nightly_collection(
                 platform=platform,
                 auto_backfill=auto_backfill,
+                score=score,
                 progress_callback=progress_callback,
             )
             logger.info("PCCA one-shot nightly finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)

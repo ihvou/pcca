@@ -388,6 +388,92 @@ async def test_pipeline_auto_backfill_failure_is_non_fatal(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
+async def test_pipeline_score_false_skips_per_subject_scoring(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await subject_service.create_subject("Vibe Coding", include_terms=["claude code"])
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": DummyRSSCollector()},
+        auto_backfill_embeddings=False,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss", score=False)
+    score_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")).fetchone()
+
+    assert stats["items_inserted"] == 1
+    assert stats["scoring_enabled"] is False
+    assert stats["scoring_skipped"] is True
+    assert stats["items_scored"] == 0
+    assert score_count["c"] == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_auto_backfill_disabled_skips_embedding_chain(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+    item_repo = ItemRepository(conn=db.conn)
+    embedding_service = FakeEmbeddingService()
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=embedding_service,  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+        auto_backfill_embeddings=False,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss", score=False)
+    item_id, item = (await item_repo.list_all_for_scoring())[0]
+    text = item_repo.embedding_text(item)
+
+    assert stats["auto_backfill_enabled"] is False
+    assert stats["embedding_backfill"] == {}
+    assert stats["embedding_pending"] is False
+    assert embedding_service.calls == []
+    assert await item_repo.get_content_embedding_for_text(
+        item_id,
+        model=embedding_service.embedding_model,
+        text_hash=item_repo.embedding_text_hash(text),
+    ) is None
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runtime_lock_rejects_overlapping_collection(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

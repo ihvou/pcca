@@ -20,6 +20,8 @@ class CandidateItem:
     segment_text: str | None = None
     segment_start_seconds: float | None = None
     segment_end_seconds: float | None = None
+    metadata: dict | None = None
+    key_message: str | None = None
 
 
 @dataclass
@@ -39,6 +41,7 @@ class ItemScoreRepository:
         noise_penalty: float,
         final_score: float,
         rationale: str,
+        key_message: str | None = None,
     ) -> None:
         await self.conn.execute(
             """
@@ -66,7 +69,7 @@ class ItemScoreRepository:
                 trust_score,
                 noise_penalty,
                 final_score,
-                json.dumps({"reason": rationale}),
+                json.dumps({"reason": rationale, "key_message": key_message}),
             ),
         )
         await self.conn.commit()
@@ -85,6 +88,7 @@ class ItemScoreRepository:
         noise_penalty: float,
         final_score: float,
         rationale: str,
+        key_message: str | None = None,
     ) -> None:
         await self.conn.execute(
             """
@@ -116,7 +120,7 @@ class ItemScoreRepository:
                 trust_score,
                 noise_penalty,
                 final_score,
-                json.dumps({"reason": rationale}),
+                json.dumps({"reason": rationale, "key_message": key_message}),
             ),
         )
         await self.conn.commit()
@@ -132,8 +136,10 @@ class ItemScoreRepository:
                   i.canonical_url AS url,
                   i.author AS author,
                   i.published_at AS published_at,
+                  i.metadata_json AS metadata_json,
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -177,8 +183,10 @@ class ItemScoreRepository:
                   i.canonical_url AS url,
                   i.author AS author,
                   i.published_at AS published_at,
+                  i.metadata_json AS metadata_json,
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -218,8 +226,10 @@ class ItemScoreRepository:
                   i.canonical_url AS url,
                   i.author AS author,
                   i.published_at AS published_at,
+                  i.metadata_json AS metadata_json,
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -250,6 +260,10 @@ class ItemScoreRepository:
 
     @staticmethod
     def _candidate_from_row(row) -> CandidateItem:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
         return CandidateItem(
             item_id=int(row["item_id"]),
             title_or_text=row["title_or_text"],
@@ -263,4 +277,6 @@ class ItemScoreRepository:
             segment_text=str(row["segment_text"]) if row["segment_text"] else None,
             segment_start_seconds=float(row["segment_start_seconds"]) if row["segment_start_seconds"] is not None else None,
             segment_end_seconds=float(row["segment_end_seconds"]) if row["segment_end_seconds"] is not None else None,
+            metadata=metadata if isinstance(metadata, dict) else {},
+            key_message=str(row["key_message"]).strip() if row["key_message"] else None,
         )

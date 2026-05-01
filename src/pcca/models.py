@@ -41,3 +41,4 @@ class Subject:
     status: str
     created_at: str
     brief_full_text_chars: int = 1800
+    telegram_hashtag: str | None = None

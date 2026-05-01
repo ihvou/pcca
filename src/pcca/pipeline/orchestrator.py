@@ -257,12 +257,53 @@ class PipelineOrchestrator:
             fallback_rate,
         )
 
+    async def _embedding_cold_cache_detail(
+        self,
+        *,
+        subject,
+        item_rows: list[tuple[int, CollectedItem]],
+        sample_limit: int = 100,
+    ) -> dict[str, Any] | None:
+        if not self._embedding_enabled() or self.embedding_service is None:
+            return None
+        model = self.embedding_service.embedding_model
+        if not model:
+            return None
+        checked = 0
+        missing = 0
+        for item_id, item in item_rows[: max(1, int(sample_limit))]:
+            text = self.item_repo.embedding_text(item)
+            if not text.strip():
+                continue
+            checked += 1
+            text_hash = self.item_repo.embedding_text_hash(text)
+            existing = await self.item_repo.get_content_embedding_for_text(
+                item_id,
+                model=model,
+                text_hash=text_hash,
+            )
+            if existing is None:
+                missing += 1
+        missing_rate = missing / checked if checked else 0.0
+        if checked < 20 or missing_rate <= 0.5:
+            return None
+        return {
+            "subject_id": subject.id,
+            "subject_name": subject.name,
+            "sampled_items": checked,
+            "missing_item_embeddings": missing,
+            "missing_rate": round(missing_rate, 3),
+            "reason": "embedding_cache_not_warmed",
+        }
+
     @staticmethod
     def _copy_embedding_degradation_metadata(stats: dict, metadata: dict) -> None:
         metadata["embedding_degraded"] = bool(stats.get("embedding_degraded"))
         metadata["embedding_degraded_subjects"] = list(stats.get("embedding_degraded_subjects") or [])
         metadata["embedding_fallback_items"] = int(stats.get("embedding_fallback_items") or 0)
         metadata["embedding_items_scored"] = int(stats.get("embedding_items_scored") or 0)
+        metadata["embedding_not_warmed"] = bool(stats.get("embedding_not_warmed"))
+        metadata["embedding_not_warmed_subjects"] = list(stats.get("embedding_not_warmed_subjects") or [])
 
     async def _score_items_for_subject(
         self,
@@ -277,9 +318,21 @@ class PipelineOrchestrator:
             return
         context = await self._preference_context(subject.id)
         subject_embedding_text = self._subject_embedding_text(subject=subject, context=context)
+        cold_cache_detail = await self._embedding_cold_cache_detail(subject=subject, item_rows=item_rows)
+        if cold_cache_detail is not None:
+            stats["embedding_not_warmed"] = True
+            stats.setdefault("embedding_not_warmed_subjects", []).append(cold_cache_detail)
+            logger.warning(
+                "Embedding cache is not warmed enough for scoring; using keyword fallback run_id=%s subject=%s sampled=%d missing=%d missing_rate=%.3f",
+                run_id,
+                subject.name,
+                cold_cache_detail["sampled_items"],
+                cold_cache_detail["missing_item_embeddings"],
+                cold_cache_detail["missing_rate"],
+            )
         subject_embedding = (
             await self._get_or_create_subject_embedding(subject_id=subject.id, text=subject_embedding_text)
-            if self._embedding_enabled()
+            if self._embedding_enabled() and cold_cache_detail is None
             else None
         )
         fallback_before = int(stats.get("embedding_fallback_items", 0))
@@ -435,12 +488,16 @@ class PipelineOrchestrator:
             stats["model_batch_rerank_calls"] += 1
 
         adjusted_segment_scores: dict[int, Any] = {}
+        item_key_messages: dict[int, str] = {}
         for item_id, item, scored, _used_embedding, segment in scored_rows:
             rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
             if rerank is not None:
                 adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
                 scored.final_score = adjusted_final
                 scored.rationale = f"{scored.rationale}; model_batch={rerank.rationale}"
+                key_message = getattr(rerank, "key_message", None)
+                if key_message:
+                    item_key_messages[item_id] = str(key_message)
                 stats["items_model_reranked"] += 1
             elif self.model_router is not None and item_id in shortlist_ids and not batch_results:
                 rerank = await self.model_router.rerank(
@@ -452,6 +509,9 @@ class PipelineOrchestrator:
                     adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
                     scored.final_score = adjusted_final
                     scored.rationale = f"{scored.rationale}; model={rerank.rationale}"
+                    key_message = getattr(rerank, "key_message", None)
+                    if key_message:
+                        item_key_messages[item_id] = str(key_message)
                     stats["items_model_reranked"] += 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
@@ -466,6 +526,7 @@ class PipelineOrchestrator:
                 noise_penalty=scored.noise_penalty,
                 final_score=scored.final_score,
                 rationale=scored.rationale,
+                key_message=item_key_messages.get(item_id),
             )
             stats["items_scored"] += 1
 
@@ -483,6 +544,7 @@ class PipelineOrchestrator:
                 noise_penalty=effective_scored.noise_penalty,
                 final_score=effective_scored.final_score,
                 rationale=effective_scored.rationale,
+                key_message=item_key_messages.get(item_id),
             )
             stats["segments_scored"] = int(stats.get("segments_scored", 0)) + 1
 
@@ -679,6 +741,8 @@ class PipelineOrchestrator:
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
             "embedding_degraded_subjects": [],
+            "embedding_not_warmed": False,
+            "embedding_not_warmed_subjects": [],
             "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
             "items_scored": 0,
@@ -739,6 +803,7 @@ class PipelineOrchestrator:
         *,
         platform: str | None = None,
         auto_backfill: bool | None = None,
+        score: bool = True,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         platform_filter = platform.strip().lower() if platform and platform.strip() else None
@@ -797,9 +862,13 @@ class PipelineOrchestrator:
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
             "embedding_degraded_subjects": [],
+            "embedding_not_warmed": False,
+            "embedding_not_warmed_subjects": [],
             "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
             "items_scored": 0,
+            "scoring_enabled": bool(score),
+            "scoring_skipped": False,
             "segments_seen": 0,
             "segments_score_candidates": 0,
             "segments_scored": 0,
@@ -823,6 +892,8 @@ class PipelineOrchestrator:
             "embedding_degraded_subjects": [],
             "embedding_fallback_items": 0,
             "embedding_items_scored": 0,
+            "embedding_not_warmed": False,
+            "embedding_not_warmed_subjects": [],
         }
         bot_failure_streaks: dict[str, int] = {}
         empty_streaks: dict[str, int] = {}
@@ -1097,28 +1168,37 @@ class PipelineOrchestrator:
                     len(changed_items),
                 )
 
-            changed_rows = list(changed_items.items())
-            for subject in subjects:
-                inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
-                unscored_rows = await self.item_repo.list_unscored_for_subject(subject_id=subject.id)
-                missing_segment_rows = await self.item_repo.list_missing_segment_scores_for_subject(
-                    subject_id=subject.id,
-                )
-                changed_ids = {item_id for item_id, _item in changed_rows}
-                seen_ids = set(changed_ids)
-                rows_to_score = changed_rows + [
-                    (item_id, item) for item_id, item in unscored_rows if item_id not in seen_ids
-                ]
-                seen_ids.update(item_id for item_id, _item in unscored_rows)
-                rows_to_score.extend(
-                    (item_id, item) for item_id, item in missing_segment_rows if item_id not in seen_ids
-                )
-                await self._score_items_for_subject(
-                    run_id=run_id,
-                    subject=subject,
-                    item_rows=rows_to_score,
-                    inactive_source_ids=inactive_source_ids,
-                    stats=stats,
+            if score:
+                changed_rows = list(changed_items.items())
+                for subject in subjects:
+                    inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
+                    unscored_rows = await self.item_repo.list_unscored_for_subject(subject_id=subject.id)
+                    missing_segment_rows = await self.item_repo.list_missing_segment_scores_for_subject(
+                        subject_id=subject.id,
+                    )
+                    changed_ids = {item_id for item_id, _item in changed_rows}
+                    seen_ids = set(changed_ids)
+                    rows_to_score = changed_rows + [
+                        (item_id, item) for item_id, item in unscored_rows if item_id not in seen_ids
+                    ]
+                    seen_ids.update(item_id for item_id, _item in unscored_rows)
+                    rows_to_score.extend(
+                        (item_id, item) for item_id, item in missing_segment_rows if item_id not in seen_ids
+                    )
+                    await self._score_items_for_subject(
+                        run_id=run_id,
+                        subject=subject,
+                        item_rows=rows_to_score,
+                        inactive_source_ids=inactive_source_ids,
+                        stats=stats,
+                    )
+            else:
+                stats["scoring_skipped"] = True
+                logger.info(
+                    "Nightly collection scoring skipped run_id=%s changed_items=%d platform_filter=%s",
+                    run_id,
+                    len(changed_items),
+                    platform_filter,
                 )
 
             metadata["circuit_broken"] = sorted(circuit_broken)

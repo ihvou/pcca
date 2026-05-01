@@ -583,6 +583,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip automatic embedding warm-up after collection.",
     )
+    nightly_parser.add_argument(
+        "--score",
+        action="store_true",
+        help="Also run the legacy per-subject scoring phase after collection.",
+    )
     embed_backfill_parser = sub.add_parser(
         "embed-backfill",
         help="Warm missing Ollama embedding cache and optionally rescore existing items",
@@ -802,7 +807,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "run-nightly-once":
         app = PCCAApp(settings=settings)
-        stats = asyncio.run(app.run_nightly_once(auto_backfill=not args.no_backfill))
+        stats = asyncio.run(app.run_nightly_once(auto_backfill=not args.no_backfill, score=args.score))
         print(f"Nightly run completed: {stats}")
         return
 

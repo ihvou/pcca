@@ -451,6 +451,12 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON item_segment_scores(item_id, subject_id);
         """,
     ),
+    (
+        15,
+        """
+        ALTER TABLE subjects ADD COLUMN telegram_hashtag TEXT;
+        """,
+    ),
 ]
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pcca.digest_renderer import DigestRenderContext, TelegramDigestRenderer
+from pcca.digest_renderer import DigestRenderContext, TelegramDigestRenderer, _platform_icon
 from pcca.models import Subject
 from pcca.repositories.item_scores import CandidateItem
 
@@ -10,6 +10,24 @@ from pcca.repositories.item_scores import CandidateItem
 async def _token_factory(candidate, action, *, label=None, kind="feedback") -> str:
     _ = candidate, action, label, kind
     return "token"
+
+
+@pytest.mark.parametrize(
+    ("platform", "icon"),
+    [
+        ("apple_podcasts", "🎙"),
+        ("spotify", "🎙"),
+        ("youtube", "📺"),
+        ("x", "𝕏"),
+        ("linkedin", "💼"),
+        ("substack", "📰"),
+        ("medium", "📰"),
+        ("reddit", "🔗"),
+        ("rss", "🔗"),
+    ],
+)
+def test_platform_icon_mapping(platform: str, icon: str) -> None:
+    assert _platform_icon(platform) == icon
 
 
 @pytest.mark.asyncio
@@ -59,12 +77,14 @@ async def test_telegram_renderer_clamps_full_text_cap() -> None:
     )
     candidate = CandidateItem(
         item_id=1,
-        title_or_text="B" * 600,
+        title_or_text="Short title",
         url=None,
         author="Author",
         published_at="2026-04-29",
         final_score=0.9,
         rationale="matched",
+        segment_text="B" * 600,
+        key_message="Short summary.",
     )
 
     payload = await TelegramDigestRenderer().render(
@@ -80,7 +100,7 @@ async def test_telegram_renderer_clamps_full_text_cap() -> None:
 
     assert "B" * 200 in payload.briefs[0].full_text
     assert "B" * 250 not in payload.briefs[0].full_text
-    assert "\n\n..." in payload.briefs[0].full_text
+    assert "\n\n\\.\\.\\." in payload.briefs[0].full_text
 
 
 @pytest.mark.asyncio
@@ -94,7 +114,7 @@ async def test_telegram_renderer_deep_links_youtube_matched_segment() -> None:
     )
     candidate = CandidateItem(
         item_id=1,
-        title_or_text="Anthropic release interview\nWhole episode description",
+        title_or_text="Anthropic_release *interview*\nWhole episode description",
         url="https://www.youtube.com/watch?v=abc123",
         author="Anthropic",
         published_at="2026-04-29",
@@ -105,6 +125,8 @@ async def test_telegram_renderer_deep_links_youtube_matched_segment() -> None:
         segment_text="Claude Code now supports a practical workflow for agent handoffs.",
         segment_start_seconds=92.0,
         segment_end_seconds=173.0,
+        metadata={"duration_seconds": 3600},
+        key_message="Claude Code adds a practical handoff workflow that teams can apply directly.",
     )
 
     payload = await TelegramDigestRenderer().render(
@@ -112,16 +134,58 @@ async def test_telegram_renderer_deep_links_youtube_matched_segment() -> None:
         ranked_items=[candidate],
         context=DigestRenderContext(
             digest_id=1,
-            run_date=__import__("datetime").date.today(),
+            run_date=__import__("datetime").date(2026, 5, 2),
             create_button_token=_token_factory,
         ),
     )
 
     brief = payload.briefs[0]
     assert "https://www.youtube.com/watch?v=abc123&t=92s" in brief.short_text
-    assert "Matched segment:" in brief.short_text
-    assert "[01:32-02:53] Claude Code now supports" in brief.short_text
+    assert "Claude Code adds a practical handoff workflow" in brief.short_text
+    assert "Why this matched:" not in brief.short_text
+    assert "Matched segment:" not in brief.short_text
+    assert "📺 Anthropic — _Anthropic\\_release \\*interview\\*_" in brief.short_text
+    assert "\\[01:32\\-02:53\\] · 1:00:00 · 3 days ago" in brief.short_text
+    assert "#AITools" in brief.short_text
+    assert "Full segment:" in brief.full_text
+    assert "Why this matched:" in brief.full_text
     assert "Whole episode description" not in brief.full_text
+
+
+@pytest.mark.asyncio
+async def test_telegram_renderer_youtube_timestamp_regression_1122_seconds() -> None:
+    subject = Subject(
+        id=1,
+        name="AI PM Success Stories",
+        telegram_thread_id=None,
+        status="active",
+        created_at="2026-04-29 00:00:00",
+    )
+    candidate = CandidateItem(
+        item_id=1,
+        title_or_text="Demo",
+        url="https://www.youtube.com/watch?v=XXX",
+        author="Creator",
+        published_at="2026-05-01",
+        final_score=0.9,
+        rationale="matched segment",
+        platform="youtube",
+        segment_text="Important practical point.",
+        segment_start_seconds=1122.0,
+    )
+
+    payload = await TelegramDigestRenderer().render(
+        subject=subject,
+        ranked_items=[candidate],
+        context=DigestRenderContext(
+            digest_id=1,
+            run_date=__import__("datetime").date(2026, 5, 2),
+            create_button_token=_token_factory,
+        ),
+    )
+
+    assert "https://www.youtube.com/watch?v=XXX&t=1122s" in payload.briefs[0].short_text
+    assert "#AIPMSuccessStories" in payload.briefs[0].short_text
 
 
 @pytest.mark.asyncio
@@ -161,4 +225,5 @@ async def test_telegram_renderer_prefixes_apple_podcasts_timestamp_without_deepl
     brief = payload.briefs[0]
     assert "https://podcasts.apple.com/us/podcast/demo/id123?i=456" in brief.short_text
     assert "?t=" not in brief.short_text
-    assert "[14:32-17:08] The useful part explains" in brief.short_text
+    assert "\\[14:32\\-17:08\\]" in brief.short_text
+    assert "The useful part explains" in brief.short_text
