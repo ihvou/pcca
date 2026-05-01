@@ -401,6 +401,13 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON items(content_embedding_model);
         """,
     ),
+    (
+        13,
+        """
+        ALTER TABLE subjects ADD COLUMN description_embedding_text_hash TEXT;
+        ALTER TABLE items ADD COLUMN content_embedding_text_hash TEXT;
+        """,
+    ),
 ]
 
 

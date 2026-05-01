@@ -169,6 +169,7 @@ def test_desktop_wizard_has_tabbed_product_surface() -> None:
     assert "Capture Session" not in INDEX_HTML
     assert "Re-build briefs" not in INDEX_HTML
     assert "Rebuild Rules" in INDEX_HTML
+    assert "Backfill Embeddings" in INDEX_HTML
     assert "Include terms" not in INDEX_HTML
     assert "High-quality examples" not in INDEX_HTML
 

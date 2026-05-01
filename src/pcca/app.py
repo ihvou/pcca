@@ -4,6 +4,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from typing import Any, Callable
 
 from pcca.collectors.linkedin_collector import LinkedInCollector
 from pcca.collectors.reddit_collector import RedditCollector
@@ -59,6 +60,7 @@ class PCCAApp:
     pipeline_orchestrator: PipelineOrchestrator = field(init=False)
     browser_session_manager: BrowserSessionManager = field(init=False)
     scheduler: AgentScheduler = field(init=False)
+    embedding_service: EmbeddingService = field(init=False)
     telegram_service: TelegramService | None = field(default=None, init=False)
 
     async def start(self, *, with_scheduler: bool = True, with_telegram: bool = True) -> None:
@@ -98,6 +100,7 @@ class PCCAApp:
             embedding_model=self.settings.embedding_model,
             timeout_seconds=self.settings.embedding_timeout_seconds,
         )
+        self.embedding_service = embedding_service
         self.subject_service = SubjectService(repository=subject_repo)
         self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
         self.preference_service = PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo)
@@ -105,7 +108,7 @@ class PCCAApp:
             feedback_repo=feedback_repo,
             subject_repo=subject_repo,
             digest_repo=digest_repo,
-            preference_repo=pref_repo,
+            preference_repo=preference_repo,
         )
         self.routing_service = RoutingService(routing_repo=routing_repo, subject_repo=subject_repo)
         self.browser_session_manager = BrowserSessionManager(
@@ -222,6 +225,52 @@ class PCCAApp:
         try:
             stats = await self.pipeline_orchestrator.run_nightly_collection(platform=platform)
             logger.info("PCCA one-shot nightly finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
+        finally:
+            await self.stop()
+
+    async def backfill_embeddings_current(
+        self,
+        *,
+        concurrency: int = 4,
+        limit: int | None = None,
+        rescore: bool = True,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        if not hasattr(self, "pipeline_orchestrator"):
+            raise RuntimeError("PCCA app is not started.")
+        backfill_stats = await self.pipeline_orchestrator.backfill_embeddings(
+            concurrency=concurrency,
+            limit=limit,
+            progress_callback=progress_callback,
+        )
+        rescore_stats = {}
+        if rescore and backfill_stats.get("enabled"):
+            rescore_stats = await self.pipeline_orchestrator.rescore_existing_items(limit=limit)
+        return {"backfill": backfill_stats, "rescore": rescore_stats}
+
+    async def run_embedding_backfill_once(
+        self,
+        *,
+        concurrency: int = 4,
+        limit: int | None = None,
+        rescore: bool = True,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        started_at = time.monotonic()
+        await self.start(with_scheduler=False, with_telegram=False)
+        try:
+            stats = await self.backfill_embeddings_current(
+                concurrency=concurrency,
+                limit=limit,
+                rescore=rescore,
+                progress_callback=progress_callback,
+            )
+            logger.info(
+                "PCCA embedding backfill finished duration_ms=%d stats=%s",
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
             return stats
         finally:
             await self.stop()

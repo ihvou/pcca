@@ -321,6 +321,7 @@ class DesktopCommandService:
             recent_run_logs = []
             circuit_broken: list[str] = []
             circuit_broken_reasons_by_platform: dict[str, str] = {}
+            embedding_degraded: dict[str, Any] = {"degraded": False}
             for row in run_log_rows:
                 try:
                     metadata = json.loads(row["metadata_json"] or "{}")
@@ -334,6 +335,17 @@ class DesktopCommandService:
                     if isinstance(reasons, dict):
                         circuit_broken_reasons_by_platform = {
                             str(key): str(value) for key, value in reasons.items()
+                        }
+                if row["run_type"] in {"nightly_collection", "embedding_rescore"} and not embedding_degraded.get("degraded"):
+                    if isinstance(metadata, dict) and metadata.get("embedding_degraded"):
+                        subjects_payload = metadata.get("embedding_degraded_subjects")
+                        embedding_degraded = {
+                            "degraded": True,
+                            "run_id": row["id"],
+                            "run_type": row["run_type"],
+                            "subjects": subjects_payload if isinstance(subjects_payload, list) else [],
+                            "fallback_items": int(metadata.get("embedding_fallback_items") or 0),
+                            "items_scored": int(metadata.get("embedding_items_scored") or 0),
                         }
                 recent_run_logs.append(
                     {
@@ -391,6 +403,7 @@ class DesktopCommandService:
                 "recent_run_logs": recent_run_logs,
                 "circuit_broken": circuit_broken,
                 "circuit_broken_reasons_by_platform": circuit_broken_reasons_by_platform,
+                "embedding_degraded": embedding_degraded,
                 "subjects": [asdict(subject) for subject in subjects],
                 "subject_preferences": subject_preferences,
                 "subject_source_overrides": subject_source_overrides,
@@ -1069,6 +1082,58 @@ class DesktopCommandService:
             return CommandResult(True, message, {"nightly_stats": stats or {}, "platform": platform_filter})
 
         return await self._run_guarded_action(key="read_content", label="Get Content", runner=runner)
+
+    async def backfill_embeddings(
+        self,
+        *,
+        concurrency: int = 4,
+        limit: int | None = None,
+        rescore: bool = True,
+    ) -> CommandResult:
+        async def runner() -> CommandResult:
+            started_at = time.monotonic()
+            self.log(
+                "Backfilling embeddings "
+                f"concurrency={max(1, int(concurrency))} limit={limit or 'all'} rescore={rescore}."
+            )
+
+            def progress(event: dict[str, Any]) -> None:
+                self.log(
+                    "Embedding backfill "
+                    f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}"
+                )
+
+            if self._agent_app is not None and self.agent_running:
+                stats = await self._agent_app.backfill_embeddings_current(
+                    concurrency=concurrency,
+                    limit=limit,
+                    rescore=rescore,
+                    progress_callback=progress,
+                )
+            else:
+                app = PCCAApp(settings=self.settings())
+                stats = await app.run_embedding_backfill_once(
+                    concurrency=concurrency,
+                    limit=limit,
+                    rescore=rescore,
+                    progress_callback=progress,
+                )
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            self.log(f"Embedding backfill finished in {elapsed_ms}ms: {json.dumps(stats or {}, sort_keys=True)}")
+            backfill_stats = stats.get("backfill", {}) if isinstance(stats, dict) else {}
+            if backfill_stats and not backfill_stats.get("enabled", True):
+                return CommandResult(
+                    False,
+                    "Embedding backfill skipped because Ollama embeddings are disabled. Enable PCCA_OLLAMA_ENABLED and PCCA_SCORER=embedding or both.",
+                    {"embedding_stats": stats or {}},
+                )
+            return CommandResult(True, "Embedding backfill finished.", {"embedding_stats": stats or {}})
+
+        return await self._run_guarded_action(
+            key="embedding_backfill",
+            label="Backfill Embeddings",
+            runner=runner,
+        )
 
     async def get_briefs(self, *, subject_id: int | None = None) -> CommandResult:
         async def runner() -> CommandResult:

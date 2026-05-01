@@ -90,8 +90,13 @@ async def test_item_upsert_many(tmp_path: Path) -> None:
         await db.conn.execute("SELECT id, raw_text FROM items WHERE platform = 'rss' AND external_id = 'id-1'")
     ).fetchone()
     assert row["raw_text"] == "updated"
-    await repo.save_content_embedding(int(row["id"]), model="fake", embedding=[1.0, 0.0])
+    await repo.save_content_embedding(int(row["id"]), model="fake", embedding=[1.0, 0.0], text_hash="hash-v1")
     assert await repo.get_content_embedding(int(row["id"]), model="fake") == [1.0, 0.0]
+    assert (
+        await repo.get_content_embedding_for_text(int(row["id"]), model="fake", text_hash="hash-v1")
+        == [1.0, 0.0]
+    )
+    assert await repo.get_content_embedding_for_text(int(row["id"]), model="fake", text_hash="hash-v2") is None
 
     await repo.upsert_many(
         [

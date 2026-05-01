@@ -161,6 +161,15 @@ class FakeEmbeddingService:
         return [0.5, 0.5]
 
 
+class FailingEmbeddingService:
+    enabled = True
+    embedding_model = "fake-embedding"
+
+    async def embed(self, text: str) -> list[float] | None:
+        _ = text
+        return None
+
+
 class FakeBatchModelRouter:
     def __init__(self) -> None:
         self.batch_calls: list[dict] = []
@@ -784,7 +793,131 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
     assert stats["items_model_reranked"] == 3
     assert model_router.batch_calls[0]["subject_name"] == "AI Tools & Tips"
     assert "leading AI companies" in model_router.batch_calls[0]["subject_description"]
+    assert "Include:" not in model_router.batch_calls[0]["subject_description"]
+    assert "Avoid:" not in model_router.batch_calls[0]["subject_description"]
     assert model_router.batch_calls[0]["candidate_count"] == 3
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_embedding_failure_is_warned_in_metadata(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "AI Tools",
+        include_terms=["ai tools"],
+        description_text="Practical AI tooling updates.",
+    )
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FailingEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+    row = await (
+        await db.conn.execute(
+            "SELECT metadata_json FROM run_logs WHERE run_type = 'nightly_collection' ORDER BY id DESC LIMIT 1"
+        )
+    ).fetchone()
+    metadata = json.loads(row["metadata_json"])
+
+    assert stats["embedding_degraded"] is True
+    assert stats["embedding_fallback_items"] == 1
+    assert metadata["embedding_degraded"] is True
+    assert metadata["embedding_degraded_subjects"][0]["reason"] == "subject_embedding_unavailable"
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_embedding_backfill_warms_missing_cache_once(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    item_repo = ItemRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    subject = await subject_service.create_subject(
+        "Ukraine War News",
+        include_terms=["reputable sources"],
+        description_text="Ukraine frontline updates and Kyiv policy analysis.",
+    )
+    await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="ukraine-1",
+                author="analyst",
+                url="https://example.com/ukraine-1",
+                text="Kyiv frontline update with practical policy implications.",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+    )
+
+    embedding_service = FakeEmbeddingService()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=embedding_service,  # type: ignore[arg-type]
+        scorer="embedding",
+    )
+
+    first = await orchestrator.backfill_embeddings(concurrency=2)
+    second = await orchestrator.backfill_embeddings(concurrency=2)
+
+    context = await orchestrator._preference_context(subject.id)
+    subject_text = orchestrator._subject_embedding_text(subject=subject, context=context)
+    subject_hash = subject_repo.embedding_text_hash(subject_text)
+    rows = await item_repo.list_all_for_scoring()
+    item_id, item = rows[0]
+    item_text = item_repo.embedding_text(item)
+    item_hash = item_repo.embedding_text_hash(item_text)
+
+    assert first["subjects_embedded"] == 1
+    assert first["items_embedded"] == 1
+    assert second["subjects_skipped"] == 1
+    assert second["items_total"] == 0
+    assert await subject_repo.get_description_embedding_for_text(
+        subject.id,
+        model="fake-embedding",
+        text_hash=subject_hash,
+    ) is not None
+    assert await item_repo.get_content_embedding_for_text(
+        item_id,
+        model="fake-embedding",
+        text_hash=item_hash,
+    ) is not None
 
     await db.close()
 

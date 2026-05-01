@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 from pathlib import Path
 from typing import Sequence
@@ -577,6 +578,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
+    embed_backfill_parser = sub.add_parser(
+        "embed-backfill",
+        help="Warm missing Ollama embedding cache and optionally rescore existing items",
+    )
+    embed_backfill_parser.add_argument("--limit", required=False, type=int, help="Maximum items to embed/rescore")
+    embed_backfill_parser.add_argument(
+        "--concurrency",
+        required=False,
+        type=int,
+        default=4,
+        help="Maximum concurrent embedding requests",
+    )
+    embed_backfill_parser.add_argument(
+        "--no-rescore",
+        action="store_true",
+        help="Only warm embeddings; do not rebuild existing item scores",
+    )
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -772,6 +790,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         app = PCCAApp(settings=settings)
         stats = asyncio.run(app.run_nightly_once())
         print(f"Nightly run completed: {stats}")
+        return
+
+    if args.command == "embed-backfill":
+        app = PCCAApp(settings=settings)
+
+        def progress(event: dict) -> None:
+            print(f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}", flush=True)
+
+        stats = asyncio.run(
+            app.run_embedding_backfill_once(
+                concurrency=max(1, int(args.concurrency or 4)),
+                limit=args.limit,
+                rescore=not args.no_rescore,
+                progress_callback=progress,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
         return
 
     if args.command in {"run-briefs-once", "run-digest-once"}:

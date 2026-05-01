@@ -88,6 +88,7 @@ class ItemRepository:
                             updated_at = CURRENT_TIMESTAMP,
                             content_embedding_json = NULL,
                             content_embedding_model = NULL,
+                            content_embedding_text_hash = NULL,
                             content_embedding_updated_at = NULL
                         WHERE platform = ? AND external_id = ?
                         """,
@@ -166,11 +167,93 @@ class ItemRepository:
             )
         return out
 
-    async def get_content_embedding(self, item_id: int, *, model: str) -> list[float] | None:
+    async def list_all_for_scoring(self, *, limit: int | None = None) -> list[tuple[int, CollectedItem]]:
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: tuple[int, ...] = (int(limit),) if limit_clause else ()
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT
+                  i.id,
+                  i.platform,
+                  i.external_id,
+                  i.canonical_url,
+                  i.author,
+                  i.published_at,
+                  i.raw_text,
+                  i.transcript_text,
+                  i.metadata_json
+                FROM items i
+                ORDER BY COALESCE(i.updated_at, i.ingested_at, '') DESC, i.id DESC
+                {limit_clause}
+                """,
+                params,
+            )
+        ).fetchall()
+        return [self._row_to_collected_item(row) for row in rows]
+
+    async def count_missing_embeddings(self, *, model: str) -> int:
         row = await (
             await self.conn.execute(
                 """
-                SELECT content_embedding_json, content_embedding_model
+                SELECT COUNT(*) AS c
+                FROM items
+                WHERE content_embedding_json IS NULL
+                   OR content_embedding_model IS NULL
+                   OR content_embedding_model != ?
+                   OR content_embedding_text_hash IS NULL
+                """,
+                (model,),
+            )
+        ).fetchone()
+        return int(row["c"] or 0)
+
+    async def list_missing_embeddings(
+        self,
+        *,
+        model: str,
+        limit: int,
+    ) -> list[tuple[int, CollectedItem]]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT
+                  i.id,
+                  i.platform,
+                  i.external_id,
+                  i.canonical_url,
+                  i.author,
+                  i.published_at,
+                  i.raw_text,
+                  i.transcript_text,
+                  i.metadata_json
+                FROM items i
+                WHERE content_embedding_json IS NULL
+                   OR content_embedding_model IS NULL
+                   OR content_embedding_model != ?
+                   OR content_embedding_text_hash IS NULL
+                ORDER BY COALESCE(i.updated_at, i.ingested_at, '') DESC, i.id DESC
+                LIMIT ?
+                """,
+                (model, max(1, int(limit))),
+            )
+        ).fetchall()
+        return [self._row_to_collected_item(row) for row in rows]
+
+    async def get_content_embedding(self, item_id: int, *, model: str) -> list[float] | None:
+        return await self.get_content_embedding_for_text(item_id, model=model)
+
+    async def get_content_embedding_for_text(
+        self,
+        item_id: int,
+        *,
+        model: str,
+        text_hash: str | None = None,
+    ) -> list[float] | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT content_embedding_json, content_embedding_model, content_embedding_text_hash
                 FROM items
                 WHERE id = ?
                 """,
@@ -178,6 +261,8 @@ class ItemRepository:
             )
         ).fetchone()
         if row is None or row["content_embedding_model"] != model or not row["content_embedding_json"]:
+            return None
+        if text_hash is not None and row["content_embedding_text_hash"] != text_hash:
             return None
         try:
             payload = json.loads(row["content_embedding_json"])
@@ -190,16 +275,24 @@ class ItemRepository:
         except (TypeError, ValueError):
             return None
 
-    async def save_content_embedding(self, item_id: int, *, model: str, embedding: list[float]) -> None:
+    async def save_content_embedding(
+        self,
+        item_id: int,
+        *,
+        model: str,
+        embedding: list[float],
+        text_hash: str | None = None,
+    ) -> None:
         await self.conn.execute(
             """
             UPDATE items
             SET content_embedding_json = ?,
                 content_embedding_model = ?,
+                content_embedding_text_hash = ?,
                 content_embedding_updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (json.dumps(embedding), model, item_id),
+            (json.dumps(embedding), model, text_hash, item_id),
         )
         await self.conn.commit()
 
@@ -214,6 +307,31 @@ class ItemRepository:
             )
             if part and part.strip()
         )[:8000]
+
+    @staticmethod
+    def embedding_text_hash(text: str) -> str:
+        normalized = " ".join((text or "").split()).strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _row_to_collected_item(row) -> tuple[int, CollectedItem]:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        return (
+            int(row["id"]),
+            CollectedItem(
+                platform=row["platform"],
+                external_id=row["external_id"],
+                author=row["author"],
+                url=row["canonical_url"],
+                text=row["raw_text"],
+                transcript_text=row["transcript_text"],
+                published_at=row["published_at"],
+                metadata=metadata if isinstance(metadata, dict) else {},
+            ),
+        )
 
     def _content_hash(self, item: CollectedItem) -> str:
         return self._content_hash_values(

@@ -248,7 +248,10 @@ INDEX_HTML = r"""
           <div class="card tight">
             <h3>Run Now</h3>
             <p>Manual all-platform collection escape hatch. The Sources tab button is platform-scoped.</p>
-            <div class="actions"><button id="runAllContentButton" class="secondary" onclick="readContentAll()">Run All Content</button></div>
+            <div class="actions">
+              <button id="runAllContentButton" class="secondary" onclick="readContentAll()">Run All Content</button>
+              <button id="backfillEmbeddingsButton" class="secondary" onclick="backfillEmbeddings()">Backfill Embeddings</button>
+            </div>
           </div>
           <div class="card tight">
             <h3>Failures</h3>
@@ -363,6 +366,10 @@ async function readContent() {
 async function readContentAll() {
   notice('sourceStatus', 'Running all-platform content collection...', '');
   const data = await postAction('/api/content/read', {}, {timeoutMs: 1800000});
+  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+}
+async function backfillEmbeddings() {
+  const data = await postAction('/api/embeddings/backfill', {rescore: true}, {timeoutMs: 1800000});
   if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
 }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
@@ -578,17 +585,23 @@ function updateActionControls(state) {
   const readButton = byId('readContentButton');
   const getSourcesButton = byId('getSourcesButton');
   const runAllButton = byId('runAllContentButton');
+  const backfillButton = byId('backfillEmbeddingsButton');
   const readRunning = actionRunning(state, 'read_content');
   const stageRunning = actionRunning(state, 'stage_follows');
+  const backfillRunning = actionRunning(state, 'embedding_backfill');
   if (readButton) {
     readButton.textContent = readRunning ? `Running: ${readRunning.label}` : `Get Content (${platformLabel(selectedPlatform)})`;
     readButton.disabled = busy || Boolean(readRunning);
   }
   if (runAllButton) runAllButton.disabled = busy || Boolean(readRunning);
+  if (backfillButton) {
+    backfillButton.textContent = backfillRunning ? `Running: ${backfillRunning.label}` : 'Backfill Embeddings';
+    backfillButton.disabled = busy || Boolean(backfillRunning);
+  }
   if (getSourcesButton) getSourcesButton.disabled = busy || Boolean(stageRunning);
   const sourceStatusEl = byId('sourceStatus');
-  if ((readRunning || stageRunning) && sourceStatusEl && sourceStatusEl.style.display === 'none') {
-    const running = readRunning || stageRunning;
+  if ((readRunning || stageRunning || backfillRunning) && sourceStatusEl && sourceStatusEl.style.display === 'none') {
+    const running = readRunning || stageRunning || backfillRunning;
     notice('sourceStatus', `Running: ${running.label} (started ${String(running.started_at || '').slice(11, 16) || 'now'}).`, '');
   }
 }
@@ -634,6 +647,10 @@ async function loadState(options={}) {
       const reasons = data.circuit_broken_reasons_by_platform || {};
       const paused = (data.circuit_broken || []).map(platform => `${platform} (${reasons[platform] || 'bot_shaped'})`).join(', ');
       failures.push(`Collection paused for: ${paused}. Check debug bundle snapshots before retrying.`);
+    }
+    if (data.embedding_degraded && data.embedding_degraded.degraded) {
+      const names = (data.embedding_degraded.subjects || []).map(s => s.subject_name || s.subject_id).filter(Boolean).join(', ');
+      failures.push(`Embedding scoring degraded${names ? ` for: ${names}` : ''}. Check Ollama and run Backfill Embeddings in Debug.`);
     }
     failureBox.className = failures.length ? 'notice bad' : 'notice ok';
     failureBox.textContent = failures.join('\n') || 'No visible failures.';
@@ -882,6 +899,17 @@ class DesktopWebServer:
                 request,
             )
 
+        async def backfill_embeddings(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.backfill_embeddings(
+                    concurrency=int(p.get("concurrency") or 4),
+                    limit=int(p.get("limit")) if p.get("limit") else None,
+                    rescore=bool(p.get("rescore", True)),
+                ),
+                request,
+            )
+
         async def briefs(request):
             assert self.service is not None
             return await run_result(
@@ -961,6 +989,7 @@ class DesktopWebServer:
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
             Route("/api/content/read", read_content, methods=["POST"]),
+            Route("/api/embeddings/backfill", backfill_embeddings, methods=["POST"]),
             Route("/api/briefs", briefs, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
             Route("/api/routes/unlink", unlink_route, methods=["POST"]),

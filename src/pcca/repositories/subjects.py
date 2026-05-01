@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -86,10 +87,19 @@ class SubjectRepository:
         return str(value).strip() if value else None
 
     async def get_description_embedding(self, subject_id: int, *, model: str) -> list[float] | None:
+        return await self.get_description_embedding_for_text(subject_id, model=model)
+
+    async def get_description_embedding_for_text(
+        self,
+        subject_id: int,
+        *,
+        model: str,
+        text_hash: str | None = None,
+    ) -> list[float] | None:
         row = await (
             await self.conn.execute(
                 """
-                SELECT description_embedding_json, description_embedding_model
+                SELECT description_embedding_json, description_embedding_model, description_embedding_text_hash
                 FROM subjects
                 WHERE id = ?
                 """,
@@ -97,6 +107,8 @@ class SubjectRepository:
             )
         ).fetchone()
         if row is None or row["description_embedding_model"] != model or not row["description_embedding_json"]:
+            return None
+        if text_hash is not None and row["description_embedding_text_hash"] != text_hash:
             return None
         try:
             payload = json.loads(row["description_embedding_json"])
@@ -109,18 +121,31 @@ class SubjectRepository:
         except (TypeError, ValueError):
             return None
 
-    async def save_description_embedding(self, subject_id: int, *, model: str, embedding: list[float]) -> None:
+    async def save_description_embedding(
+        self,
+        subject_id: int,
+        *,
+        model: str,
+        embedding: list[float],
+        text_hash: str | None = None,
+    ) -> None:
         await self.conn.execute(
             """
             UPDATE subjects
             SET description_embedding_json = ?,
                 description_embedding_model = ?,
+                description_embedding_text_hash = ?,
                 description_embedding_updated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
-            (json.dumps(embedding), model, subject_id),
+            (json.dumps(embedding), model, text_hash, subject_id),
         )
         await self.conn.commit()
+
+    @staticmethod
+    def embedding_text_hash(text: str) -> str:
+        normalized = " ".join((text or "").split()).strip()
+        return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
     async def list_all(self) -> list[Subject]:
         rows = await (

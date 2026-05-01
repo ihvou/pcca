@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -427,6 +428,49 @@ async def test_desktop_state_surfaces_sources_needing_reauth(tmp_path: Path) -> 
 
     assert state["reauth_sources"][0]["platform"] == "youtube"
     assert state["reauth_sources"][0]["account_or_channel_id"] == "@openai"
+
+
+@pytest.mark.asyncio
+async def test_desktop_state_surfaces_embedding_degradation(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        await db.conn.execute(
+            """
+            INSERT INTO run_logs(run_type, status, stats_json, metadata_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                "nightly_collection",
+                "success",
+                "{}",
+                json.dumps(
+                    {
+                        "embedding_degraded": True,
+                        "embedding_degraded_subjects": [
+                            {"subject_id": 1, "subject_name": "AI Tools", "fallback_rate": 1.0}
+                        ],
+                        "embedding_fallback_items": 3,
+                        "embedding_items_scored": 0,
+                    }
+                ),
+            ),
+        )
+        await db.conn.commit()
+    finally:
+        await db.close()
+
+    state = await service.get_state()
+
+    assert state["embedding_degraded"]["degraded"] is True
+    assert state["embedding_degraded"]["subjects"][0]["subject_name"] == "AI Tools"
+    assert state["embedding_degraded"]["fallback_items"] == 3
 
 
 @pytest.mark.asyncio
