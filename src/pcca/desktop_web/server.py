@@ -25,88 +25,85 @@ INDEX_HTML = r"""
   <title>PCCA Wizard</title>
   <style>
     :root {
-      --bg: #08110f;
-      --panel: rgba(241, 247, 239, .08);
-      --panel-strong: rgba(241, 247, 239, .13);
-      --ink: #eef7ef;
-      --muted: #9ab0a3;
-      --line: rgba(238, 247, 239, .16);
-      --accent: #73f2b5;
-      --accent-2: #ffb86c;
-      --bad: #ff7777;
-      --ok: #73f2b5;
-      --shadow: 0 28px 90px rgba(0, 0, 0, .36);
+      --bg: #0a0b0d;
+      --surface: #111315;
+      --surface-hi: #16181b;
+      --ink: #e6e8eb;
+      --muted: #6b7280;
+      --line: #2a2d31;
+      --line-hi: #3a3d42;
+      --accent: #4ade80;
+      --accent-dim: rgba(74, 222, 128, 0.10);
+      --warn: #fbbf24;
+      --warn-dim: rgba(251, 191, 36, 0.08);
+      --bad: #f87171;
+      --bad-dim: rgba(248, 113, 113, 0.08);
+      --mono: 'JetBrains Mono', 'SF Mono', SFMono-Regular, Menlo, ui-monospace, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      color: var(--ink);
-      font-family: Avenir Next, Trebuchet MS, Verdana, sans-serif;
-      background:
-        radial-gradient(circle at 12% 8%, rgba(115, 242, 181, .18), transparent 28rem),
-        radial-gradient(circle at 84% 18%, rgba(255, 184, 108, .15), transparent 24rem),
-        linear-gradient(135deg, #07100e 0%, #10211d 54%, #07100e 100%);
-    }
-    body::before {
-      content: "";
-      position: fixed;
-      inset: 0;
-      pointer-events: none;
-      opacity: .28;
-      background-image: linear-gradient(rgba(238,247,239,.06) 1px, transparent 1px), linear-gradient(90deg, rgba(238,247,239,.05) 1px, transparent 1px);
-      background-size: 42px 42px;
-      mask-image: radial-gradient(circle at 50% 20%, black, transparent 74%);
-    }
-    .shell { max-width: 1160px; margin: 0 auto; padding: 24px; position: relative; }
-    header { display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; margin-bottom: 18px; }
-    .brand h1 { margin: 0; font-size: clamp(30px, 5vw, 58px); line-height: .88; letter-spacing: -.055em; }
-    .brand p { max-width: 640px; margin: 12px 0 0; color: var(--muted); line-height: 1.45; }
-    .pill { border: 1px solid var(--line); background: rgba(8,17,15,.52); border-radius: 999px; padding: 9px 12px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--muted); }
-    .tabs { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 16px 0; padding: 6px; border: 1px solid var(--line); background: rgba(8,17,15,.42); border-radius: 22px; box-shadow: var(--shadow); }
-    .tab { box-shadow: none; background: transparent; color: var(--muted); border-radius: 16px; padding: 12px; }
-    .tab.active { background: var(--accent); color: #07100e; }
+    body { margin: 0; min-height: 100vh; color: var(--ink); background: var(--bg); font: 13px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
+    .shell { max-width: 1280px; margin: 0 auto; padding: 16px 20px 32px; }
+    header { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; padding: 8px 0 12px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
+    .brand h1 { margin: 0; font: 600 13px/1.2 var(--mono); letter-spacing: 0; text-transform: uppercase; color: var(--ink); }
+    .brand h1::before { content: "▸ "; color: var(--accent); font-weight: 400; }
+    .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 1.4; max-width: 720px; }
+    .pill { border: 1px solid var(--line); background: var(--surface); border-radius: 2px; padding: 3px 8px; font: 11px var(--mono); color: var(--muted); }
+    .tabs { display: flex; gap: 0; margin: 0 0 16px; border-bottom: 1px solid var(--line); padding: 0; background: transparent; box-shadow: none; }
+    .tab { background: transparent; border: 0; border-bottom: 2px solid transparent; border-radius: 0; padding: 8px 14px; font: 12px var(--mono); color: var(--muted); cursor: pointer; letter-spacing: 0.04em; text-transform: uppercase; box-shadow: none; transition: color 80ms, border-color 80ms; }
+    .tab:hover { color: var(--ink); }
+    .tab.active { color: var(--ink); border-bottom-color: var(--accent); background: transparent; }
     .view { display: none; }
-    .view.active { display: block; animation: rise .24s ease-out; }
-    @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-    .grid { display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(280px, .75fr); gap: 14px; align-items: start; }
-    .stack { display: grid; gap: 14px; }
-    .card { border: 1px solid var(--line); background: var(--panel); border-radius: 24px; padding: 18px; box-shadow: var(--shadow); backdrop-filter: blur(18px); }
-    .card.tight { padding: 14px; }
-    h2, h3 { margin: 0 0 8px; letter-spacing: -.025em; }
-    h2 { font-size: 24px; }
-    h3 { font-size: 17px; }
-    p { color: var(--muted); line-height: 1.45; margin: 0 0 12px; }
-    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-    input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 15px; padding: 12px 13px; background: rgba(238,247,239,.08); color: var(--ink); font: 14px Avenir Next, Trebuchet MS, Verdana, sans-serif; outline: none; }
-    textarea { min-height: 118px; resize: vertical; line-height: 1.45; }
-    input:focus, select:focus, textarea:focus { border-color: rgba(115,242,181,.72); box-shadow: 0 0 0 3px rgba(115,242,181,.12); }
-    button { border: 0; border-radius: 15px; padding: 11px 13px; color: #07100e; background: var(--accent); cursor: pointer; font: 700 13px Avenir Next, Trebuchet MS, Verdana, sans-serif; box-shadow: 0 12px 28px rgba(115,242,181,.16); }
-    button.secondary { background: rgba(238,247,239,.13); color: var(--ink); border: 1px solid var(--line); box-shadow: none; }
-    button.warn { background: var(--accent-2); color: #1d1208; }
-    button:disabled { opacity: .42; cursor: wait; }
-    .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 12px; border: 1px solid var(--line); border-radius: 18px; background: rgba(238,247,239,.06); }
-    .row.clickable { cursor: pointer; }
-    .row.selected { border-color: rgba(115,242,181,.7); background: rgba(115,242,181,.1); }
-    .row strong { display: block; font-size: 14px; }
-    .row small, .fine { display: block; color: var(--muted); font-size: 12px; margin-top: 3px; overflow-wrap: anywhere; }
-    .notice { border: 1px solid rgba(255,184,108,.34); background: rgba(255,184,108,.09); color: #ffd9ad; border-radius: 18px; padding: 12px; white-space: pre-wrap; }
-    .notice.bad { border-color: rgba(255,119,119,.38); background: rgba(255,119,119,.1); color: #ffc4c4; }
-    .notice.ok { border-color: rgba(115,242,181,.34); background: rgba(115,242,181,.09); color: #c8ffe0; }
-    .list { display: grid; gap: 8px; }
-    .logs, pre { max-height: 360px; overflow: auto; white-space: pre-wrap; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c8d8ce; }
-    .source-toolbar { display: grid; grid-template-columns: 1fr 1fr auto; gap: 10px; align-items: end; }
-    @media (max-width: 860px) { .grid, .split, .source-toolbar { grid-template-columns: 1fr; } header { display: block; } .tabs { grid-template-columns: repeat(2, 1fr); } }
+    .view.active { display: block; }
+    .grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.6fr); gap: 12px; align-items: start; }
+    .stack { display: grid; gap: 12px; }
+    .card { border: 1px solid var(--line); background: var(--surface); border-radius: 2px; padding: 14px; box-shadow: none; backdrop-filter: none; }
+    .card.tight { padding: 10px 12px; }
+    h2, h3 { margin: 0 0 10px; font: 600 12px var(--mono); letter-spacing: 0.02em; text-transform: uppercase; color: var(--ink); }
+    h3 { font-size: 11px; color: var(--muted); }
+    p { color: var(--muted); font-size: 12px; line-height: 1.5; margin: 0 0 10px; }
+    label { display: grid; gap: 4px; color: var(--muted); font: 11px var(--mono); text-transform: uppercase; letter-spacing: 0.04em; }
+    input, select, textarea { width: 100%; border: 1px solid var(--line); border-radius: 2px; padding: 6px 8px; background: var(--bg); color: var(--ink); font: 13px var(--sans); outline: none; transition: border-color 80ms; }
+    textarea { font: 12px/1.5 var(--mono); min-height: 96px; resize: vertical; }
+    input:focus, select:focus, textarea:focus { border-color: var(--accent); box-shadow: none; }
+    button { border: 1px solid var(--line); border-radius: 2px; padding: 5px 12px; color: var(--ink); background: var(--surface-hi); cursor: pointer; font: 600 12px var(--mono); letter-spacing: 0.02em; transition: border-color 80ms, color 80ms; box-shadow: none; }
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+    button.primary:hover { background: transparent; color: var(--accent); }
+    button.secondary { color: var(--muted); }
+    button.secondary:hover { color: var(--ink); border-color: var(--line-hi); }
+    button.warn { background: var(--warn); color: var(--bg); border-color: var(--warn); }
+    button.warn:hover { background: transparent; color: var(--warn); }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button:disabled:hover { border-color: var(--line); color: var(--ink); }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .row { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; border: 1px solid var(--line); border-radius: 2px; background: var(--surface); font-size: 12px; }
+    .row.clickable { cursor: pointer; transition: border-color 80ms; }
+    .row.clickable:hover { border-color: var(--line-hi); }
+    .row.selected { border-color: var(--accent); background: var(--accent-dim); }
+    .row strong { display: block; font: 500 13px var(--mono); }
+    .row small, .fine { display: block; color: var(--muted); font: 11px var(--mono); margin-top: 2px; overflow-wrap: anywhere; }
+    .notice { border: 1px solid var(--warn); background: var(--warn-dim); color: var(--warn); border-radius: 2px; padding: 8px 10px; font: 12px/1.5 var(--mono); white-space: pre-wrap; }
+    .notice.bad { border-color: var(--bad); background: var(--bad-dim); color: var(--bad); }
+    .notice.ok { border-color: var(--accent); background: var(--accent-dim); color: var(--accent); }
+    .list { display: grid; gap: 6px; }
+    .logs, pre { max-height: 320px; overflow: auto; white-space: pre-wrap; font: 11px/1.5 var(--mono); color: var(--muted); background: var(--bg); border: 1px solid var(--line); border-radius: 2px; padding: 8px 10px; margin: 0; }
+    .source-toolbar { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: end; }
+    @media (max-width: 860px) { .grid, .split, .source-toolbar { grid-template-columns: 1fr; } header { flex-direction: column; align-items: flex-start; } .tabs { overflow-x: auto; } }
+    ::selection { background: var(--accent); color: var(--bg); }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: var(--line); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--line-hi); }
   </style>
 </head>
 <body>
   <div class="shell">
     <header>
       <div class="brand">
-        <h1>Cut through<br/>the feed fog.</h1>
-        <p>A local-first curation agent: import followed sources, collect fresh content, and send Telegram Briefs shaped by your subject preferences.</p>
+        <h1>PCCA · Local Curation Agent</h1>
+        <p>Subjects · Sources · Briefs — local-first. Telegram is the UI.</p>
       </div>
       <div class="pill" id="agentBadge">agent: checking</div>
     </header>
@@ -126,7 +123,7 @@ INDEX_HTML = r"""
             <p>Start or stop the local agent, then ask for a fresh Brief per subject. Get Brief automatically rebuilds when new content or changed preferences require it.</p>
             <div id="tokenWarning" class="notice bad" style="display:none"></div>
             <div class="actions">
-              <button onclick="postAction('/api/agent/start')">Start</button>
+              <button class="primary" onclick="postAction('/api/agent/start')">Start</button>
               <button class="secondary" onclick="postAction('/api/agent/stop')">Stop</button>
             </div>
           </div>
@@ -147,7 +144,7 @@ INDEX_HTML = r"""
               <textarea id="subjectText" placeholder="Example: Track practical Claude Code / agentic coding updates. Include concrete workflow tips, release details, evals, and examples from builders. Avoid biography, generic AI hype, Skills tutorials with no real lesson, and listicles."></textarea>
             </label>
             <div class="actions" style="margin-top:10px">
-              <button onclick="draftSubject()">Draft Subject</button>
+              <button class="primary" onclick="draftSubject()">Draft Subject</button>
               <button id="saveDraftButton" onclick="confirmSubjectDraft()" disabled>Save Draft</button>
               <button class="secondary" onclick="cancelSubjectDraft()">Cancel</button>
             </div>
@@ -182,7 +179,7 @@ INDEX_HTML = r"""
             <div class="source-toolbar">
               <label>Platform <select id="platform" onchange="updateActionControls(lastState || {})"></select></label>
               <label>Limit <input id="limit" type="number" min="1" max="500" value="100" /></label>
-              <button id="getSourcesButton" onclick="getSources()">Get Sources</button>
+              <button id="getSourcesButton" class="primary" onclick="getSources()">Get Sources</button>
             </div>
             <p class="fine" style="margin-top:10px">Get Content runs the collector for the selected platform only. To run everything, use Run All Content in Debug.</p>
             <div class="actions" style="margin-top:10px"><button id="readContentButton" class="secondary" onclick="readContent()">Get Content</button></div>
