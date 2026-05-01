@@ -250,6 +250,33 @@ class ItemRepository:
         ).fetchall()
         return [self._row_to_collected_item(row) for row in rows]
 
+    async def list_by_ids_for_scoring(self, item_ids: set[int] | list[int]) -> list[tuple[int, CollectedItem]]:
+        ordered_ids = [int(item_id) for item_id in item_ids]
+        if not ordered_ids:
+            return []
+        placeholders = ",".join("?" for _ in ordered_ids)
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT
+                  i.id,
+                  i.platform,
+                  i.external_id,
+                  i.canonical_url,
+                  i.author,
+                  i.published_at,
+                  i.raw_text,
+                  i.transcript_text,
+                  i.metadata_json
+                FROM items i
+                WHERE i.id IN ({placeholders})
+                """,
+                tuple(ordered_ids),
+            )
+        ).fetchall()
+        by_id = {int(row["id"]): self._row_to_collected_item(row) for row in rows}
+        return [by_id[item_id] for item_id in ordered_ids if item_id in by_id]
+
     async def count_missing_embeddings(self, *, model: str) -> int:
         row = await (
             await self.conn.execute(

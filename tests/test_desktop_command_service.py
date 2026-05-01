@@ -15,6 +15,7 @@ from pcca.repositories.subject_drafts import SubjectDraftRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.desktop_command_service import (
     DesktopCommandService,
+    SUPPORTED_ONBOARDING_PLATFORMS,
     cron_to_digest_time,
     digest_time_to_cron,
     evaluate_smoke_result,
@@ -62,6 +63,32 @@ def test_smoke_evaluation_requires_items_and_delivery() -> None:
     assert ok.ok is True
     assert ok.items_collected == 2
     assert ok.deliveries_sent == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_follows_all_platforms_runs_sequentially(tmp_path: Path, monkeypatch) -> None:
+    settings = make_settings(tmp_path)
+    calls: list[str] = []
+
+    class FakeApp:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def stage_follows_once(self, *, platform: str, limit: int = 200) -> int:
+            calls.append(platform)
+            assert limit == 7
+            return 2
+
+    monkeypatch.setattr("pcca.services.desktop_command_service.PCCAApp", FakeApp)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    result = await service.stage_follows(platform="", limit=7)
+
+    assert result.ok is True
+    assert calls == SUPPORTED_ONBOARDING_PLATFORMS
+    assert result.data["count"] == 2 * len(SUPPORTED_ONBOARDING_PLATFORMS)
+    assert result.data["platform"] is None
+    assert result.data["counts"]["x"] == 2
 
 
 @pytest.mark.asyncio

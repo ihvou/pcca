@@ -577,7 +577,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Browser to read from. Defaults to first browser with required cookies.",
     )
 
-    sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
+    nightly_parser = sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
+    nightly_parser.add_argument(
+        "--no-backfill",
+        action="store_true",
+        help="Skip automatic embedding warm-up after collection.",
+    )
     embed_backfill_parser = sub.add_parser(
         "embed-backfill",
         help="Warm missing Ollama embedding cache and optionally rescore existing items",
@@ -797,7 +802,7 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     if args.command == "run-nightly-once":
         app = PCCAApp(settings=settings)
-        stats = asyncio.run(app.run_nightly_once())
+        stats = asyncio.run(app.run_nightly_once(auto_backfill=not args.no_backfill))
         print(f"Nightly run completed: {stats}")
         return
 

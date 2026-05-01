@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import logging
 import os
@@ -171,6 +172,11 @@ class DesktopCommandService:
         for key in stale:
             self._inflight_actions.pop(key, None)
         return out
+
+    def _set_inflight_label(self, *, key: str, label: str) -> None:
+        action = self._inflight_actions.get(key)
+        if action is not None and not action.task.done():
+            action.label = label
 
     async def _run_guarded_action(
         self,
@@ -560,16 +566,51 @@ class DesktopCommandService:
 
     async def stage_follows(self, *, platform: str, limit: int = 100) -> CommandResult:
         platform = platform.strip().lower()
-        if platform not in SUPPORTED_ONBOARDING_PLATFORMS:
+        all_platforms = platform in {"", "all"}
+        if not all_platforms and platform not in SUPPORTED_ONBOARDING_PLATFORMS:
             raise ValueError(f"Unsupported follow-import platform: {platform}")
 
         async def runner() -> CommandResult:
             started_at = time.monotonic()
-            self.log(f"Staging follows from {platform} with limit={limit}.")
-            app = PCCAApp(settings=self.settings())
-            count = await app.stage_follows_once(platform=platform, limit=limit)
-            self.log(f"Staged {count} source(s) from {platform} in {int((time.monotonic() - started_at) * 1000)}ms.")
-            return CommandResult(True, f"Staged {count} source(s) from {platform}.", {"count": count})
+            platforms = SUPPORTED_ONBOARDING_PLATFORMS if all_platforms else [platform]
+            counts: dict[str, int] = {}
+            errors: dict[str, str] = {}
+            total_count = 0
+            for index, current_platform in enumerate(platforms, start=1):
+                self._set_inflight_label(
+                    key="stage_follows",
+                    label=f"Get Sources: staging {current_platform} ({index}/{len(platforms)})",
+                )
+                self.log(
+                    f"Staging {current_platform} follows ({index}/{len(platforms)}) with limit={limit}."
+                )
+                try:
+                    app = PCCAApp(settings=self.settings())
+                    count = await app.stage_follows_once(platform=current_platform, limit=limit)
+                    counts[current_platform] = count
+                    total_count += count
+                    self.log(
+                        f"Staged {count} source(s) from {current_platform} "
+                        f"in {int((time.monotonic() - started_at) * 1000)}ms."
+                    )
+                except Exception as exc:
+                    errors[current_platform] = str(exc)
+                    self.log(f"Staging {current_platform} failed: {exc}")
+                    if not all_platforms:
+                        raise
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            if all_platforms:
+                suffix = f" {len(errors)} platform(s) failed; check Debug logs." if errors else ""
+                return CommandResult(
+                    True,
+                    f"Staged {total_count} source(s) across {len(platforms)} platform(s) in {elapsed_ms}ms.{suffix}",
+                    {"count": total_count, "counts": counts, "errors": errors, "platform": None},
+                )
+            return CommandResult(
+                True,
+                f"Staged {total_count} source(s) from {platform}.",
+                {"count": total_count, "counts": counts, "errors": errors, "platform": platform},
+            )
 
         return await self._run_guarded_action(key="stage_follows", label="Get Sources", runner=runner)
 
@@ -1055,12 +1096,28 @@ class DesktopCommandService:
 
         async def runner() -> CommandResult:
             label = f" for {platform_filter}" if platform_filter else " for all platforms"
-            self.log(f"Reading content now{label}.")
+            self.log(f"Reading content now{label}. Phase: collecting.")
+
+            def progress(event: dict[str, Any]) -> None:
+                if event.get("phase") == "embedding" or event.get("kind") in {"subjects", "items", "segments", "auto_backfill"}:
+                    self._set_inflight_label(
+                        key="read_content",
+                        label=f"Get Content: embedding {event.get('kind')} {event.get('processed')}/{event.get('total')}",
+                    )
+                    self.log(
+                        "Reading content phase: embedding "
+                        f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}"
+                    )
+
             if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
-                stats = await self._agent_app.pipeline_orchestrator.run_nightly_collection(platform=platform_filter)
+                runner_method = self._agent_app.pipeline_orchestrator.run_nightly_collection
+                kwargs = {"platform": platform_filter}
+                if "progress_callback" in inspect.signature(runner_method).parameters:
+                    kwargs["progress_callback"] = progress
+                stats = await runner_method(**kwargs)
             else:
                 app = PCCAApp(settings=self.settings())
-                stats = await app.run_nightly_once(platform=platform_filter)
+                stats = await app.run_nightly_once(platform=platform_filter, progress_callback=progress)
             if stats.get("skipped_already_running"):
                 message = "Content collection is already running; check Logs."
                 self.log(message)
@@ -1074,12 +1131,25 @@ class DesktopCommandService:
                     },
                 )
             self.log(f"Read content finished: {json.dumps(stats or {}, sort_keys=True)}")
+            embedding_pending = bool((stats or {}).get("embedding_pending"))
             message = (
                 f"Content read finished for {platform_filter}."
                 if platform_filter
                 else "Content read finished for all platforms."
             )
-            return CommandResult(True, message, {"nightly_stats": stats or {}, "platform": platform_filter})
+            if embedding_pending:
+                message += " Embedding is pending; keyword fallback remains available."
+            elif (stats or {}).get("embedding_backfill", {}).get("enabled"):
+                message += " New embeddings are warmed."
+            return CommandResult(
+                True,
+                message,
+                {
+                    "nightly_stats": stats or {},
+                    "platform": platform_filter,
+                    "embedding_pending": embedding_pending,
+                },
+            )
 
         return await self._run_guarded_action(key="read_content", label="Get Content", runner=runner)
 

@@ -175,13 +175,13 @@ INDEX_HTML = r"""
         <div class="stack">
           <div class="card">
             <h2>Get Sources</h2>
-            <p>Choose a platform and import follows/subscriptions from the logged-in browser session. If the session is missing, the Wizard will ask to run a repair flow inline.</p>
+            <p>Choose a platform, or All, and import follows/subscriptions from logged-in browser sessions. If a per-platform session is missing, the Wizard will ask to run a repair flow inline.</p>
             <div class="source-toolbar">
               <label>Platform <select id="platform" onchange="updateActionControls(lastState || {})"></select></label>
               <label>Limit <input id="limit" type="number" min="1" max="500" value="100" /></label>
               <button id="getSourcesButton" class="primary" onclick="getSources()">Get Sources</button>
             </div>
-            <p class="fine" style="margin-top:10px">Get Content runs the collector for the selected platform only. To run everything, use Run All Content in Debug.</p>
+            <p class="fine" style="margin-top:10px">Get Content runs the selected platform, or all platforms when All is selected.</p>
             <div class="actions" style="margin-top:10px"><button id="readContentButton" class="secondary" onclick="readContent()">Get Content</button></div>
             <div id="sourceStatus" class="notice" style="display:none; margin-top:12px"></div>
           </div>
@@ -247,7 +247,7 @@ INDEX_HTML = r"""
           </div>
           <div class="card tight">
             <h3>Run Now</h3>
-            <p>Manual all-platform collection escape hatch. The Sources tab button is platform-scoped.</p>
+            <p>Manual all-platform collection and embedding repair actions.</p>
             <div class="actions">
               <button id="runAllContentButton" class="secondary" onclick="readContentAll()">Run All Content</button>
               <button id="backfillEmbeddingsButton" class="secondary" onclick="backfillEmbeddings()">Backfill Embeddings</button>
@@ -328,15 +328,22 @@ async function saveSettings() {
 async function getSources() {
   const platformEl = byId('platform');
   const limitEl = byId('limit');
-  notice('sourceStatus', `Importing ${platformEl.value} sources...`, '');
+  const platform = platformEl ? platformEl.value : '';
+  const isAll = !platform;
+  notice('sourceStatus', isAll ? 'Staging follows for all platforms sequentially...' : `Importing ${platform} sources...`, '');
   try {
     setBusy(true);
-    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
+    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform, limit: Number(limitEl.value || 100)})});
     logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
     notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
     await loadState({force:true});
   } catch (err) {
     logLine(`ERROR: ${err.message}`);
+    if (isAll) {
+      notice('sourceStatus', err.message, 'bad');
+      alert(err.message);
+      return;
+    }
     const shouldRepair = confirm(`${err.message}\n\nTry a session repair from your local browser, then import again?`);
     if (shouldRepair) {
       try {
@@ -359,7 +366,7 @@ async function getSources() {
 async function readContent() {
   const platformEl = byId('platform');
   const platform = platformEl ? platformEl.value : '';
-  notice('sourceStatus', `Running Get Content for ${platformLabel(platform)}...`, '');
+  notice('sourceStatus', `Collecting ${platformLabel(platform)} content, then embedding new items...`, '');
   const data = await postAction('/api/content/read', {platform}, {timeoutMs: 1800000});
   if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
 }
@@ -569,7 +576,10 @@ function renderReauth(rows=[]) {
 function fillPlatformSelects(platforms=[]) {
   const platformEl = byId('platform');
   const sourceFilterEl = byId('sourceFilter');
-  if (platformEl.options.length === 0) platforms.forEach(p => platformEl.add(new Option(p, p)));
+  if (platformEl.options.length === 0) {
+    platformEl.add(new Option('All', ''));
+    platforms.forEach(p => platformEl.add(new Option(p, p)));
+  }
   if (sourceFilterEl.options.length === 1) platforms.forEach(p => sourceFilterEl.add(new Option(p, p)));
 }
 function platformLabel(value) {
@@ -598,9 +608,12 @@ function updateActionControls(state) {
     backfillButton.textContent = backfillRunning ? `Running: ${backfillRunning.label}` : 'Backfill Embeddings';
     backfillButton.disabled = busy || Boolean(backfillRunning);
   }
-  if (getSourcesButton) getSourcesButton.disabled = busy || Boolean(stageRunning);
+  if (getSourcesButton) {
+    getSourcesButton.textContent = stageRunning ? `Running: ${stageRunning.label}` : `Get Sources (${platformLabel(selectedPlatform)})`;
+    getSourcesButton.disabled = busy || Boolean(stageRunning);
+  }
   const sourceStatusEl = byId('sourceStatus');
-  if ((readRunning || stageRunning || backfillRunning) && sourceStatusEl && sourceStatusEl.style.display === 'none') {
+  if ((readRunning || stageRunning || backfillRunning) && sourceStatusEl) {
     const running = readRunning || stageRunning || backfillRunning;
     notice('sourceStatus', `Running: ${running.label} (started ${String(running.started_at || '').slice(11, 16) || 'now'}).`, '');
   }
@@ -658,11 +671,21 @@ async function loadState(options={}) {
     restoreFormSnapshot(snapshot);
   } catch (err) { logLine(`ERROR: ${err.message}`); }
 }
+async function refreshRunningState() {
+  try {
+    const data = await request('/api/state');
+    lastState = data;
+    updateActionControls(data);
+    logsBox.textContent = (data.logs || []).slice().reverse().join('\n');
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+  }
+}
 document.addEventListener('input', event => {
   if (event.target && ['TEXTAREA', 'INPUT', 'SELECT'].includes(event.target.tagName)) pauseRefresh();
 });
 loadState({force:true});
-setInterval(() => loadState(), 5000);
+setInterval(() => busy ? refreshRunningState() : loadState(), 5000);
 </script>
 </body>
 </html>

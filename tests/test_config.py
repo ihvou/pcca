@@ -19,6 +19,7 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     monkeypatch.delenv("PCCA_PLATFORM_EMPTY_THRESHOLD", raising=False)
     monkeypatch.delenv("PCCA_SCORER", raising=False)
     monkeypatch.delenv("PCCA_EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("PCCA_AUTO_BACKFILL", raising=False)
     monkeypatch.setenv("PCCA_OLLAMA_ENABLED", "false")
 
     settings = Settings.from_env()
@@ -34,6 +35,7 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     assert settings.platform_empty_threshold == 25
     assert settings.scorer == "both"
     assert settings.embedding_model == "nomic-embed-text:v1.5"
+    assert settings.auto_backfill_embeddings is True
 
 
 def test_browser_channel_can_use_bundled_chromium(tmp_path, monkeypatch) -> None:
@@ -47,6 +49,7 @@ def test_browser_channel_can_use_bundled_chromium(tmp_path, monkeypatch) -> None
 
 def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PCCA_AUTO_BACKFILL", raising=False)
     (tmp_path / ".env").write_text(
         "\n".join(
             [
@@ -56,6 +59,7 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
                 "PCCA_PLATFORM_EMPTY_THRESHOLD=42",
                 "PCCA_SCORER=embedding",
                 "PCCA_EMBEDDING_MODEL=bge-small-en-v1.5",
+                "PCCA_AUTO_BACKFILL=false",
             ]
         ),
         encoding="utf-8",
@@ -69,3 +73,4 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
     assert settings.platform_empty_threshold == 42
     assert settings.scorer == "embedding"
     assert settings.embedding_model == "bge-small-en-v1.5"
+    assert settings.auto_backfill_embeddings is False

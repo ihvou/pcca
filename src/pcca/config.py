@@ -63,6 +63,7 @@ class Settings:
     embedding_model: str = "nomic-embed-text:v1.5"
     embedding_timeout_seconds: int = 30
     embedding_backfill_concurrency: int = 2
+    auto_backfill_embeddings: bool = True
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -122,6 +123,8 @@ class Settings:
             )
         except ValueError:
             embedding_backfill_concurrency = 2
+        auto_backfill_raw = (_env("PCCA_AUTO_BACKFILL", "true") or "true").strip().lower()
+        auto_backfill_embeddings = auto_backfill_raw in {"1", "true", "yes", "on"}
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -146,6 +149,7 @@ class Settings:
             embedding_model=_env("PCCA_EMBEDDING_MODEL", "nomic-embed-text:v1.5") or "nomic-embed-text:v1.5",
             embedding_timeout_seconds=max(1, embedding_timeout_seconds),
             embedding_backfill_concurrency=max(1, embedding_backfill_concurrency),
+            auto_backfill_embeddings=auto_backfill_embeddings,
         )
 
     def ensure_dirs(self) -> None:

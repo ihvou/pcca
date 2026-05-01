@@ -54,6 +54,8 @@ class PipelineOrchestrator:
     empty_threshold: int | None = None
     runtime_lock_repo: RuntimeLockRepository | None = None
     collection_lock_ttl_seconds: int = 6 * 60 * 60
+    auto_backfill_embeddings: bool = True
+    embedding_backfill_concurrency: int = 2
 
     def __post_init__(self) -> None:
         if self.runtime_lock_repo is None:
@@ -490,6 +492,7 @@ class PipelineOrchestrator:
         concurrency: int = 4,
         limit: int | None = None,
         include_segments: bool = False,
+        item_ids: set[int] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         model = self.embedding_service.embedding_model if self.embedding_service is not None else None
@@ -507,6 +510,7 @@ class PipelineOrchestrator:
             "items_skipped": 0,
             "items_failed": 0,
             "include_segments": include_segments,
+            "item_ids_scoped": len(item_ids or []),
             "segments_total": 0,
             "segments_embedded": 0,
             "segments_skipped": 0,
@@ -554,15 +558,22 @@ class PipelineOrchestrator:
                     stats["subjects_embedded"] += 1
             emit("subjects", processed, len(subjects))
 
-        missing_count = await self.item_repo.count_missing_embeddings(model=model)
-        target_count = min(missing_count, int(limit)) if limit is not None and limit > 0 else missing_count
-        stats["items_total"] = target_count
         semaphore = asyncio.Semaphore(max(1, int(concurrency)))
-        if target_count <= 0:
-            emit("items", 0, 0)
-            rows = []
+        if item_ids is not None:
+            rows = await self.item_repo.list_by_ids_for_scoring(item_ids)
+            if limit is not None and limit > 0:
+                rows = rows[: int(limit)]
+            target_count = len(rows)
+            stats["items_total"] = target_count
         else:
-            rows = await self.item_repo.list_missing_embeddings(model=model, limit=target_count)
+            missing_count = await self.item_repo.count_missing_embeddings(model=model)
+            target_count = min(missing_count, int(limit)) if limit is not None and limit > 0 else missing_count
+            stats["items_total"] = target_count
+            if target_count <= 0:
+                emit("items", 0, 0)
+                rows = []
+            else:
+                rows = await self.item_repo.list_missing_embeddings(model=model, limit=target_count)
 
         async def embed_item(item_id: int, item: CollectedItem) -> str:
             async with semaphore:
@@ -602,16 +613,22 @@ class PipelineOrchestrator:
             emit("items", processed_items, target_count)
 
         if include_segments and self.item_segment_repo is not None:
-            item_rows = await self.item_repo.list_all_for_scoring(limit=limit)
+            item_rows = rows if item_ids is not None else await self.item_repo.list_all_for_scoring(limit=limit)
             for item_id, item in item_rows:
                 segments = await self.item_segment_repo.ensure_segments(item_id=item_id, item=item)
                 stats["segments_prepared"] += len(segments)
-            missing_segments = await self.item_segment_repo.count_missing_embeddings(model=model)
-            target_segments = (
-                min(missing_segments, int(limit)) if limit is not None and limit > 0 else missing_segments
-            )
+            if item_ids is not None:
+                segment_rows = []
+                for item_id, _item in item_rows:
+                    segment_rows.extend(await self.item_segment_repo.list_for_item(item_id=item_id))
+                target_segments = len(segment_rows)
+            else:
+                missing_segments = await self.item_segment_repo.count_missing_embeddings(model=model)
+                target_segments = (
+                    min(missing_segments, int(limit)) if limit is not None and limit > 0 else missing_segments
+                )
+                segment_rows = await self.item_segment_repo.list_missing_embeddings(model=model, limit=target_segments) if target_segments else []
             stats["segments_total"] = target_segments
-            segment_rows = await self.item_segment_repo.list_missing_embeddings(model=model, limit=target_segments) if target_segments else []
 
             async def embed_segment(segment: ItemSegment) -> str:
                 async with semaphore:
@@ -717,7 +734,13 @@ class PipelineOrchestrator:
             )
             raise
 
-    async def run_nightly_collection(self, *, platform: str | None = None) -> dict:
+    async def run_nightly_collection(
+        self,
+        *,
+        platform: str | None = None,
+        auto_backfill: bool | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         platform_filter = platform.strip().lower() if platform and platform.strip() else None
         lock_name = "nightly_collection"
         lock_owner = f"pipeline:{id(self)}:{time.time_ns()}"
@@ -782,6 +805,9 @@ class PipelineOrchestrator:
             "segments_scored": 0,
             "segments_scored_with_embedding": 0,
             "segments_rebuilt": 0,
+            "auto_backfill_enabled": self.auto_backfill_embeddings if auto_backfill is None else bool(auto_backfill),
+            "embedding_pending": False,
+            "embedding_backfill": {},
             "sources_skipped_circuit_breaker": 0,
             "circuit_broken": [],
             "circuit_broken_reason": [],
@@ -1017,6 +1043,59 @@ class PipelineOrchestrator:
                     )
                     stats["collector_errors"] += 1
                     record_platform_failure(source.platform, reason="exception")
+
+            if stats["auto_backfill_enabled"] and changed_items:
+                try:
+                    logger.info(
+                        "Auto embedding backfill started run_id=%s changed_items=%d include_segments=True",
+                        run_id,
+                        len(changed_items),
+                    )
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(
+                                {
+                                    "kind": "auto_backfill",
+                                    "phase": "embedding",
+                                    "processed": 0,
+                                    "total": len(changed_items),
+                                    "stats": dict(stats),
+                                }
+                            )
+                        except Exception:
+                            logger.exception("Auto embedding progress callback failed run_id=%s", run_id)
+                    backfill_stats = await self.backfill_embeddings(
+                        concurrency=self.embedding_backfill_concurrency,
+                        include_segments=True,
+                        item_ids=set(changed_items.keys()),
+                        progress_callback=progress_callback,
+                    )
+                    stats["embedding_backfill"] = backfill_stats
+                    stats["embedding_pending"] = bool(
+                        backfill_stats.get("items_failed")
+                        or backfill_stats.get("segments_failed")
+                    )
+                    logger.info(
+                        "Auto embedding backfill finished run_id=%s pending=%s stats=%s",
+                        run_id,
+                        stats["embedding_pending"],
+                        backfill_stats,
+                    )
+                except Exception:
+                    stats["embedding_pending"] = True
+                    logger.warning(
+                        "Auto embedding backfill failed run_id=%s changed_items=%d; collection will continue.",
+                        run_id,
+                        len(changed_items),
+                        exc_info=True,
+                    )
+            elif changed_items:
+                logger.info(
+                    "Auto embedding backfill skipped run_id=%s enabled=%s changed_items=%d",
+                    run_id,
+                    stats["auto_backfill_enabled"],
+                    len(changed_items),
+                )
 
             changed_rows = list(changed_items.items())
             for subject in subjects:

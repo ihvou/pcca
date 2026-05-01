@@ -120,6 +120,15 @@ class JobRunner:
                 smart,
                 sorted(subject_ids) if subject_ids is not None else None,
             )
+            if run_type == "morning_digest" and self.pipeline_orchestrator is not None:
+                logger.info("Morning digest pre-send rescore started run_id=%s.", run_id)
+                rescore_stats = await self.pipeline_orchestrator.rescore_existing_items()
+                stats["pre_send_rescore"] = rescore_stats
+                logger.info(
+                    "Morning digest pre-send rescore finished run_id=%s stats=%s",
+                    run_id,
+                    rescore_stats,
+                )
             if (
                 self.telegram_service is None
                 or self.telegram_service.application is None

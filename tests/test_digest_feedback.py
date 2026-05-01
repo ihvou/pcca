@@ -97,6 +97,16 @@ class HeadlineOnlyRenderer:
         return DeliveryPayload(renderer_name=self.name, briefs=[brief])
 
 
+class FakePipelineOrchestrator:
+    def __init__(self) -> None:
+        self.rescore_calls = 0
+
+    async def rescore_existing_items(self, *, limit=None):
+        self.rescore_calls += 1
+        assert limit is None
+        return {"items_scored": 1}
+
+
 async def _seed_subject_with_route(db: Database) -> tuple[SubjectService, RoutingService, object]:
     assert db.conn is not None
     subject_repo = SubjectRepository(conn=db.conn)
@@ -467,6 +477,45 @@ async def test_digest_runner_uses_injected_renderer(tmp_path: Path) -> None:
         await db.conn.execute("SELECT stats_json FROM run_logs ORDER BY id DESC LIMIT 1")
     ).fetchone()
     assert json.loads(latest_run["stats_json"])["renderers_used"] == {"headline_only": 1}
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduled_morning_digest_runs_rescore_before_sending(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="item-1",
+        text="Claude Code release details with practical agent workflow",
+        url="https://example.com/post",
+        score=0.92,
+        rationale="practical release details",
+    )
+
+    fake_pipeline = FakePipelineOrchestrator()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        pipeline_orchestrator=fake_pipeline,  # type: ignore[arg-type]
+        telegram_service=FakeTelegramService(),  # type: ignore[arg-type]
+        digest_renderer=HeadlineOnlyRenderer(),
+    )
+
+    stats = await runner.run_morning_digest()
+
+    assert fake_pipeline.rescore_calls == 1
+    assert stats["pre_send_rescore"] == {"items_scored": 1}
+    assert stats["deliveries_sent"] == 1
 
     await db.close()
 

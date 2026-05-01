@@ -40,6 +40,14 @@ def test_linux_message_is_explicit() -> None:
     assert "T-35" in LINUX_UNSUPPORTED_MESSAGE
 
 
+def test_wizard_platform_dropdown_has_all_option() -> None:
+    from pcca.desktop_web.server import INDEX_HTML
+
+    assert "platformEl.add(new Option('All', ''))" in INDEX_HTML
+    assert "Get Content (${platformLabel(selectedPlatform)})" in INDEX_HTML
+    assert "Get Sources (${platformLabel(selectedPlatform)})" in INDEX_HTML
+
+
 def test_desktop_server_rejects_missing_token(tmp_path) -> None:
     pytest.importorskip("starlette")
     from starlette.testclient import TestClient
@@ -181,7 +189,7 @@ def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     assert "function formSnapshot" in INDEX_HTML
     assert "function restoreFormSnapshot" in INDEX_HTML
     assert "subjectDraftStatus" in INDEX_HTML
-    assert "setInterval(() => loadState(), 5000)" in INDEX_HTML
+    assert "setInterval(() => busy ? refreshRunningState() : loadState(), 5000)" in INDEX_HTML
     assert "Get Content (${platformLabel(selectedPlatform)})" in INDEX_HTML
     assert "timeoutMs: 1800000" in INDEX_HTML
     assert "inflight_actions" in INDEX_HTML

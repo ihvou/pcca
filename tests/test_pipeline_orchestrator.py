@@ -293,6 +293,101 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_pipeline_auto_backfills_new_item_embeddings_after_collection(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    item_repo = ItemRepository(conn=db.conn)
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+        auto_backfill_embeddings=True,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss")
+    rows = await item_repo.list_all_for_scoring()
+    item_id, item = rows[0]
+    item_text = item_repo.embedding_text(item)
+    item_hash = item_repo.embedding_text_hash(item_text)
+    segment_row = await (
+        await db.conn.execute(
+            "SELECT embedding_json FROM item_segments WHERE item_id = ?",
+            (item_id,),
+        )
+    ).fetchone()
+
+    assert stats["items_inserted"] == 1
+    assert stats["embedding_pending"] is False
+    assert stats["embedding_backfill"]["items_embedded"] == 1
+    assert stats["embedding_backfill"]["segments_embedded"] == 1
+    assert await item_repo.get_content_embedding_for_text(
+        item_id,
+        model="fake-embedding",
+        text_hash=item_hash,
+    ) is not None
+    assert segment_row is not None
+    assert segment_row["embedding_json"] is not None
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_auto_backfill_failure_is_non_fatal(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FailingEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+        auto_backfill_embeddings=True,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss")
+    row = await (await db.conn.execute("SELECT COUNT(*) AS c FROM items")).fetchone()
+
+    assert row["c"] == 1
+    assert stats["items_inserted"] == 1
+    assert stats["embedding_pending"] is True
+    assert stats["embedding_backfill"]["items_failed"] == 1
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_runtime_lock_rejects_overlapping_collection(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
