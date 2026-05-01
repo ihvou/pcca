@@ -408,6 +408,49 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE items ADD COLUMN content_embedding_text_hash TEXT;
         """,
     ),
+    (
+        14,
+        """
+        ALTER TABLE item_segments ADD COLUMN start_offset_seconds REAL;
+        ALTER TABLE item_segments ADD COLUMN end_offset_seconds REAL;
+        ALTER TABLE item_segments ADD COLUMN embedding_json TEXT;
+        ALTER TABLE item_segments ADD COLUMN embedding_model TEXT;
+        ALTER TABLE item_segments ADD COLUMN embedding_text_hash TEXT;
+        ALTER TABLE item_segments ADD COLUMN embedding_updated_at TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_item_segments_item
+          ON item_segments(item_id);
+
+        CREATE INDEX IF NOT EXISTS idx_item_segments_embedding_model
+          ON item_segments(embedding_model);
+
+        CREATE TABLE IF NOT EXISTS item_segment_scores (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          segment_id INTEGER NOT NULL,
+          item_id INTEGER NOT NULL,
+          subject_id INTEGER NOT NULL,
+          pass1_score REAL,
+          pass2_score REAL,
+          practicality_score REAL,
+          novelty_score REAL,
+          trust_score REAL,
+          noise_penalty REAL,
+          final_score REAL,
+          rationale_json TEXT NOT NULL DEFAULT '{}',
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY(segment_id) REFERENCES item_segments(id),
+          FOREIGN KEY(item_id) REFERENCES items(id),
+          FOREIGN KEY(subject_id) REFERENCES subjects(id),
+          UNIQUE(segment_id, subject_id)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_item_segment_scores_subject_score
+          ON item_segment_scores(subject_id, final_score DESC);
+
+        CREATE INDEX IF NOT EXISTS idx_item_segment_scores_item_subject
+          ON item_segment_scores(item_id, subject_id);
+        """,
+    ),
 ]
 
 

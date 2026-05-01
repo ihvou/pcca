@@ -599,6 +599,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Only warm embeddings; do not rebuild existing item scores",
     )
+    embed_backfill_parser.add_argument(
+        "--include-segments",
+        action="store_true",
+        help="Also create segment rows and warm segment embeddings for long transcripts/articles.",
+    )
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -812,6 +817,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 concurrency=max(1, effective_concurrency),
                 limit=args.limit,
                 rescore=not args.no_rescore,
+                include_segments=args.include_segments,
                 progress_callback=progress,
             )
         )

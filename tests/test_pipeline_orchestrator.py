@@ -161,6 +161,17 @@ class FakeEmbeddingService:
         return [0.5, 0.5]
 
 
+class SegmentAwareEmbeddingService:
+    enabled = True
+    embedding_model = "segment-aware"
+
+    async def embed(self, text: str) -> list[float] | None:
+        lowered = text.lower()
+        if any(term in lowered for term in ("claude code", "anthropic", "agent handoff")):
+            return [1.0, 0.0]
+        return [0.0, 1.0]
+
+
 class FailingEmbeddingService:
     enabled = True
     embedding_model = "fake-embedding"
@@ -851,6 +862,128 @@ async def test_pipeline_embedding_failure_is_warned_in_metadata(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_nightly_upgrades_legacy_item_scores_to_segment_level_ranking(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    item_repo = ItemRepository(conn=db.conn)
+    item_score_repo = ItemScoreRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    subject = await subject_service.create_subject(
+        "AI Tools & Tips",
+        include_terms=["practical Claude Code updates"],
+        description_text="Find practical Claude Code and Anthropic agent workflow updates.",
+    )
+
+    def rows(prefix: str, start_index: int, useful: bool = False) -> list[dict]:
+        out = []
+        for idx in range(6):
+            text = f"{prefix} background discussion about markets and companies."
+            if useful and idx >= 3:
+                text = (
+                    "Anthropic Claude Code release explains agent handoff workflow "
+                    "implementation details with a concrete example."
+                )
+            out.append({"text": text, "start": float((start_index + idx) * 60), "duration": 60.0})
+        return out
+
+    useful_rows = rows("Interview", 0, useful=True)
+    darth_rows = rows("Darth Vader of Electric Utilities", 0, useful=False)
+    upsert_stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="youtube",
+                external_id="anthropic-video",
+                author="Anthropic",
+                url="https://www.youtube.com/watch?v=anthropic",
+                text="Anthropic release interview",
+                transcript_text="\n".join(row["text"] for row in useful_rows),
+                published_at=None,
+                metadata={"title": "Anthropic release interview", "transcript_rows": useful_rows},
+            ),
+            CollectedItem(
+                platform="youtube",
+                external_id="darth-utilities",
+                author="Utility Podcast",
+                url="https://www.youtube.com/watch?v=darth",
+                text="Darth Vader of Electric Utilities",
+                transcript_text="\n".join(row["text"] for row in darth_rows),
+                published_at=None,
+                metadata={"title": "Darth Vader of Electric Utilities", "transcript_rows": darth_rows},
+            ),
+        ]
+    )
+    anthropic_id, darth_id = upsert_stats["item_ids"]
+
+    # Simulate rows scored before T-11 existed: item-level score puts the long
+    # off-topic episode above the useful Anthropic item.
+    await item_score_repo.upsert_score(
+        item_id=anthropic_id,
+        subject_id=subject.id,
+        pass1_score=0.5,
+        pass2_score=0.5,
+        practicality_score=0.5,
+        novelty_score=0.5,
+        trust_score=0.5,
+        noise_penalty=0.0,
+        final_score=0.757,
+        rationale="legacy item score",
+    )
+    await item_score_repo.upsert_score(
+        item_id=darth_id,
+        subject_id=subject.id,
+        pass1_score=0.5,
+        pass2_score=0.5,
+        practicality_score=0.5,
+        novelty_score=0.5,
+        trust_score=0.5,
+        noise_penalty=0.0,
+        final_score=0.758,
+        rationale="legacy item score",
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=item_score_repo,
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=SegmentAwareEmbeddingService(),  # type: ignore[arg-type]
+        collectors={},
+        scorer="embedding",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+    candidates = await item_score_repo.top_candidates(subject_id=subject.id, limit=2)
+    segment_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_segments")).fetchone()
+    score_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_segment_scores")).fetchone()
+    max_segment_score = await (
+        await db.conn.execute(
+            "SELECT MAX(final_score) AS s FROM item_segment_scores WHERE item_id = ? AND subject_id = ?",
+            (anthropic_id, subject.id),
+        )
+    ).fetchone()
+
+    assert stats["segments_scored"] >= 4
+    assert segment_count["c"] >= 4
+    assert score_count["c"] >= 4
+    assert candidates[0].item_id == anthropic_id
+    assert candidates[1].item_id == darth_id
+    assert candidates[0].final_score - candidates[1].final_score >= 0.05
+    assert candidates[0].segment_text is not None
+    assert "Claude Code release" in candidates[0].segment_text
+    assert candidates[0].segment_start_seconds == 180.0
+    assert candidates[0].final_score == pytest.approx(float(max_segment_score["s"]))
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_embedding_backfill_warms_missing_cache_once(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
@@ -893,8 +1026,8 @@ async def test_embedding_backfill_warms_missing_cache_once(tmp_path: Path) -> No
         scorer="embedding",
     )
 
-    first = await orchestrator.backfill_embeddings(concurrency=2)
-    second = await orchestrator.backfill_embeddings(concurrency=2)
+    first = await orchestrator.backfill_embeddings(concurrency=2, include_segments=True)
+    second = await orchestrator.backfill_embeddings(concurrency=2, include_segments=True)
 
     context = await orchestrator._preference_context(subject.id)
     subject_text = orchestrator._subject_embedding_text(subject=subject, context=context)
@@ -906,8 +1039,11 @@ async def test_embedding_backfill_warms_missing_cache_once(tmp_path: Path) -> No
 
     assert first["subjects_embedded"] == 1
     assert first["items_embedded"] == 1
+    assert first["segments_prepared"] == 1
+    assert first["segments_embedded"] == 1
     assert second["subjects_skipped"] == 1
     assert second["items_total"] == 0
+    assert second["segments_total"] == 0
     assert await subject_repo.get_description_embedding_for_text(
         subject.id,
         model="fake-embedding",

@@ -91,13 +91,21 @@ def _install_fake_module(monkeypatch: pytest.MonkeyPatch, api: FakeApi) -> None:
 @pytest.mark.asyncio
 async def test_prefers_manual_english_transcript_when_available(monkeypatch: pytest.MonkeyPatch) -> None:
     api = FakeApi([
-        FakeTranscript("en", is_generated=False, is_translatable=True, text_rows=[{"text": "english manual"}]),
+        FakeTranscript(
+            "en",
+            is_generated=False,
+            is_translatable=True,
+            text_rows=[{"text": "english manual", "start": 12.5, "duration": 3.0}],
+        ),
         FakeTranscript("uk", is_generated=False, is_translatable=True, text_rows=[{"text": "ukrainian"}]),
     ])
     _install_fake_module(monkeypatch, api)
     svc = YouTubeTranscriptService()
-    text = await svc.get_transcript_text("video-1")
-    assert text == "english manual"
+    transcript = await svc.get_transcript("video-1")
+    assert transcript is not None
+    assert transcript.text == "english manual"
+    assert transcript.rows == [{"text": "english manual", "start": 12.5, "duration": 3.0}]
+    assert await svc.get_transcript_text("video-1") == "english manual"
 
 
 @pytest.mark.asyncio

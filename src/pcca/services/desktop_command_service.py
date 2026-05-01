@@ -1089,6 +1089,7 @@ class DesktopCommandService:
         concurrency: int | None = None,
         limit: int | None = None,
         rescore: bool = True,
+        include_segments: bool = True,
     ) -> CommandResult:
         async def runner() -> CommandResult:
             started_at = time.monotonic()
@@ -1099,7 +1100,8 @@ class DesktopCommandService:
             )
             self.log(
                 "Backfilling embeddings "
-                f"concurrency={max(1, effective_concurrency)} limit={limit or 'all'} rescore={rescore}."
+                f"concurrency={max(1, effective_concurrency)} limit={limit or 'all'} "
+                f"rescore={rescore} include_segments={include_segments}."
             )
 
             def progress(event: dict[str, Any]) -> None:
@@ -1113,6 +1115,7 @@ class DesktopCommandService:
                     concurrency=effective_concurrency,
                     limit=limit,
                     rescore=rescore,
+                    include_segments=include_segments,
                     progress_callback=progress,
                 )
             else:
@@ -1121,6 +1124,7 @@ class DesktopCommandService:
                     concurrency=effective_concurrency,
                     limit=limit,
                     rescore=rescore,
+                    include_segments=include_segments,
                     progress_callback=progress,
                 )
             elapsed_ms = int((time.monotonic() - started_at) * 1000)

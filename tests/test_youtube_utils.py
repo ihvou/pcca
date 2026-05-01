@@ -14,6 +14,7 @@ from pcca.collectors.youtube_collector import (
     youtube_rss_url,
 )
 from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
+from pcca.services.youtube_transcript_service import TranscriptResult
 
 
 SAMPLE_CHANNEL_ID = "UC1234567890123456789012"
@@ -98,6 +99,42 @@ async def test_youtube_collector_uses_rss_without_browser() -> None:
     assert items[0].author == "OpenAI"
     assert items[0].published_at == "2026-04-28T10:00:00+00:00"
     assert items[0].metadata["view_count"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_youtube_collector_preserves_transcript_rows_for_segmenter() -> None:
+    class TranscriptService:
+        async def get_transcript(self, _video_id: str):
+            return TranscriptResult(
+                text="first transcript row\nsecond transcript row",
+                rows=[
+                    {"text": "first transcript row", "start": 10.0, "duration": 4.0},
+                    {"text": "second transcript row", "start": 14.0, "duration": 5.0},
+                ],
+                language_code="en",
+                translated=False,
+            )
+
+    class ExplodingSession:
+        async def new_page(self, _platform: str):
+            raise AssertionError("YouTube RSS collector should not launch a browser page")
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == youtube_rss_url(SAMPLE_CHANNEL_ID)
+        return httpx.Response(200, text=SAMPLE_RSS)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = YouTubeCollector(
+            session_manager=ExplodingSession(),  # type: ignore[arg-type]
+            transcript_service=TranscriptService(),  # type: ignore[arg-type]
+            http_client=client,
+            max_items=5,
+        )
+        items = await collector.collect_from_source(SAMPLE_CHANNEL_ID)
+
+    assert items[0].transcript_text == "first transcript row\nsecond transcript row"
+    assert items[0].metadata["transcript_rows"][0]["start"] == 10.0
+    assert items[0].metadata["transcript_language"] == "en"
 
 
 def test_youtube_login_url_detection() -> None:

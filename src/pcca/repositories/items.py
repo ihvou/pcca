@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from dataclasses import dataclass
 
 import aiosqlite
@@ -23,7 +23,7 @@ class ItemRepository:
             exists = await (
                 await self.conn.execute(
                     """
-                    SELECT id, canonical_url, raw_text, transcript_text, content_hash
+                    SELECT id, canonical_url, raw_text, transcript_text, metadata_json, content_hash
                     FROM items
                     WHERE platform = ? AND external_id = ?
                     """,
@@ -32,6 +32,7 @@ class ItemRepository:
             ).fetchone()
 
             if exists is None:
+                metadata_json = json.dumps(item.metadata)
                 cursor = await self.conn.execute(
                     """
                     INSERT INTO items(
@@ -47,7 +48,7 @@ class ItemRepository:
                         item.published_at,
                         item.text,
                         item.transcript_text,
-                        json.dumps(item.metadata),
+                        metadata_json,
                         content_hash,
                     ),
                 )
@@ -68,6 +69,7 @@ class ItemRepository:
                     text=effective_text,
                     transcript_text=effective_transcript,
                 )
+                metadata_json = json.dumps(item.metadata)
                 if exists["content_hash"] != effective_hash:
                     await self.conn.execute(
                         """
@@ -102,8 +104,27 @@ class ItemRepository:
                             item.transcript_text,
                             item.transcript_text,
                             item.transcript_text,
-                            json.dumps(item.metadata),
+                            metadata_json,
                             effective_hash,
+                            item.platform,
+                            item.external_id,
+                        ),
+                    )
+                    updated += 1
+                    changed_item_ids.append(int(exists["id"]))
+                elif self._has_new_transcript_rows(
+                    existing_metadata_json=exists["metadata_json"],
+                    incoming_metadata=item.metadata,
+                ):
+                    await self.conn.execute(
+                        """
+                        UPDATE items
+                        SET metadata_json = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE platform = ? AND external_id = ?
+                        """,
+                        (
+                            metadata_json,
                             item.platform,
                             item.external_id,
                         ),
@@ -166,6 +187,43 @@ class ItemRepository:
                 )
             )
         return out
+
+    async def list_missing_segment_scores_for_subject(
+        self,
+        *,
+        subject_id: int,
+        limit: int | None = None,
+    ) -> list[tuple[int, CollectedItem]]:
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: tuple[int, ...] = (int(subject_id), int(limit)) if limit_clause else (int(subject_id),)
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT
+                  i.id,
+                  i.platform,
+                  i.external_id,
+                  i.canonical_url,
+                  i.author,
+                  i.published_at,
+                  i.raw_text,
+                  i.transcript_text,
+                  i.metadata_json
+                FROM items i
+                WHERE (COALESCE(i.raw_text, '') <> '' OR COALESCE(i.transcript_text, '') <> '')
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM item_segment_scores iss
+                    WHERE iss.item_id = i.id
+                      AND iss.subject_id = ?
+                  )
+                ORDER BY COALESCE(i.updated_at, i.ingested_at, '') DESC, i.id DESC
+                {limit_clause}
+                """,
+                params,
+            )
+        ).fetchall()
+        return [self._row_to_collected_item(row) for row in rows]
 
     async def list_all_for_scoring(self, *, limit: int | None = None) -> list[tuple[int, CollectedItem]]:
         limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
@@ -349,3 +407,15 @@ class ItemRepository:
             ]
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _has_new_transcript_rows(*, existing_metadata_json: str | None, incoming_metadata: dict) -> bool:
+        incoming_rows = incoming_metadata.get("transcript_rows") if isinstance(incoming_metadata, dict) else None
+        if not isinstance(incoming_rows, list) or not incoming_rows:
+            return False
+        try:
+            existing_metadata = json.loads(existing_metadata_json or "{}")
+        except json.JSONDecodeError:
+            existing_metadata = {}
+        existing_rows = existing_metadata.get("transcript_rows") if isinstance(existing_metadata, dict) else None
+        return existing_rows != incoming_rows

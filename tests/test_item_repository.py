@@ -115,3 +115,55 @@ async def test_item_upsert_many(tmp_path: Path) -> None:
     assert await repo.get_content_embedding(int(row["id"]), model="fake") is None
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_item_upsert_marks_new_transcript_rows_as_changed(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    repo = ItemRepository(conn=db.conn)
+    await repo.upsert_many(
+        [
+            CollectedItem(
+                platform="youtube",
+                external_id="video-1",
+                author="author",
+                url="https://www.youtube.com/watch?v=video-1",
+                text="title",
+                transcript_text="same transcript",
+                published_at=None,
+                metadata={"title": "title"},
+            )
+        ]
+    )
+    refreshed = await repo.upsert_many(
+        [
+            CollectedItem(
+                platform="youtube",
+                external_id="video-1",
+                author="author",
+                url="https://www.youtube.com/watch?v=video-1",
+                text="title",
+                transcript_text="same transcript",
+                published_at=None,
+                metadata={
+                    "title": "title",
+                    "transcript_rows": [{"text": "same transcript", "start": 42.0, "duration": 5.0}],
+                },
+            )
+        ]
+    )
+
+    row = await (
+        await db.conn.execute("SELECT metadata_json FROM items WHERE platform = 'youtube' AND external_id = 'video-1'")
+    ).fetchone()
+
+    assert refreshed["inserted"] == 0
+    assert refreshed["updated"] == 1
+    assert refreshed["changed_item_ids"] == refreshed["item_ids"]
+    assert '"start": 42.0' in row["metadata_json"]
+
+    await db.close()

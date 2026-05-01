@@ -388,7 +388,15 @@ class YouTubeCollector:
             video_id = row.get("video_id") or extract_video_id(video_url or "")
             if not video_id:
                 continue
-            transcript_text = await self.transcript_service.get_transcript_text(video_id)
+            transcript_loader = getattr(self.transcript_service, "get_transcript", None)
+            if callable(transcript_loader):
+                transcript = await transcript_loader(video_id)
+                transcript_text_fallback = None
+            else:
+                transcript = None
+                transcript_text_fallback = await self.transcript_service.get_transcript_text(video_id)
+            transcript_text = transcript.text if transcript is not None else None
+            transcript_text = transcript_text or transcript_text_fallback
             title = row.get("title") or ""
             description = row.get("description") or ""
             text = "\n\n".join(part for part in (title, description) if part).strip()
@@ -403,6 +411,10 @@ class YouTubeCollector:
                 "rss_feed_url": feed_url,
                 "view_count": row.get("view_count"),
             }
+            if transcript is not None:
+                metadata["transcript_rows"] = transcript.rows
+                metadata["transcript_language"] = transcript.language_code
+                metadata["transcript_translated"] = transcript.translated
             results.append(
                 CollectedItem(
                     platform=self.platform,

@@ -369,7 +369,7 @@ async function readContentAll() {
   if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
 }
 async function backfillEmbeddings() {
-  const data = await postAction('/api/embeddings/backfill', {rescore: true}, {timeoutMs: 1800000});
+  const data = await postAction('/api/embeddings/backfill', {rescore: true, include_segments: true}, {timeoutMs: 1800000});
   if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
 }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
@@ -903,9 +903,10 @@ class DesktopWebServer:
             assert self.service is not None
             return await run_result(
                 lambda p: self.service.backfill_embeddings(
-                    concurrency=int(p.get("concurrency") or 4),
+                    concurrency=int(p["concurrency"]) if p.get("concurrency") else None,
                     limit=int(p.get("limit")) if p.get("limit") else None,
                     rescore=bool(p.get("rescore", True)),
+                    include_segments=bool(p.get("include_segments", True)),
                 ),
                 request,
             )

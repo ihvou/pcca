@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Protocol
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from pcca.models import Subject
 from pcca.repositories.item_scores import CandidateItem
@@ -146,17 +147,20 @@ class TelegramDigestRenderer:
             title = _first_line(candidate.title_or_text)
             reason = candidate.rationale or f"score={candidate.final_score:.2f}"
             metadata_line = _metadata_line(candidate)
-            url_line = f"\n{candidate.url}" if candidate.url else ""
+            brief_url = _brief_url(candidate)
+            url_line = f"\n{brief_url}" if brief_url else ""
+            matched_segment = _segment_body(candidate, limit=700)
             short_text = (
                 f"Brief {idx}: {title}\n"
                 f"{metadata_line}{url_line}\n\n"
-                f"Why this matched: {reason}"
+                f"Why this matched: {reason}\n\n"
+                f"Matched segment:\n{matched_segment}"
             )
             full_text = (
                 f"Brief {idx}: {title}\n"
                 f"{metadata_line}{url_line}\n\n"
                 f"Why this matched: {reason}\n\n"
-                f"{_full_body(candidate.title_or_text, limit=full_text_chars)}"
+                f"{_segment_body(candidate, limit=full_text_chars)}"
             )
             buttons: list[BriefButtonPayload] = []
             for shortcut in shortcuts:
@@ -226,3 +230,47 @@ def _metadata_line(candidate: CandidateItem) -> str:
     author = candidate.author or "unknown"
     published = candidate.published_at or "unknown"
     return f"via {author} - published {published}"
+
+
+def _segment_body(candidate: CandidateItem, *, limit: int) -> str:
+    body = candidate.segment_text or candidate.title_or_text
+    prefix = _timestamp_prefix(candidate)
+    rendered = f"{prefix} {body}".strip() if prefix else body
+    return _full_body(rendered, limit=limit)
+
+
+def _timestamp_prefix(candidate: CandidateItem) -> str | None:
+    if candidate.segment_start_seconds is None:
+        return None
+    start = _format_offset(candidate.segment_start_seconds)
+    end = _format_offset(candidate.segment_end_seconds) if candidate.segment_end_seconds is not None else None
+    return f"[{start}-{end}]" if end else f"[{start}]"
+
+
+def _brief_url(candidate: CandidateItem) -> str | None:
+    if not candidate.url:
+        return None
+    if candidate.segment_start_seconds is None:
+        return candidate.url
+    start = max(0, int(candidate.segment_start_seconds))
+    if candidate.platform == "youtube":
+        return _url_with_query(candidate.url, {"t": f"{start}s"})
+    if candidate.platform == "spotify":
+        return _url_with_query(candidate.url, {"t": _format_offset(start)})
+    return candidate.url
+
+
+def _url_with_query(url: str, params: dict[str, str]) -> str:
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query, keep_blank_values=True))
+    query.update(params)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
+
+def _format_offset(seconds: float | int) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"

@@ -10,6 +10,7 @@ from typing import Any, Callable
 from pcca.collectors.base import CollectedItem, Collector
 from pcca.collectors.errors import SessionChallengedError
 from pcca.repositories.items import ItemRepository
+from pcca.repositories.item_segments import ItemSegment, ItemSegmentRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.repositories.runtime_locks import RuntimeLockRepository
@@ -41,6 +42,7 @@ class PipelineOrchestrator:
     item_repo: ItemRepository
     item_score_repo: ItemScoreRepository
     run_log_repo: RunLogRepository
+    item_segment_repo: ItemSegmentRepository | None = None
     preference_service: PreferenceService | None = None
     curation_engine: CurationEngine = field(default_factory=CurationEngine)
     model_router: ModelRouter | None = None
@@ -56,6 +58,8 @@ class PipelineOrchestrator:
     def __post_init__(self) -> None:
         if self.runtime_lock_repo is None:
             self.runtime_lock_repo = RuntimeLockRepository(conn=self.run_log_repo.conn)
+        if self.item_segment_repo is None:
+            self.item_segment_repo = ItemSegmentRepository(conn=self.run_log_repo.conn)
 
     def _scorer_mode(self) -> str:
         mode = (self.scorer or "keyword").strip().lower()
@@ -167,6 +171,52 @@ class PipelineOrchestrator:
             )
         return embedding
 
+    async def _get_or_create_segment_embedding(self, *, segment: ItemSegment) -> list[float] | None:
+        if self.embedding_service is None or self.item_segment_repo is None:
+            return None
+        model = self.embedding_service.embedding_model
+        text = self.item_segment_repo.embedding_text(segment)
+        text_hash = self.item_segment_repo.embedding_text_hash(text)
+        existing = await self.item_segment_repo.get_embedding_for_text(
+            segment.id,
+            model=model,
+            text_hash=text_hash,
+        )
+        if existing is not None:
+            return existing
+        embedding = await self.embedding_service.embed(text)
+        if embedding is not None:
+            await self.item_segment_repo.save_embedding(
+                segment.id,
+                model=model,
+                embedding=embedding,
+                text_hash=text_hash,
+            )
+        return embedding
+
+    @staticmethod
+    def _segment_scoring_item(item: CollectedItem, segment: ItemSegment) -> CollectedItem:
+        metadata = item.metadata if isinstance(item.metadata, dict) else {}
+        title = str(metadata.get("title") or "").strip()
+        if not title and item.text:
+            title = item.text.splitlines()[0].strip()
+        text = "\n\n".join(part for part in (title, segment.text) if part).strip()
+        return CollectedItem(
+            platform=item.platform,
+            external_id=f"{item.external_id}#segment-{segment.id}",
+            author=item.author,
+            url=item.url,
+            text=text,
+            transcript_text=segment.text,
+            published_at=item.published_at,
+            metadata={
+                **metadata,
+                "pcca_segment_id": segment.id,
+                "pcca_segment_start_seconds": segment.start_offset_seconds,
+                "pcca_segment_end_seconds": segment.end_offset_seconds,
+            },
+        )
+
     def _record_embedding_degradation(
         self,
         *,
@@ -231,7 +281,9 @@ class PipelineOrchestrator:
             else None
         )
         fallback_before = int(stats.get("embedding_fallback_items", 0))
-        scored_rows: list[tuple[int, CollectedItem, object, bool]] = []
+        scored_rows: list[tuple[int, CollectedItem, Any, bool, ItemSegment | None]] = []
+        segment_score_rows: list[tuple[int, int, ItemSegment, Any]] = []
+        scored_segment_count = 0
         for item_id, item in item_rows:
             source_id = item.metadata.get("pcca_source_id") if isinstance(item.metadata, dict) else None
             if source_id is not None:
@@ -247,54 +299,110 @@ class PipelineOrchestrator:
                         item_id,
                         source_id,
                     )
-            keyword_scored = self.curation_engine.score(
-                subject.name,
-                item,
-                include_terms=context.include_terms,
-                exclude_terms=context.exclude_terms,
-                min_practicality=context.min_practicality,
+
+            segments = (
+                await self.item_segment_repo.ensure_segments(item_id=item_id, item=item)
+                if self.item_segment_repo is not None
+                else []
             )
-            semantic_similarity = None
-            if subject_embedding is not None:
-                item_embedding = await self._get_or_create_item_embedding(item_id=item_id, item=item)
-                if item_embedding is not None:
-                    semantic_similarity = cosine_similarity(subject_embedding, item_embedding)
-            if semantic_similarity is not None:
-                scored = self.curation_engine.score(
+            best_row: tuple[int, CollectedItem, Any, bool, ItemSegment | None] | None = None
+            if segments:
+                stats["segments_seen"] = int(stats.get("segments_seen", 0)) + len(segments)
+            for segment in segments:
+                scored_segment_count += 1
+                segment_item = self._segment_scoring_item(item, segment)
+                keyword_scored = self.curation_engine.score(
+                    subject.name,
+                    segment_item,
+                    include_terms=context.include_terms,
+                    exclude_terms=context.exclude_terms,
+                    min_practicality=context.min_practicality,
+                )
+                semantic_similarity = None
+                if subject_embedding is not None:
+                    segment_embedding = await self._get_or_create_segment_embedding(segment=segment)
+                    if segment_embedding is not None:
+                        semantic_similarity = cosine_similarity(subject_embedding, segment_embedding)
+                if semantic_similarity is not None:
+                    scored = self.curation_engine.score(
+                        subject.name,
+                        segment_item,
+                        include_terms=context.include_terms,
+                        exclude_terms=context.exclude_terms,
+                        min_practicality=context.min_practicality,
+                        semantic_similarity=semantic_similarity,
+                    )
+                    scored.rationale = (
+                        f"{scored.rationale}; scorer=embedding; segment_id={segment.id}; "
+                        f"keyword_shadow_final={keyword_scored.final_score:.3f}"
+                    )
+                    stats["embedding_items_scored"] += 1
+                    stats["segments_scored_with_embedding"] = int(stats.get("segments_scored_with_embedding", 0)) + 1
+                    if self._scorer_mode() == "both":
+                        stats["keyword_shadow_items_scored"] += 1
+                else:
+                    if self._embedding_enabled():
+                        stats["embedding_fallback_items"] += 1
+                    scored = keyword_scored
+                    scored.rationale = f"{scored.rationale}; scorer=keyword; segment_id={segment.id}"
+                segment_score_rows.append((item_id, subject.id, segment, scored))
+                row = (item_id, segment_item, scored, semantic_similarity is not None, segment)
+                if best_row is None or scored.final_score > best_row[2].final_score:
+                    best_row = row
+
+            if best_row is None:
+                keyword_scored = self.curation_engine.score(
                     subject.name,
                     item,
                     include_terms=context.include_terms,
                     exclude_terms=context.exclude_terms,
                     min_practicality=context.min_practicality,
-                    semantic_similarity=semantic_similarity,
                 )
-                scored.rationale = f"{scored.rationale}; scorer=embedding; keyword_shadow_final={keyword_scored.final_score:.3f}"
-                stats["embedding_items_scored"] += 1
-                if self._scorer_mode() == "both":
-                    stats["keyword_shadow_items_scored"] += 1
-                scored_rows.append((item_id, item, scored, True))
+                semantic_similarity = None
+                if subject_embedding is not None:
+                    item_embedding = await self._get_or_create_item_embedding(item_id=item_id, item=item)
+                    if item_embedding is not None:
+                        semantic_similarity = cosine_similarity(subject_embedding, item_embedding)
+                if semantic_similarity is not None:
+                    scored = self.curation_engine.score(
+                        subject.name,
+                        item,
+                        include_terms=context.include_terms,
+                        exclude_terms=context.exclude_terms,
+                        min_practicality=context.min_practicality,
+                        semantic_similarity=semantic_similarity,
+                    )
+                    scored.rationale = f"{scored.rationale}; scorer=embedding; keyword_shadow_final={keyword_scored.final_score:.3f}"
+                    stats["embedding_items_scored"] += 1
+                    if self._scorer_mode() == "both":
+                        stats["keyword_shadow_items_scored"] += 1
+                    scored_rows.append((item_id, item, scored, True, None))
+                else:
+                    if self._embedding_enabled():
+                        stats["embedding_fallback_items"] += 1
+                    scored_rows.append((item_id, item, keyword_scored, False, None))
             else:
-                if self._embedding_enabled():
-                    stats["embedding_fallback_items"] += 1
-                scored_rows.append((item_id, item, keyword_scored, False))
+                scored_rows.append(best_row)
 
         self._record_embedding_degradation(
             run_id=run_id,
             subject=subject,
             stats=stats,
             fallback_before=fallback_before,
-            scored_count=len(scored_rows),
+            scored_count=scored_segment_count or len(scored_rows),
             subject_embedding_available=subject_embedding is not None,
         )
         shortlist_rows = sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[: context.shortlist_limit]
-        shortlist_ids = {item_id for item_id, _item, _scored, _used_embedding in shortlist_rows}
+        shortlist_ids = {item_id for item_id, _item, _scored, _used_embedding, _segment in shortlist_rows}
         stats["items_score_candidates"] += len(scored_rows)
+        stats["segments_score_candidates"] = int(stats.get("segments_score_candidates", 0)) + scored_segment_count
         stats["model_shortlist_items"] += len(shortlist_ids)
         logger.info(
-            "Scoring subject run_id=%s subject=%s items=%d shortlist=%d include_terms=%d exclude_terms=%d scorer=%s embedding_enabled=%s",
+            "Scoring subject run_id=%s subject=%s items=%d segments=%d shortlist=%d include_terms=%d exclude_terms=%d scorer=%s embedding_enabled=%s",
             run_id,
             subject.name,
             len(scored_rows),
+            scored_segment_count,
             len(shortlist_ids),
             len(context.include_terms),
             len(context.exclude_terms),
@@ -304,7 +412,7 @@ class PipelineOrchestrator:
 
         batch_results = {}
         batch_rerank = getattr(self.model_router, "rerank_batch", None) if self.model_router is not None else None
-        shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding in shortlist_rows)
+        shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding, _segment in shortlist_rows)
         if callable(batch_rerank) and shortlist_used_embedding and getattr(self.model_router, "enabled", True):
             candidates = [
                 ModelRerankCandidate(
@@ -315,7 +423,7 @@ class PipelineOrchestrator:
                     url=item.url,
                     published_at=item.published_at,
                 )
-                for item_id, item, scored, _used_embedding in shortlist_rows
+                for item_id, item, scored, _used_embedding, _segment in shortlist_rows
             ]
             batch_results = await batch_rerank(
                 subject_name=subject.name,
@@ -324,7 +432,8 @@ class PipelineOrchestrator:
             )
             stats["model_batch_rerank_calls"] += 1
 
-        for item_id, item, scored, _used_embedding in scored_rows:
+        adjusted_segment_scores: dict[int, Any] = {}
+        for item_id, item, scored, _used_embedding, segment in scored_rows:
             rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
             if rerank is not None:
                 adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
@@ -342,6 +451,8 @@ class PipelineOrchestrator:
                     scored.final_score = adjusted_final
                     scored.rationale = f"{scored.rationale}; model={rerank.rationale}"
                     stats["items_model_reranked"] += 1
+            if segment is not None:
+                adjusted_segment_scores[segment.id] = scored
             await self.item_score_repo.upsert_score(
                 item_id=item_id,
                 subject_id=subject.id,
@@ -356,11 +467,29 @@ class PipelineOrchestrator:
             )
             stats["items_scored"] += 1
 
+        for item_id, subject_id, segment, scored in segment_score_rows:
+            effective_scored = adjusted_segment_scores.get(segment.id, scored)
+            await self.item_score_repo.upsert_segment_score(
+                segment_id=segment.id,
+                item_id=item_id,
+                subject_id=subject_id,
+                pass1_score=effective_scored.pass1_score,
+                pass2_score=effective_scored.pass2_score,
+                practicality_score=effective_scored.practicality_score,
+                novelty_score=effective_scored.novelty_score,
+                trust_score=effective_scored.trust_score,
+                noise_penalty=effective_scored.noise_penalty,
+                final_score=effective_scored.final_score,
+                rationale=effective_scored.rationale,
+            )
+            stats["segments_scored"] = int(stats.get("segments_scored", 0)) + 1
+
     async def backfill_embeddings(
         self,
         *,
         concurrency: int = 4,
         limit: int | None = None,
+        include_segments: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         model = self.embedding_service.embedding_model if self.embedding_service is not None else None
@@ -377,6 +506,12 @@ class PipelineOrchestrator:
             "items_embedded": 0,
             "items_skipped": 0,
             "items_failed": 0,
+            "include_segments": include_segments,
+            "segments_total": 0,
+            "segments_embedded": 0,
+            "segments_skipped": 0,
+            "segments_failed": 0,
+            "segments_prepared": 0,
         }
         if not self._embedding_enabled() or self.embedding_service is None or model is None:
             logger.warning("Embedding backfill skipped because embedding scorer is disabled.")
@@ -422,12 +557,12 @@ class PipelineOrchestrator:
         missing_count = await self.item_repo.count_missing_embeddings(model=model)
         target_count = min(missing_count, int(limit)) if limit is not None and limit > 0 else missing_count
         stats["items_total"] = target_count
+        semaphore = asyncio.Semaphore(max(1, int(concurrency)))
         if target_count <= 0:
             emit("items", 0, 0)
-            return stats
-
-        rows = await self.item_repo.list_missing_embeddings(model=model, limit=target_count)
-        semaphore = asyncio.Semaphore(max(1, int(concurrency)))
+            rows = []
+        else:
+            rows = await self.item_repo.list_missing_embeddings(model=model, limit=target_count)
 
         async def embed_item(item_id: int, item: CollectedItem) -> str:
             async with semaphore:
@@ -465,6 +600,54 @@ class PipelineOrchestrator:
                     stats["items_failed"] += 1
             processed_items += len(batch)
             emit("items", processed_items, target_count)
+
+        if include_segments and self.item_segment_repo is not None:
+            item_rows = await self.item_repo.list_all_for_scoring(limit=limit)
+            for item_id, item in item_rows:
+                segments = await self.item_segment_repo.ensure_segments(item_id=item_id, item=item)
+                stats["segments_prepared"] += len(segments)
+            missing_segments = await self.item_segment_repo.count_missing_embeddings(model=model)
+            target_segments = (
+                min(missing_segments, int(limit)) if limit is not None and limit > 0 else missing_segments
+            )
+            stats["segments_total"] = target_segments
+            segment_rows = await self.item_segment_repo.list_missing_embeddings(model=model, limit=target_segments) if target_segments else []
+
+            async def embed_segment(segment: ItemSegment) -> str:
+                async with semaphore:
+                    text = self.item_segment_repo.embedding_text(segment)
+                    text_hash = self.item_segment_repo.embedding_text_hash(text)
+                    existing = await self.item_segment_repo.get_embedding_for_text(
+                        segment.id,
+                        model=model,
+                        text_hash=text_hash,
+                    )
+                    if existing is not None:
+                        return "skipped"
+                    embedding = await self.embedding_service.embed(text)
+                    if embedding is None:
+                        return "failed"
+                    await self.item_segment_repo.save_embedding(
+                        segment.id,
+                        model=model,
+                        embedding=embedding,
+                        text_hash=text_hash,
+                    )
+                    return "embedded"
+
+            processed_segments = 0
+            for batch_start in range(0, len(segment_rows), batch_size):
+                batch = segment_rows[batch_start : batch_start + batch_size]
+                results = await asyncio.gather(*(embed_segment(segment) for segment in batch))
+                for result in results:
+                    if result == "embedded":
+                        stats["segments_embedded"] += 1
+                    elif result == "skipped":
+                        stats["segments_skipped"] += 1
+                    else:
+                        stats["segments_failed"] += 1
+                processed_segments += len(batch)
+                emit("segments", processed_segments, target_segments)
         return stats
 
     def _empty_scoring_stats(self) -> dict[str, Any]:
@@ -482,6 +665,10 @@ class PipelineOrchestrator:
             "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
             "items_scored": 0,
+            "segments_seen": 0,
+            "segments_score_candidates": 0,
+            "segments_scored": 0,
+            "segments_scored_with_embedding": 0,
         }
 
     async def rescore_existing_items(self, *, limit: int | None = None) -> dict:
@@ -590,6 +777,11 @@ class PipelineOrchestrator:
             "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
             "items_scored": 0,
+            "segments_seen": 0,
+            "segments_score_candidates": 0,
+            "segments_scored": 0,
+            "segments_scored_with_embedding": 0,
+            "segments_rebuilt": 0,
             "sources_skipped_circuit_breaker": 0,
             "circuit_broken": [],
             "circuit_broken_reason": [],
@@ -787,6 +979,13 @@ class PipelineOrchestrator:
                         for item, item_id in zip(items, upsert_stats["item_ids"]):
                             if item_id in changed_item_ids:
                                 changed_items[int(item_id)] = item
+                                if self.item_segment_repo is not None:
+                                    segments = await self.item_segment_repo.ensure_segments(
+                                        item_id=int(item_id),
+                                        item=item,
+                                        replace=True,
+                                    )
+                                    stats["segments_rebuilt"] += len(segments)
                         logger.info(
                             "Upserted source items run_id=%s source_id=%s inserted=%d updated=%d changed=%d",
                             run_id,
@@ -823,10 +1022,18 @@ class PipelineOrchestrator:
             for subject in subjects:
                 inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
                 unscored_rows = await self.item_repo.list_unscored_for_subject(subject_id=subject.id)
+                missing_segment_rows = await self.item_repo.list_missing_segment_scores_for_subject(
+                    subject_id=subject.id,
+                )
                 changed_ids = {item_id for item_id, _item in changed_rows}
+                seen_ids = set(changed_ids)
                 rows_to_score = changed_rows + [
-                    (item_id, item) for item_id, item in unscored_rows if item_id not in changed_ids
+                    (item_id, item) for item_id, item in unscored_rows if item_id not in seen_ids
                 ]
+                seen_ids.update(item_id for item_id, _item in unscored_rows)
+                rows_to_score.extend(
+                    (item_id, item) for item_id, item in missing_segment_rows if item_id not in seen_ids
+                )
                 await self._score_items_for_subject(
                     run_id=run_id,
                     subject=subject,

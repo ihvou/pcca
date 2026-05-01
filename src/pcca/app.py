@@ -235,6 +235,7 @@ class PCCAApp:
         concurrency: int = 4,
         limit: int | None = None,
         rescore: bool = True,
+        include_segments: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         if not hasattr(self, "pipeline_orchestrator"):
@@ -242,6 +243,7 @@ class PCCAApp:
         backfill_stats = await self.pipeline_orchestrator.backfill_embeddings(
             concurrency=concurrency,
             limit=limit,
+            include_segments=include_segments,
             progress_callback=progress_callback,
         )
         rescore_stats = {}
@@ -255,6 +257,7 @@ class PCCAApp:
         concurrency: int = 4,
         limit: int | None = None,
         rescore: bool = True,
+        include_segments: bool = False,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         started_at = time.monotonic()
@@ -264,6 +267,7 @@ class PCCAApp:
                 concurrency=concurrency,
                 limit=limit,
                 rescore=rescore,
+                include_segments=include_segments,
                 progress_callback=progress_callback,
             )
             logger.info(

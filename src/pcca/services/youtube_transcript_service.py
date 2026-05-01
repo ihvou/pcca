@@ -9,6 +9,14 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
+class TranscriptResult:
+    text: str
+    rows: list[dict[str, Any]]
+    language_code: str | None = None
+    translated: bool = False
+
+
+@dataclass
 class YouTubeTranscriptService:
     """Fetch a video transcript and return its text in English.
 
@@ -33,6 +41,10 @@ class YouTubeTranscriptService:
     target_translation_language: str = "en"
 
     async def get_transcript_text(self, video_id: str) -> str | None:
+        result = await self.get_transcript(video_id)
+        return result.text if result is not None else None
+
+    async def get_transcript(self, video_id: str) -> TranscriptResult | None:
         try:
             from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore[import-not-found]
             from youtube_transcript_api._errors import (  # type: ignore[import-not-found]
@@ -42,7 +54,7 @@ class YouTubeTranscriptService:
         except Exception:
             return None
 
-        def _load_sync() -> str | None:
+        def _load_sync() -> TranscriptResult | None:
             try:
                 api = YouTubeTranscriptApi()
                 # `list` returns an iterable of Transcript objects describing
@@ -69,7 +81,13 @@ class YouTubeTranscriptService:
                         was_translated,
                         len(text),
                     )
-                return text
+                    return TranscriptResult(
+                        text=text,
+                        rows=self._normalize_rows(rows),
+                        language_code=picked_lang,
+                        translated=was_translated,
+                    )
+                return None
             except (NoTranscriptFound, TranscriptsDisabled):
                 return None
             except Exception as exc:
@@ -181,3 +199,19 @@ class YouTubeTranscriptService:
     def _rows_to_text(rows: list[dict[str, Any]]) -> str | None:
         text_parts = [str(row.get("text", "")).strip() for row in rows if str(row.get("text", "")).strip()]
         return "\n".join(text_parts) if text_parts else None
+
+    @staticmethod
+    def _normalize_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        for row in rows:
+            text = str(row.get("text", "")).strip()
+            if not text:
+                continue
+            normalized.append(
+                {
+                    "text": text,
+                    "start": row.get("start"),
+                    "duration": row.get("duration"),
+                }
+            )
+        return normalized
