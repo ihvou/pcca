@@ -372,6 +372,35 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE subjects ADD COLUMN description_text TEXT;
         """,
     ),
+    (
+        11,
+        """
+        CREATE TABLE IF NOT EXISTS runtime_locks (
+          lock_name TEXT PRIMARY KEY,
+          owner_id TEXT NOT NULL,
+          acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at TEXT NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_runtime_locks_expires_at
+          ON runtime_locks(expires_at);
+        """,
+    ),
+    (
+        12,
+        """
+        ALTER TABLE subjects ADD COLUMN description_embedding_json TEXT;
+        ALTER TABLE subjects ADD COLUMN description_embedding_model TEXT;
+        ALTER TABLE subjects ADD COLUMN description_embedding_updated_at TEXT;
+
+        ALTER TABLE items ADD COLUMN content_embedding_json TEXT;
+        ALTER TABLE items ADD COLUMN content_embedding_model TEXT;
+        ALTER TABLE items ADD COLUMN content_embedding_updated_at TEXT;
+
+        CREATE INDEX IF NOT EXISTS idx_items_content_embedding_model
+          ON items(content_embedding_model);
+        """,
+    ),
 ]
 
 

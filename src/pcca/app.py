@@ -29,6 +29,7 @@ from pcca.repositories.subject_drafts import SubjectDraftRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.feedback_service import FeedbackService
 from pcca.scheduler import AgentScheduler, JobRunner
+from pcca.services.embedding_service import EmbeddingService
 from pcca.services.follow_import_service import FollowImportService
 from pcca.services.model_router import ModelRouter
 from pcca.services.preference_extraction_service import PreferenceExtractionService
@@ -91,6 +92,12 @@ class PCCAApp:
             ollama_base_url=self.settings.ollama_base_url,
             ollama_model=self.settings.ollama_model,
         )
+        embedding_service = EmbeddingService(
+            enabled=self.settings.ollama_enabled and self.settings.scorer in {"embedding", "both"},
+            ollama_base_url=self.settings.ollama_base_url,
+            embedding_model=self.settings.embedding_model,
+            timeout_seconds=self.settings.embedding_timeout_seconds,
+        )
         self.subject_service = SubjectService(repository=subject_repo)
         self.source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
         self.preference_service = PreferenceService(preference_repo=preference_repo, subject_repo=subject_repo)
@@ -98,6 +105,7 @@ class PCCAApp:
             feedback_repo=feedback_repo,
             subject_repo=subject_repo,
             digest_repo=digest_repo,
+            preference_repo=pref_repo,
         )
         self.routing_service = RoutingService(routing_repo=routing_repo, subject_repo=subject_repo)
         self.browser_session_manager = BrowserSessionManager(
@@ -125,7 +133,9 @@ class PCCAApp:
             run_log_repo=run_log_repo,
             preference_service=self.preference_service,
             model_router=model_router,
+            embedding_service=embedding_service,
             session_refresh_service=self.session_refresh_service,
+            scorer=self.settings.scorer,
             circuit_threshold=self.settings.platform_circuit_threshold,
             empty_threshold=self.settings.platform_empty_threshold,
             collectors={

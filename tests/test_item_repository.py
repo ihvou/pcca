@@ -87,8 +87,26 @@ async def test_item_upsert_many(tmp_path: Path) -> None:
     assert blank_fetch["updated"] == 0
 
     row = await (
-        await db.conn.execute("SELECT raw_text FROM items WHERE platform = 'rss' AND external_id = 'id-1'")
+        await db.conn.execute("SELECT id, raw_text FROM items WHERE platform = 'rss' AND external_id = 'id-1'")
     ).fetchone()
     assert row["raw_text"] == "updated"
+    await repo.save_content_embedding(int(row["id"]), model="fake", embedding=[1.0, 0.0])
+    assert await repo.get_content_embedding(int(row["id"]), model="fake") == [1.0, 0.0]
+
+    await repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="id-1",
+                author="author2",
+                url="https://example.com/a",
+                text="updated again",
+                transcript_text=None,
+                published_at=None,
+                metadata={"k": "v3"},
+            )
+        ]
+    )
+    assert await repo.get_content_embedding(int(row["id"]), model="fake") is None
 
     await db.close()

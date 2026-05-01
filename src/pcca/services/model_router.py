@@ -17,6 +17,16 @@ class ModelRerankResult:
 
 
 @dataclass
+class ModelRerankCandidate:
+    item_id: int
+    text: str
+    heuristic_score: float
+    author: str | None = None
+    url: str | None = None
+    published_at: str | None = None
+
+
+@dataclass
 class ModelPreferenceExtractionResult:
     title: str
     include_terms: list[str]
@@ -29,6 +39,94 @@ class ModelRouter:
     enabled: bool
     ollama_base_url: str
     ollama_model: str
+
+    async def rerank_batch(
+        self,
+        *,
+        subject_name: str,
+        subject_description: str,
+        candidates: list[ModelRerankCandidate],
+    ) -> dict[int, ModelRerankResult]:
+        if not self.enabled or not candidates:
+            logger.debug("Model batch rerank skipped: disabled_or_empty subject=%s", subject_name)
+            return {}
+        started_at = time.monotonic()
+        compact_candidates = [
+            {
+                "item_id": candidate.item_id,
+                "heuristic_score": round(candidate.heuristic_score, 4),
+                "author": candidate.author,
+                "published_at": candidate.published_at,
+                "url": candidate.url,
+                "text": candidate.text[:1000],
+            }
+            for candidate in candidates[:20]
+        ]
+        prompt = (
+            "You are a strict curator. Score candidate items for one user's subject.\n"
+            "Use the full subject description directly. Respect authority, conditional rules, anti-signals, novelty, and practicality stated by the user.\n"
+            "Return JSON only with field ranked: an array of objects with item_id, score_delta, reason.\n"
+            "score_delta must be between -0.25 and 0.25. Include every candidate item exactly once.\n\n"
+            f"SUBJECT TITLE: {subject_name}\n"
+            f"FULL SUBJECT DESCRIPTION:\n{subject_description[:4000]}\n\n"
+            f"CANDIDATES:\n{json.dumps(compact_candidates, ensure_ascii=False)}"
+        )
+        payload = {
+            "model": self.ollama_model,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": 0.1},
+        }
+        try:
+            logger.debug(
+                "Model batch rerank started subject=%s model=%s candidates=%d",
+                subject_name,
+                self.ollama_model,
+                len(compact_candidates),
+            )
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
+                response.raise_for_status()
+                data = response.json()
+            parsed = json.loads(data.get("response", ""))
+            ranked = parsed.get("ranked", [])
+            if not isinstance(ranked, list):
+                return {}
+            out: dict[int, ModelRerankResult] = {}
+            allowed_ids = {candidate.item_id for candidate in candidates}
+            for row in ranked:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    item_id = int(row.get("item_id"))
+                except (TypeError, ValueError):
+                    continue
+                if item_id not in allowed_ids:
+                    continue
+                delta = max(-0.25, min(0.25, float(row.get("score_delta", 0.0) or 0.0)))
+                reason = str(row.get("reason") or "model batch rerank").strip()
+                out[item_id] = ModelRerankResult(score_delta=delta, rationale=reason)
+            logger.info(
+                "Model batch rerank finished subject=%s model=%s candidates=%d results=%d duration_ms=%d",
+                subject_name,
+                self.ollama_model,
+                len(compact_candidates),
+                len(out),
+                int((time.monotonic() - started_at) * 1000),
+            )
+            return out
+        except Exception as exc:
+            logger.warning(
+                "Model batch rerank failed subject=%s model=%s candidates=%d duration_ms=%d error=%s",
+                subject_name,
+                self.ollama_model,
+                len(compact_candidates),
+                int((time.monotonic() - started_at) * 1000),
+                exc,
+                exc_info=True,
+            )
+            return {}
 
     async def rerank(self, *, subject_name: str, text: str, heuristic_score: float) -> ModelRerankResult | None:
         if not self.enabled:

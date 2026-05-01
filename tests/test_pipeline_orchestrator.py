@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -53,6 +54,30 @@ class EmptyCollector:
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
         self.calls.append(source_id)
         return []
+
+
+class BlockingCollector:
+    platform = "rss"
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.entered.set()
+        await self.release.wait()
+        return [
+            CollectedItem(
+                platform="rss",
+                external_id=f"blocking-{source_id}",
+                author="dummy",
+                url="https://example.com/blocking",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
 
 
 class SequenceCollector:
@@ -117,6 +142,48 @@ class FakeModelRouter:
         _ = text, heuristic_score
         self.calls.append(subject_name)
         return None
+
+
+class FakeEmbeddingService:
+    enabled = True
+    embedding_model = "fake-embedding"
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def embed(self, text: str) -> list[float] | None:
+        self.calls.append(text)
+        lowered = text.lower()
+        if any(term in lowered for term in ("ukraine", "kyiv", "frontline", "russia")):
+            return [1.0, 0.0]
+        if any(term in lowered for term in ("claude", "football", "podcast")):
+            return [0.0, 1.0]
+        return [0.5, 0.5]
+
+
+class FakeBatchModelRouter:
+    def __init__(self) -> None:
+        self.batch_calls: list[dict] = []
+
+    async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+        self.batch_calls.append(
+            {
+                "subject_name": subject_name,
+                "subject_description": subject_description,
+                "candidate_count": len(candidates),
+            }
+        )
+        return {
+            candidate.item_id: type(
+                "Rerank",
+                (),
+                {"score_delta": 0.01, "rationale": "batch considered full description"},
+            )()
+            for candidate in candidates
+        }
+
+    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
+        raise AssertionError("embedding path should use batch rerank")
 
 
 class ChallengedCollector:
@@ -203,6 +270,61 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     assert second_stats["items_scored"] == 0
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runtime_lock_rejects_overlapping_collection(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+        priority=1,
+    )
+
+    collector = BlockingCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": collector},
+    )
+
+    first = asyncio.create_task(orchestrator.run_nightly_collection())
+    try:
+        await asyncio.wait_for(collector.entered.wait(), timeout=1)
+        second = await orchestrator.run_nightly_collection()
+        assert second["skipped_already_running"] is True
+        assert second["status"] == "skipped_already_running"
+
+        collector.release.set()
+        first_stats = await first
+        assert first_stats["items_collected"] == 1
+
+        row = await (await db.conn.execute("SELECT COUNT(*) AS c FROM runtime_locks")).fetchone()
+        assert int(row["c"]) == 0
+    finally:
+        collector.release.set()
+        if not first.done():
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+        await db.close()
 
 
 @pytest.mark.asyncio
@@ -526,6 +648,143 @@ async def test_pipeline_model_rerank_only_runs_for_subject_shortlist(tmp_path: P
     assert stats["items_scored"] == 25
     assert stats["model_shortlist_items"] == 20
     assert len(model_router.calls) == 20
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_embedding_scorer_uses_subject_description_semantics(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "Ukraine War News",
+        include_terms=["reputable sources", "high quality analytics"],
+        description_text="Ukraine war news, frontline analysis, Kyiv and Russia updates from reputable sources.",
+    )
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    class MixedCollector:
+        platform = "rss"
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            return [
+                CollectedItem(
+                    platform="rss",
+                    external_id="ukraine-item",
+                    author="analyst",
+                    url="https://example.com/ukraine",
+                    text="Frontline map update from Kyiv with Russia force movements.",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                ),
+                CollectedItem(
+                    platform="rss",
+                    external_id="claude-item",
+                    author="podcast",
+                    url="https://example.com/claude",
+                    text="Claude Code podcast biography and tooling chatter.",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                ),
+            ]
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": MixedCollector()},
+        scorer="embedding",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+    candidates = await ItemScoreRepository(conn=db.conn).top_candidates(subject_id=1, limit=2)
+
+    assert stats["embedding_items_scored"] == 2
+    assert candidates[0].url == "https://example.com/ukraine"
+    assert "semantic_similarity=" in candidates[0].rationale
+    assert "keyword_shadow_final=" in candidates[0].rationale
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "AI Tools & Tips",
+        include_terms=["leading ai companies"],
+        description_text="Track practical AI agent updates from leading AI companies and thought leaders. Do not boost engagement bait.",
+    )
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    class AICollector:
+        platform = "rss"
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            return [
+                CollectedItem(
+                    platform="rss",
+                    external_id=f"ai-{idx}",
+                    author="Anthropic",
+                    url=f"https://example.com/ai-{idx}",
+                    text=f"Claude agent workflow release with practical implementation detail {idx}",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                )
+                for idx in range(3)
+            ]
+
+    model_router = FakeBatchModelRouter()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        model_router=model_router,  # type: ignore[arg-type]
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": AICollector()},
+        scorer="both",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert stats["model_batch_rerank_calls"] == 1
+    assert stats["items_model_reranked"] == 3
+    assert model_router.batch_calls[0]["subject_name"] == "AI Tools & Tips"
+    assert "leading AI companies" in model_router.batch_calls[0]["subject_description"]
+    assert model_router.batch_calls[0]["candidate_count"] == 3
 
     await db.close()
 

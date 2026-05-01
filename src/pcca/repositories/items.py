@@ -85,7 +85,10 @@ class ItemRepository:
                             END,
                             metadata_json = ?,
                             content_hash = ?,
-                            updated_at = CURRENT_TIMESTAMP
+                            updated_at = CURRENT_TIMESTAMP,
+                            content_embedding_json = NULL,
+                            content_embedding_model = NULL,
+                            content_embedding_updated_at = NULL
                         WHERE platform = ? AND external_id = ?
                         """,
                         (
@@ -162,6 +165,55 @@ class ItemRepository:
                 )
             )
         return out
+
+    async def get_content_embedding(self, item_id: int, *, model: str) -> list[float] | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT content_embedding_json, content_embedding_model
+                FROM items
+                WHERE id = ?
+                """,
+                (item_id,),
+            )
+        ).fetchone()
+        if row is None or row["content_embedding_model"] != model or not row["content_embedding_json"]:
+            return None
+        try:
+            payload = json.loads(row["content_embedding_json"])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, list):
+            return None
+        try:
+            return [float(value) for value in payload]
+        except (TypeError, ValueError):
+            return None
+
+    async def save_content_embedding(self, item_id: int, *, model: str, embedding: list[float]) -> None:
+        await self.conn.execute(
+            """
+            UPDATE items
+            SET content_embedding_json = ?,
+                content_embedding_model = ?,
+                content_embedding_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (json.dumps(embedding), model, item_id),
+        )
+        await self.conn.commit()
+
+    @staticmethod
+    def embedding_text(item: CollectedItem) -> str:
+        return "\n".join(
+            part.strip()
+            for part in (
+                item.author or "",
+                item.text or "",
+                item.transcript_text or "",
+            )
+            if part and part.strip()
+        )[:8000]
 
     def _content_hash(self, item: CollectedItem) -> str:
         return self._content_hash_values(

@@ -73,6 +73,7 @@ class CurationEngine:
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
         min_practicality: float | None = None,
+        semantic_similarity: float | None = None,
     ) -> ScoredItem:
         text = (item.text or "").lower()
         if not text and item.transcript_text:
@@ -81,7 +82,10 @@ class CurationEngine:
         subject_tokens = [t for t in re.findall(r"[^\W_]+", subject_name.lower(), flags=re.UNICODE) if len(t) > 2]
 
         relevance_hits = sum(1 for token in subject_tokens if token in text)
-        relevance = min(1.0, 0.2 + 0.2 * relevance_hits) if subject_tokens else 0.5
+        if semantic_similarity is not None:
+            relevance = max(0.0, min(1.0, semantic_similarity))
+        else:
+            relevance = min(1.0, 0.2 + 0.2 * relevance_hits) if subject_tokens else 0.5
 
         practical_hits = sum(1 for term in self.practical_terms if term in text)
         practicality = min(1.0, practical_hits / 4.0)
@@ -135,6 +139,8 @@ class CurationEngine:
             f"include_hits={include_hits}, exclude_hits={exclude_hits}, "
             f"engagement_strength={engagement_strength:.2f}, engagement={engagement.rationale_fragment()}"
         )
+        if semantic_similarity is not None:
+            rationale += f", semantic_similarity={semantic_similarity:.3f}"
         return ScoredItem(
             pass1_score=pass1_score,
             pass2_score=pass2_score,

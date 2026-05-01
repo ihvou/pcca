@@ -82,3 +82,23 @@ def test_curation_engine_uses_engagement_signals() -> None:
     assert high.final_score > low.final_score
     assert "engagement_strength=" in high.rationale
     assert "views=250000" in high.rationale
+
+
+def test_curation_engine_can_use_semantic_similarity_as_relevance() -> None:
+    engine = CurationEngine()
+    item = CollectedItem(
+        platform="rss",
+        external_id="war-update",
+        author="analyst",
+        url="https://example.com/war",
+        text="Frontline update with maps and practical context from Kyiv.",
+        transcript_text=None,
+        published_at=None,
+        metadata={},
+    )
+
+    low = engine.score("Ukraine War News", item, semantic_similarity=0.1)
+    high = engine.score("Ukraine War News", item, semantic_similarity=0.95)
+
+    assert high.final_score > low.final_score
+    assert "semantic_similarity=0.950" in high.rationale

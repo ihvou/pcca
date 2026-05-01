@@ -63,7 +63,10 @@ class SubjectRepository:
         await self.conn.execute(
             """
             UPDATE subjects
-            SET description_text = COALESCE(NULLIF(?, ''), description_text)
+            SET description_text = COALESCE(NULLIF(?, ''), description_text),
+                description_embedding_json = NULL,
+                description_embedding_model = NULL,
+                description_embedding_updated_at = NULL
             WHERE id = ?
             """,
             ((description_text or "").strip(), subject_id),
@@ -81,6 +84,43 @@ class SubjectRepository:
             return None
         value = row["description_text"]
         return str(value).strip() if value else None
+
+    async def get_description_embedding(self, subject_id: int, *, model: str) -> list[float] | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT description_embedding_json, description_embedding_model
+                FROM subjects
+                WHERE id = ?
+                """,
+                (subject_id,),
+            )
+        ).fetchone()
+        if row is None or row["description_embedding_model"] != model or not row["description_embedding_json"]:
+            return None
+        try:
+            payload = json.loads(row["description_embedding_json"])
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(payload, list):
+            return None
+        try:
+            return [float(value) for value in payload]
+        except (TypeError, ValueError):
+            return None
+
+    async def save_description_embedding(self, subject_id: int, *, model: str, embedding: list[float]) -> None:
+        await self.conn.execute(
+            """
+            UPDATE subjects
+            SET description_embedding_json = ?,
+                description_embedding_model = ?,
+                description_embedding_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (json.dumps(embedding), model, subject_id),
+        )
+        await self.conn.commit()
 
     async def list_all(self) -> list[Subject]:
         rows = await (

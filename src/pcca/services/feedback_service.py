@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from pcca.repositories.digests import DigestBriefViewRow, DigestButtonRow, DigestItemDeliveryRow, DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
+from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.subjects import SubjectRepository
 
 
@@ -12,6 +13,7 @@ class FeedbackService:
     feedback_repo: FeedbackRepository
     subject_repo: SubjectRepository
     digest_repo: DigestRepository | None = None
+    preference_repo: SubjectPreferenceRepository | None = None
 
     async def add_feedback_by_subject_name(
         self,
@@ -30,6 +32,11 @@ class FeedbackService:
             comment_text=comment_text,
             item_id=item_id,
         )
+        await self._append_feedback_to_subject_description(
+            subject_id=subject.id,
+            feedback_type=feedback_type,
+            comment_text=comment_text,
+        )
 
     async def add_feedback_by_subject_id(
         self,
@@ -45,6 +52,29 @@ class FeedbackService:
             comment_text=comment_text,
             item_id=item_id,
         )
+        await self._append_feedback_to_subject_description(
+            subject_id=subject_id,
+            feedback_type=feedback_type,
+            comment_text=comment_text,
+        )
+
+    async def _append_feedback_to_subject_description(
+        self,
+        *,
+        subject_id: int,
+        feedback_type: str,
+        comment_text: str | None,
+    ) -> None:
+        if self.preference_repo is None:
+            return
+        normalized = " ".join((comment_text or "").split()).strip()
+        if not normalized or feedback_type not in {"button_macro", "reply_text"}:
+            return
+        existing_description = await self.subject_repo.get_description_text(subject_id)
+        memory = f"User feedback ({feedback_type}): {normalized}"
+        updated_description = "\n".join(part for part in (existing_description, memory) if part)
+        await self.subject_repo.update_description(subject_id, updated_description)
+        await self.preference_repo.append_rules(subject_id=subject_id, quality_notes=memory)
 
     async def get_digest_button(self, token: str) -> DigestButtonRow | None:
         if self.digest_repo is None:

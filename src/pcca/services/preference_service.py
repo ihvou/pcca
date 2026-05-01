@@ -30,10 +30,17 @@ class PreferenceService:
         include_terms: list[str] | None = None,
         exclude_terms: list[str] | None = None,
         quality_notes: str | None = None,
+        description_append: str | None = None,
     ) -> SubjectPreference:
         subject = await self.subject_repo.get_by_name(subject_name)
         if subject is None:
             raise ValueError(f"Subject not found: {subject_name}")
+        if description_append and description_append.strip():
+            existing_description = await self.subject_repo.get_description_text(subject.id)
+            updated_description = "\n".join(
+                part for part in (existing_description, description_append.strip()) if part
+            )
+            await self.subject_repo.update_description(subject.id, updated_description)
         return await self.preference_repo.append_rules(
             subject_id=subject.id,
             include_terms=include_terms or [],

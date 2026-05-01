@@ -59,6 +59,9 @@ class Settings:
     session_refresh_browser: str | None = None
     platform_circuit_threshold: int = 5
     platform_empty_threshold: int = 25
+    scorer: str = "both"
+    embedding_model: str = "nomic-embed-text:v1.5"
+    embedding_timeout_seconds: int = 30
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -101,6 +104,13 @@ class Settings:
             platform_empty_threshold = int(_env("PCCA_PLATFORM_EMPTY_THRESHOLD", "25") or "25")
         except ValueError:
             platform_empty_threshold = 25
+        scorer = (_env("PCCA_SCORER", "both") or "both").strip().lower()
+        if scorer not in {"keyword", "embedding", "both"}:
+            scorer = "both"
+        try:
+            embedding_timeout_seconds = int(_env("PCCA_EMBEDDING_TIMEOUT_SECONDS", "30") or "30")
+        except ValueError:
+            embedding_timeout_seconds = 30
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -121,6 +131,9 @@ class Settings:
             session_refresh_browser=session_refresh_browser,
             platform_circuit_threshold=max(1, platform_circuit_threshold),
             platform_empty_threshold=max(1, platform_empty_threshold),
+            scorer=scorer,
+            embedding_model=_env("PCCA_EMBEDDING_MODEL", "nomic-embed-text:v1.5") or "nomic-embed-text:v1.5",
+            embedding_timeout_seconds=max(1, embedding_timeout_seconds),
         )
 
     def ensure_dirs(self) -> None:

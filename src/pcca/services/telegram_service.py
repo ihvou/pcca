@@ -551,6 +551,7 @@ class TelegramService:
                     subject_name=intent.subject_name,
                     include_terms=intent.include_terms,
                     exclude_terms=intent.exclude_terms,
+                    description_append=text,
                 )
                 await self.feedback_service.add_feedback_by_subject_name(
                     subject_name=intent.subject_name,

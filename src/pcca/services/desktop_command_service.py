@@ -370,6 +370,8 @@ class DesktopCommandService:
                     "session_refresh_browser": settings.session_refresh_browser or "auto",
                     "platform_circuit_threshold": settings.platform_circuit_threshold,
                     "platform_empty_threshold": settings.platform_empty_threshold,
+                    "scorer": settings.scorer,
+                    "embedding_model": settings.embedding_model,
                 },
                 "onboarding": {
                     "current_step": state.current_step,
@@ -1046,6 +1048,18 @@ class DesktopCommandService:
             else:
                 app = PCCAApp(settings=self.settings())
                 stats = await app.run_nightly_once(platform=platform_filter)
+            if stats.get("skipped_already_running"):
+                message = "Content collection is already running; check Logs."
+                self.log(message)
+                return CommandResult(
+                    False,
+                    message,
+                    {
+                        "already_running": True,
+                        "nightly_stats": stats or {},
+                        "platform": platform_filter,
+                    },
+                )
             self.log(f"Read content finished: {json.dumps(stats or {}, sort_keys=True)}")
             message = (
                 f"Content read finished for {platform_filter}."

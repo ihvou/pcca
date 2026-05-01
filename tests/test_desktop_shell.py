@@ -120,13 +120,55 @@ def test_desktop_server_reports_validation_errors_without_crashing(tmp_path) -> 
         assert response.json()["message"] == "Describe the subject first."
 
 
+def test_desktop_server_rebuild_rules_endpoint(tmp_path) -> None:
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+
+    from pcca.desktop_web.server import DesktopWebServer
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.rebuilt: list[tuple[int, str | None]] = []
+
+        async def startup_for_wizard(self):
+            return CommandResult(True, "started")
+
+        async def shutdown(self):
+            return None
+
+        async def rebuild_subject_rules(self, *, subject_id: int, text: str | None = None):
+            self.rebuilt.append((subject_id, text))
+            return CommandResult(True, "Rebuilt rules.", {"subject_id": subject_id})
+
+    fake_service = FakeService()
+    server = DesktopWebServer(
+        settings=make_settings(tmp_path),
+        token="secret-token",
+        port=8765,
+        service=fake_service,  # type: ignore[arg-type]
+    )
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/subjects/rebuild-rules",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"subject_id": 7},
+        )
+        assert response.status_code == 200
+        assert response.json()["ok"] is True
+
+    assert fake_service.rebuilt == [(7, None)]
+
+
 def test_desktop_wizard_has_tabbed_product_surface() -> None:
     from pcca.desktop_web.server import INDEX_HTML
 
     for tab in ("use", "sources", "config", "debug"):
         assert f'data-tab="{tab}"' in INDEX_HTML
     assert "Capture Session" not in INDEX_HTML
-    assert "Rebuild" not in INDEX_HTML
+    assert "Re-build briefs" not in INDEX_HTML
+    assert "Rebuild Rules" in INDEX_HTML
     assert "Include terms" not in INDEX_HTML
     assert "High-quality examples" not in INDEX_HTML
 
@@ -142,3 +184,4 @@ def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     assert "Get Content (${platformLabel(selectedPlatform)})" in INDEX_HTML
     assert "timeoutMs: 1800000" in INDEX_HTML
     assert "inflight_actions" in INDEX_HTML
+    assert "/api/subjects/rebuild-rules" in INDEX_HTML

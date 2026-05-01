@@ -462,6 +462,35 @@ async def test_desktop_read_content_passes_platform_scope_to_running_agent(tmp_p
 
 
 @pytest.mark.asyncio
+async def test_desktop_read_content_surfaces_global_collection_lock(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    class LockedOrchestrator:
+        async def run_nightly_collection(self, *, platform: str | None = None):
+            return {
+                "status": "skipped_already_running",
+                "skipped_already_running": True,
+                "platform_filter": platform,
+            }
+
+    service._agent_app = type("FakeApp", (), {"pipeline_orchestrator": LockedOrchestrator()})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        result = await service.read_content(platform="youtube")
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+    assert result.ok is False
+    assert result.data["already_running"] is True
+    assert result.data["platform"] == "youtube"
+
+
+@pytest.mark.asyncio
 async def test_desktop_read_content_guard_rejects_concurrent_runs(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)

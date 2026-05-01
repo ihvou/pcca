@@ -10,14 +10,26 @@ from pcca.collectors.errors import SessionChallengedError
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.run_logs import RunLogRepository
+from pcca.repositories.runtime_locks import RuntimeLockRepository
 from pcca.pipeline.curation import CurationEngine
-from pcca.services.model_router import ModelRouter
+from pcca.services.embedding_service import EmbeddingService, cosine_similarity
+from pcca.services.model_router import ModelRerankCandidate, ModelRouter
 from pcca.services.preference_service import PreferenceService
 from pcca.services.session_capture_service import SessionRefreshService
 from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PreferenceContext:
+    include_terms: list[str]
+    exclude_terms: list[str]
+    min_practicality: float | None
+    shortlist_limit: int
+    description_text: str | None = None
+    quality_notes: str | None = None
 
 
 @dataclass
@@ -30,18 +42,42 @@ class PipelineOrchestrator:
     preference_service: PreferenceService | None = None
     curation_engine: CurationEngine = field(default_factory=CurationEngine)
     model_router: ModelRouter | None = None
+    embedding_service: EmbeddingService | None = None
     session_refresh_service: SessionRefreshService | None = None
     collectors: dict[str, Collector] = field(default_factory=dict)
+    scorer: str = "keyword"
     circuit_threshold: int | None = None
     empty_threshold: int | None = None
+    runtime_lock_repo: RuntimeLockRepository | None = None
+    collection_lock_ttl_seconds: int = 6 * 60 * 60
 
-    async def _preference_context(self, subject_id: int) -> tuple[list[str], list[str], float | None, int]:
+    def __post_init__(self) -> None:
+        if self.runtime_lock_repo is None:
+            self.runtime_lock_repo = RuntimeLockRepository(conn=self.run_log_repo.conn)
+
+    def _scorer_mode(self) -> str:
+        mode = (self.scorer or "keyword").strip().lower()
+        return mode if mode in {"keyword", "embedding", "both"} else "keyword"
+
+    def _embedding_enabled(self) -> bool:
+        return bool(
+            self.embedding_service is not None
+            and self.embedding_service.enabled
+            and self._scorer_mode() in {"embedding", "both"}
+        )
+
+    async def _preference_context(self, subject_id: int) -> PreferenceContext:
         include_terms: list[str] = []
         exclude_terms: list[str] = []
         min_practicality: float | None = None
         shortlist_limit = 20
+        description_text = None
+        quality_notes = None
+        description_getter = getattr(self.subject_service.repository, "get_description_text", None)
+        if callable(description_getter):
+            description_text = await description_getter(subject_id)
         if self.preference_service is None:
-            return include_terms, exclude_terms, min_practicality, shortlist_limit
+            return PreferenceContext(include_terms, exclude_terms, min_practicality, shortlist_limit, description_text)
 
         pref = await self.preference_service.get_preferences_by_subject_id(subject_id)
         include_terms = [
@@ -54,7 +90,51 @@ class PipelineOrchestrator:
             min_practicality = float(pref.quality_rules["min_practicality"])
         if isinstance(pref.quality_rules.get("model_shortlist_limit"), (float, int)):
             shortlist_limit = max(0, int(pref.quality_rules["model_shortlist_limit"]))
-        return include_terms, exclude_terms, min_practicality, shortlist_limit
+        if isinstance(pref.quality_rules.get("notes"), str):
+            quality_notes = pref.quality_rules["notes"].strip() or None
+        return PreferenceContext(
+            include_terms=include_terms,
+            exclude_terms=exclude_terms,
+            min_practicality=min_practicality,
+            shortlist_limit=shortlist_limit,
+            description_text=description_text,
+            quality_notes=quality_notes,
+        )
+
+    def _subject_embedding_text(self, *, subject, context: PreferenceContext) -> str:
+        parts = [
+            f"Subject: {subject.name}",
+            context.description_text or "",
+            f"Include: {', '.join(context.include_terms)}" if context.include_terms else "",
+            f"Avoid: {', '.join(context.exclude_terms)}" if context.exclude_terms else "",
+            f"Quality: {context.quality_notes}" if context.quality_notes else "",
+        ]
+        return "\n".join(part for part in parts if part.strip())
+
+    async def _get_or_create_subject_embedding(self, *, subject_id: int, text: str) -> list[float] | None:
+        if self.embedding_service is None:
+            return None
+        model = self.embedding_service.embedding_model
+        existing = await self.subject_service.repository.get_description_embedding(subject_id, model=model)
+        if existing is not None:
+            return existing
+        embedding = await self.embedding_service.embed(text)
+        if embedding is not None:
+            await self.subject_service.repository.save_description_embedding(subject_id, model=model, embedding=embedding)
+        return embedding
+
+    async def _get_or_create_item_embedding(self, *, item_id: int, item: CollectedItem) -> list[float] | None:
+        if self.embedding_service is None:
+            return None
+        model = self.embedding_service.embedding_model
+        existing = await self.item_repo.get_content_embedding(item_id, model=model)
+        if existing is not None:
+            return existing
+        text = self.item_repo.embedding_text(item)
+        embedding = await self.embedding_service.embed(text)
+        if embedding is not None:
+            await self.item_repo.save_content_embedding(item_id, model=model, embedding=embedding)
+        return embedding
 
     async def _score_items_for_subject(
         self,
@@ -67,8 +147,14 @@ class PipelineOrchestrator:
     ) -> None:
         if not item_rows:
             return
-        include_terms, exclude_terms, min_practicality, shortlist_limit = await self._preference_context(subject.id)
-        scored_rows = []
+        context = await self._preference_context(subject.id)
+        subject_embedding_text = self._subject_embedding_text(subject=subject, context=context)
+        subject_embedding = (
+            await self._get_or_create_subject_embedding(subject_id=subject.id, text=subject_embedding_text)
+            if self._embedding_enabled()
+            else None
+        )
+        scored_rows: list[tuple[int, CollectedItem, object, bool]] = []
         for item_id, item in item_rows:
             source_id = item.metadata.get("pcca_source_id") if isinstance(item.metadata, dict) else None
             if source_id is not None:
@@ -84,35 +170,83 @@ class PipelineOrchestrator:
                         item_id,
                         source_id,
                     )
-            scored = self.curation_engine.score(
+            keyword_scored = self.curation_engine.score(
                 subject.name,
                 item,
-                include_terms=include_terms,
-                exclude_terms=exclude_terms,
-                min_practicality=min_practicality,
+                include_terms=context.include_terms,
+                exclude_terms=context.exclude_terms,
+                min_practicality=context.min_practicality,
             )
-            scored_rows.append((item_id, item, scored))
+            semantic_similarity = None
+            if subject_embedding is not None:
+                item_embedding = await self._get_or_create_item_embedding(item_id=item_id, item=item)
+                if item_embedding is not None:
+                    semantic_similarity = cosine_similarity(subject_embedding, item_embedding)
+            if semantic_similarity is not None:
+                scored = self.curation_engine.score(
+                    subject.name,
+                    item,
+                    include_terms=context.include_terms,
+                    exclude_terms=context.exclude_terms,
+                    min_practicality=context.min_practicality,
+                    semantic_similarity=semantic_similarity,
+                )
+                scored.rationale = f"{scored.rationale}; scorer=embedding; keyword_shadow_final={keyword_scored.final_score:.3f}"
+                stats["embedding_items_scored"] += 1
+                if self._scorer_mode() == "both":
+                    stats["keyword_shadow_items_scored"] += 1
+                scored_rows.append((item_id, item, scored, True))
+            else:
+                if self._embedding_enabled():
+                    stats["embedding_fallback_items"] += 1
+                scored_rows.append((item_id, item, keyword_scored, False))
 
-        shortlist_ids = {
-            item_id
-            for item_id, _item, _scored in sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[
-                :shortlist_limit
-            ]
-        }
+        shortlist_rows = sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[: context.shortlist_limit]
+        shortlist_ids = {item_id for item_id, _item, _scored, _used_embedding in shortlist_rows}
         stats["items_score_candidates"] += len(scored_rows)
         stats["model_shortlist_items"] += len(shortlist_ids)
         logger.info(
-            "Scoring subject run_id=%s subject=%s items=%d shortlist=%d include_terms=%d exclude_terms=%d",
+            "Scoring subject run_id=%s subject=%s items=%d shortlist=%d include_terms=%d exclude_terms=%d scorer=%s embedding_enabled=%s",
             run_id,
             subject.name,
             len(scored_rows),
             len(shortlist_ids),
-            len(include_terms),
-            len(exclude_terms),
+            len(context.include_terms),
+            len(context.exclude_terms),
+            self._scorer_mode(),
+            bool(subject_embedding is not None),
         )
 
-        for item_id, item, scored in scored_rows:
-            if self.model_router is not None and item_id in shortlist_ids:
+        batch_results = {}
+        batch_rerank = getattr(self.model_router, "rerank_batch", None) if self.model_router is not None else None
+        shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding in shortlist_rows)
+        if callable(batch_rerank) and shortlist_used_embedding and getattr(self.model_router, "enabled", True):
+            candidates = [
+                ModelRerankCandidate(
+                    item_id=item_id,
+                    text=item.text or item.transcript_text or "",
+                    heuristic_score=scored.final_score,
+                    author=item.author,
+                    url=item.url,
+                    published_at=item.published_at,
+                )
+                for item_id, item, scored, _used_embedding in shortlist_rows
+            ]
+            batch_results = await batch_rerank(
+                subject_name=subject.name,
+                subject_description=subject_embedding_text,
+                candidates=candidates,
+            )
+            stats["model_batch_rerank_calls"] += 1
+
+        for item_id, item, scored, _used_embedding in scored_rows:
+            rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
+            if rerank is not None:
+                adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
+                scored.final_score = adjusted_final
+                scored.rationale = f"{scored.rationale}; model_batch={rerank.rationale}"
+                stats["items_model_reranked"] += 1
+            elif self.model_router is not None and item_id in shortlist_ids and not batch_results:
                 rerank = await self.model_router.rerank(
                     subject_name=subject.name,
                     text=item.text or item.transcript_text or "",
@@ -138,11 +272,45 @@ class PipelineOrchestrator:
             stats["items_scored"] += 1
 
     async def run_nightly_collection(self, *, platform: str | None = None) -> dict:
-        run_id = await self.run_log_repo.start_run("nightly_collection")
+        platform_filter = platform.strip().lower() if platform and platform.strip() else None
+        lock_name = "nightly_collection"
+        lock_owner = f"pipeline:{id(self)}:{time.time_ns()}"
+        if self.runtime_lock_repo is not None:
+            acquired = await self.runtime_lock_repo.acquire(
+                lock_name=lock_name,
+                owner_id=lock_owner,
+                ttl_seconds=self.collection_lock_ttl_seconds,
+            )
+            if not acquired:
+                active_lock = await self.runtime_lock_repo.get(lock_name=lock_name)
+                logger.warning(
+                    "Nightly collection skipped because another collection is already running platform_filter=%s lock=%s",
+                    platform_filter,
+                    active_lock,
+                )
+                return {
+                    "status": "skipped_already_running",
+                    "skipped_already_running": True,
+                    "platform_filter": platform_filter,
+                    "lock": active_lock or {},
+                    "items_collected": 0,
+                    "items_inserted": 0,
+                    "items_updated": 0,
+                    "sources_seen": 0,
+                    "sources_crawled": 0,
+                }
+        try:
+            run_id = await self.run_log_repo.start_run("nightly_collection")
+        except Exception:
+            if self.runtime_lock_repo is not None:
+                try:
+                    await self.runtime_lock_repo.release(lock_name=lock_name, owner_id=lock_owner)
+                except Exception:
+                    logger.exception("Failed to release runtime lock after run start failure lock_name=%s", lock_name)
+            raise
         run_started_at = time.monotonic()
         threshold = self._effective_circuit_threshold()
         empty_threshold = self._effective_empty_threshold()
-        platform_filter = platform.strip().lower() if platform and platform.strip() else None
         stats = {
             "subjects_seen": 0,
             "sources_seen": 0,
@@ -155,6 +323,10 @@ class PipelineOrchestrator:
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
+            "model_batch_rerank_calls": 0,
+            "embedding_items_scored": 0,
+            "embedding_fallback_items": 0,
+            "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
             "items_scored": 0,
             "sources_skipped_circuit_breaker": 0,
@@ -423,6 +595,12 @@ class PipelineOrchestrator:
                 stats,
             )
             raise
+        finally:
+            if self.runtime_lock_repo is not None:
+                try:
+                    await self.runtime_lock_repo.release(lock_name=lock_name, owner_id=lock_owner)
+                except Exception:
+                    logger.exception("Failed to release runtime lock lock_name=%s owner_id=%s", lock_name, lock_owner)
 
     def _effective_circuit_threshold(self) -> int:
         if self.circuit_threshold is not None:

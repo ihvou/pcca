@@ -25,6 +25,11 @@ async def test_db_init_and_subject_create(tmp_path: Path) -> None:
     listed = await service.list_subjects()
     assert len(listed) == 1
     assert listed[0].name == "Vibe Coding"
+    repo = SubjectRepository(conn=db.conn)
+    await repo.save_description_embedding(created.id, model="fake", embedding=[1.0, 0.0])
+    assert await repo.get_description_embedding(created.id, model="fake") == [1.0, 0.0]
+    await repo.update_description(created.id, "Updated full subject description")
+    assert await repo.get_description_embedding(created.id, model="fake") is None
 
     await db.close()
 

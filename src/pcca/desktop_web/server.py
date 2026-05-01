@@ -400,6 +400,19 @@ async function draftSubject(subjectId=null, text=null) {
   }
   return data;
 }
+async function rebuildSubjectRules(subjectId) {
+  const status = byId('refineStatus');
+  pauseRefresh(120000);
+  if (status) { status.style.display = 'block'; status.className = 'notice'; status.textContent = 'Rebuilding rules from the stored subject description...'; }
+  const data = await postAction('/api/subjects/rebuild-rules', {subject_id: subjectId}, {timeoutMs: 120000});
+  const currentStatus = byId('refineStatus');
+  if (currentStatus && data) {
+    currentStatus.style.display = 'block';
+    currentStatus.className = data.ok === false ? 'notice bad' : 'notice ok';
+    currentStatus.textContent = data.message || 'Rules rebuilt.';
+  }
+  return data;
+}
 async function confirmSubjectDraft(chatId=null) { return postAction('/api/subjects/confirm-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function cancelSubjectDraft(chatId=null) { const subjectTextEl = byId('subjectText'); if (chatId === null && subjectTextEl) subjectTextEl.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function unlinkRoute(subjectId, chatId, threadId) { return postAction('/api/routes/unlink', {subject_id: subjectId, chat_id: chatId, thread_id: threadId || ''}); }
@@ -497,7 +510,8 @@ function renderSubjectDetail(state) {
 <div style="margin-top:10px"><strong>Route</strong><pre>${routeText}</pre></div>
 <div style="margin-top:10px"><strong>Suspended sources</strong><pre>${suspendedText}</pre></div>
 <label style="margin-top:10px">Refine in free form<textarea id="refineText" placeholder="Example: less hype, more primary sources, exclude generic Skills tutorials"></textarea></label>
-<div class="actions" style="margin-top:8px"><button id="refineButton">Draft Refinement</button></div>
+<div class="actions" style="margin-top:8px"><button id="refineButton">Draft Refinement</button><button id="rebuildRulesButton" class="secondary">Rebuild Rules</button></div>
+<div class="fine">Rebuild Rules re-runs the current extractor on the stored subject description and replaces the preference version. Use it to repair subjects created before the improved extraction prompt.</div>
 <div id="refineStatus" class="notice" style="display:none; margin-top:8px"></div>
 <label style="margin-top:10px">Route to Telegram chat<select id="routeChat">${chatOptions || '<option value="">No Telegram chats registered</option>'}</select></label>
 <div class="actions" style="margin-top:8px"><button id="assignRouteButton" ${chatOptions ? '' : 'disabled'}>Assign Route</button></div>
@@ -507,6 +521,7 @@ function renderSubjectDetail(state) {
   refineText.addEventListener('input', () => pauseRefresh());
   if (refineWasFocused) refineText.focus();
   byId('refineButton').onclick = () => draftSubject(subject.id, refineText.value);
+  byId('rebuildRulesButton').onclick = () => rebuildSubjectRules(subject.id);
   byId('assignRouteButton').onclick = () => assignRoute(subject.id, byId('routeChat').value);
 }
 function renderSources(state) {
@@ -806,6 +821,16 @@ class DesktopWebServer:
                 request,
             )
 
+        async def rebuild_subject_rules(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.rebuild_subject_rules(
+                    subject_id=int(p.get("subject_id") or 0),
+                    text=str(p.get("text") or "") or None,
+                ),
+                request,
+            )
+
         async def confirm_subject_draft(request):
             assert self.service is not None
             return await run_result(
@@ -931,6 +956,7 @@ class DesktopWebServer:
             Route("/api/stage-follows", stage_follows, methods=["POST"]),
             Route("/api/staged-sources", staged_sources, methods=["GET"]),
             Route("/api/subjects/draft", draft_subject, methods=["POST"]),
+            Route("/api/subjects/rebuild-rules", rebuild_subject_rules, methods=["POST"]),
             Route("/api/subjects/confirm-draft", confirm_subject_draft, methods=["POST"]),
             Route("/api/subjects/cancel-draft", cancel_subject_draft, methods=["POST"]),
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),
