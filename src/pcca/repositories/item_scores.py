@@ -22,6 +22,7 @@ class CandidateItem:
     segment_end_seconds: float | None = None
     metadata: dict | None = None
     key_message: str | None = None
+    refined_segment: str | None = None
 
 
 @dataclass
@@ -42,6 +43,7 @@ class ItemScoreRepository:
         final_score: float,
         rationale: str,
         key_message: str | None = None,
+        refined_segment: str | None = None,
     ) -> None:
         await self.conn.execute(
             """
@@ -69,7 +71,13 @@ class ItemScoreRepository:
                 trust_score,
                 noise_penalty,
                 final_score,
-                json.dumps({"reason": rationale, "key_message": key_message}),
+                json.dumps(
+                    {
+                        "reason": rationale,
+                        "key_message": key_message,
+                        "refined_segment": refined_segment,
+                    }
+                ),
             ),
         )
         await self.conn.commit()
@@ -89,6 +97,7 @@ class ItemScoreRepository:
         final_score: float,
         rationale: str,
         key_message: str | None = None,
+        refined_segment: str | None = None,
     ) -> None:
         await self.conn.execute(
             """
@@ -120,7 +129,13 @@ class ItemScoreRepository:
                 trust_score,
                 noise_penalty,
                 final_score,
-                json.dumps({"reason": rationale, "key_message": key_message}),
+                json.dumps(
+                    {
+                        "reason": rationale,
+                        "key_message": key_message,
+                        "refined_segment": refined_segment,
+                    }
+                ),
             ),
         )
         await self.conn.commit()
@@ -140,6 +155,7 @@ class ItemScoreRepository:
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
                   COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.refined_segment'), json_extract(s.rationale_json, '$.refined_segment')) AS refined_segment,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -187,6 +203,7 @@ class ItemScoreRepository:
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
                   COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.refined_segment'), json_extract(s.rationale_json, '$.refined_segment')) AS refined_segment,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -230,6 +247,7 @@ class ItemScoreRepository:
                   s.final_score AS final_score,
                   json_extract(s.rationale_json, '$.reason') AS rationale,
                   COALESCE(json_extract(iss_best.rationale_json, '$.key_message'), json_extract(s.rationale_json, '$.key_message')) AS key_message,
+                  COALESCE(json_extract(iss_best.rationale_json, '$.refined_segment'), json_extract(s.rationale_json, '$.refined_segment')) AS refined_segment,
                   seg.id AS segment_id,
                   seg.segment_text AS segment_text,
                   seg.start_offset_seconds AS segment_start_seconds,
@@ -279,4 +297,5 @@ class ItemScoreRepository:
             segment_end_seconds=float(row["segment_end_seconds"]) if row["segment_end_seconds"] is not None else None,
             metadata=metadata if isinstance(metadata, dict) else {},
             key_message=str(row["key_message"]).strip() if row["key_message"] else None,
+            refined_segment=str(row["refined_segment"]).strip() if row["refined_segment"] else None,
         )

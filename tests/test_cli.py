@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import os
+import asyncio
+import json
 
 import pytest
 
 from pcca import cli
+from pcca.collectors.base import CollectedItem
+from pcca.config import Settings
+from pcca.db import Database
+from pcca.repositories.items import ItemRepository
+from pcca.repositories.subjects import SubjectRepository
+from pcca.services.youtube_transcript_service import TranscriptResult
 
 
 def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
@@ -51,3 +59,161 @@ def test_run_nightly_once_score_flag_restores_legacy_scoring(monkeypatch: pytest
     cli.main(["run-nightly-once", "--score"])
 
     assert calls == [{"auto_backfill": True, "score": True}]
+
+
+def test_repair_subject_descriptions_command_updates_description_and_invalidates_embedding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            subject = await SubjectRepository(conn=db.conn).create(
+                "Ukraine War News",
+                include_terms=["reputable sources"],
+                description_text="corrupted scaffold",
+            )
+            await SubjectRepository(conn=db.conn).save_description_embedding(
+                subject.id,
+                model="fake",
+                embedding=[0.1],
+                text_hash="old",
+            )
+            return subject.id
+        finally:
+            await db.close()
+
+    subject_id = asyncio.run(setup())
+    cli.main(
+        [
+            "repair-subject-descriptions",
+            "--json",
+            json.dumps({str(subject_id): "Track Ukraine war news from frontline sources."}),
+        ]
+    )
+
+    async def inspect() -> tuple[str | None, str | None]:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute(
+                    "SELECT description_text, description_embedding_json FROM subjects WHERE id = ?",
+                    (subject_id,),
+                )
+            ).fetchone()
+            return row["description_text"], row["description_embedding_json"]
+        finally:
+            await db.close()
+
+    description, embedding_json = asyncio.run(inspect())
+    assert description == "Track Ukraine war news from frontline sources."
+    assert embedding_json is None
+
+
+def test_youtube_rebackfill_transcripts_updates_historical_items(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+    fetched: list[str] = []
+
+    class FakeYouTubeTranscriptService:
+        async def get_transcript(self, video_id: str) -> TranscriptResult:
+            fetched.append(video_id)
+            return TranscriptResult(
+                text="Translated Ukrainian transcript with concrete frontline details.",
+                rows=[{"text": "frontline details", "start": 12.0, "duration": 4.0}],
+                language_code="uk",
+                translated=True,
+            )
+
+    monkeypatch.setattr(cli, "YouTubeTranscriptService", FakeYouTubeTranscriptService)
+
+    async def setup() -> tuple[int, str | None]:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            item_repo = ItemRepository(conn=db.conn)
+            stats = await item_repo.upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video-uk",
+                        author="STERNENKO",
+                        url="https://www.youtube.com/watch?v=video-uk",
+                        text="Original title",
+                        transcript_text=None,
+                        published_at="2026-05-01T10:00:00",
+                        metadata={"existing": True},
+                    )
+                ]
+            )
+            item_id = stats["item_ids"][0]
+            await item_repo.save_content_embedding(
+                item_id,
+                model="fake",
+                embedding=[0.1],
+                text_hash="old",
+            )
+            row = await (
+                await db.conn.execute("SELECT content_hash FROM items WHERE id = ?", (item_id,))
+            ).fetchone()
+            return item_id, row["content_hash"]
+        finally:
+            await db.close()
+
+    item_id, old_hash = asyncio.run(setup())
+
+    cli.main(["youtube-rebackfill-transcripts", "--limit", "10", "--concurrency", "1"])
+
+    async def inspect() -> tuple[str | None, dict, str | None, str | None]:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute(
+                    """
+                    SELECT transcript_text, metadata_json, content_hash, content_embedding_json
+                    FROM items
+                    WHERE id = ?
+                    """,
+                    (item_id,),
+                )
+            ).fetchone()
+            return (
+                row["transcript_text"],
+                json.loads(row["metadata_json"]),
+                row["content_hash"],
+                row["content_embedding_json"],
+            )
+        finally:
+            await db.close()
+
+    transcript_text, metadata, new_hash, embedding_json = asyncio.run(inspect())
+    assert fetched == ["video-uk"]
+    assert transcript_text == "Translated Ukrainian transcript with concrete frontline details."
+    assert metadata["transcript_language"] == "uk"
+    assert metadata["transcript_translated"] is True
+    assert metadata["transcript_rows"] == [{"text": "frontline details", "start": 12.0, "duration": 4.0}]
+    assert new_hash != old_hash
+    assert embedding_json is None

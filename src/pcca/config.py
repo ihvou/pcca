@@ -62,8 +62,10 @@ class Settings:
     scorer: str = "both"
     embedding_model: str = "nomic-embed-text:v1.5"
     embedding_timeout_seconds: int = 30
+    embedding_max_chars: int = 7500
     embedding_backfill_concurrency: int = 2
     auto_backfill_embeddings: bool = True
+    youtube_transcript_backfill_concurrency: int = 2
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -113,6 +115,10 @@ class Settings:
             embedding_timeout_seconds = int(_env("PCCA_EMBEDDING_TIMEOUT_SECONDS", "30") or "30")
         except ValueError:
             embedding_timeout_seconds = 30
+        try:
+            embedding_max_chars = int(_env("PCCA_EMBEDDING_MAX_CHARS", "7500") or "7500")
+        except ValueError:
+            embedding_max_chars = 7500
         # T-100: Concurrency for embedding-backfill calls to Ollama. Lower
         # values produce a cooler chip at the cost of slightly longer
         # backfill duration. Default 2 (was 4) for thermal safety on
@@ -125,6 +131,12 @@ class Settings:
             embedding_backfill_concurrency = 2
         auto_backfill_raw = (_env("PCCA_AUTO_BACKFILL", "true") or "true").strip().lower()
         auto_backfill_embeddings = auto_backfill_raw in {"1", "true", "yes", "on"}
+        try:
+            youtube_transcript_backfill_concurrency = int(
+                _env("PCCA_YOUTUBE_TRANSCRIPT_BACKFILL_CONCURRENCY", "2") or "2"
+            )
+        except ValueError:
+            youtube_transcript_backfill_concurrency = 2
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -148,8 +160,10 @@ class Settings:
             scorer=scorer,
             embedding_model=_env("PCCA_EMBEDDING_MODEL", "nomic-embed-text:v1.5") or "nomic-embed-text:v1.5",
             embedding_timeout_seconds=max(1, embedding_timeout_seconds),
+            embedding_max_chars=max(500, embedding_max_chars),
             embedding_backfill_concurrency=max(1, embedding_backfill_concurrency),
             auto_backfill_embeddings=auto_backfill_embeddings,
+            youtube_transcript_backfill_concurrency=max(1, youtube_transcript_backfill_concurrency),
         )
 
     def ensure_dirs(self) -> None:

@@ -5,7 +5,7 @@ import asyncio
 import json
 import logging
 from pathlib import Path
-from typing import Sequence
+from typing import Any, Sequence
 
 from pcca.app import PCCAApp
 from pcca.config import Settings
@@ -13,9 +13,12 @@ from pcca.db import Database
 from pcca.logging_utils import configure_logging
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.onboarding import OnboardingRepository
+from pcca.repositories.item_segments import ItemSegmentRepository
+from pcca.repositories.items import ItemRepository
 from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
+from pcca.collectors.youtube_utils import extract_video_id
 from pcca.services.preference_service import PreferenceService
 from pcca.services.routing_service import RoutingService
 from pcca.services.source_discovery_service import SourceDiscoveryService
@@ -23,6 +26,7 @@ from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 from pcca.services.desktop_command_service import DesktopCommandService
 from pcca.services.debug_bundle_service import create_debug_bundle
+from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 
 
 async def _init_db(settings: Settings) -> None:
@@ -259,6 +263,165 @@ async def _refine_preferences(
         await db.close()
 
 
+def _load_json_mapping(*, raw_json: str | None, path: str | None) -> dict[int, str]:
+    if path:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    else:
+        payload = json.loads(raw_json or "{}")
+    if not isinstance(payload, dict):
+        raise ValueError("Expected JSON object mapping subject ids to descriptions.")
+    out: dict[int, str] = {}
+    for key, value in payload.items():
+        try:
+            subject_id = int(key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid subject id: {key!r}") from exc
+        description = str(value or "").strip()
+        if not description:
+            raise ValueError(f"Description for subject_id={subject_id} is empty.")
+        out[subject_id] = description
+    return out
+
+
+async def _repair_subject_descriptions(
+    settings: Settings,
+    *,
+    raw_json: str | None,
+    path: str | None,
+) -> dict[str, int]:
+    mapping = _load_json_mapping(raw_json=raw_json, path=path)
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    repaired = 0
+    missing = 0
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        subject_repo = SubjectRepository(conn=db.conn)
+        for subject_id, description in mapping.items():
+            row = await (
+                await db.conn.execute("SELECT id FROM subjects WHERE id = ?", (subject_id,))
+            ).fetchone()
+            if row is None:
+                missing += 1
+                print(f"Subject id not found: {subject_id}")
+                continue
+            await subject_repo.update_description(subject_id, description)
+            repaired += 1
+            print(f"Repaired description for subject_id={subject_id}.")
+    finally:
+        await db.close()
+    return {"repaired": repaired, "missing": missing}
+
+
+async def _youtube_rebackfill_transcripts(
+    settings: Settings,
+    *,
+    limit: int | None = None,
+    concurrency: int | None = None,
+) -> dict[str, int]:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0}
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: tuple[int, ...] = (int(limit),) if limit_clause else ()
+        rows = await (
+            await db.conn.execute(
+                f"""
+                SELECT id, external_id, canonical_url, raw_text, metadata_json
+                FROM items
+                WHERE platform = 'youtube'
+                  AND (transcript_text IS NULL OR LENGTH(transcript_text) < 100)
+                ORDER BY COALESCE(updated_at, ingested_at, '') DESC, id DESC
+                {limit_clause}
+                """,
+                params,
+            )
+        ).fetchall()
+        stats["scanned"] = len(rows)
+        service = YouTubeTranscriptService()
+        item_repo = ItemRepository(conn=db.conn)
+        segment_repo = ItemSegmentRepository(conn=db.conn)
+        effective_concurrency = max(1, int(concurrency or settings.youtube_transcript_backfill_concurrency))
+
+        async def fetch(row) -> tuple[Any, Any, bool]:
+            video_id = str(row["external_id"] or "").strip() or extract_video_id(row["canonical_url"] or "")
+            if not video_id:
+                return row, None, False
+            try:
+                transcript = await service.get_transcript(video_id)
+                return row, transcript, False
+            except Exception as exc:
+                print(f"Transcript fetch failed item_id={row['id']} video_id={video_id}: {exc}")
+                return row, None, True
+
+        for start in range(0, len(rows), effective_concurrency):
+            batch = rows[start : start + effective_concurrency]
+            results = await asyncio.gather(*(fetch(row) for row in batch))
+            for row, transcript, failed in results:
+                if transcript is None or not getattr(transcript, "text", None):
+                    if failed:
+                        stats["failed"] += 1
+                    else:
+                        stats["skipped"] += 1
+                    continue
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except json.JSONDecodeError:
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
+                metadata["transcript_rows"] = transcript.rows
+                metadata["transcript_language"] = transcript.language_code
+                metadata["transcript_translated"] = transcript.translated
+                raw_text = str(row["raw_text"] or "").strip()
+                snippet = transcript.text[:1200].strip()
+                next_raw_text = raw_text
+                if snippet and snippet not in raw_text:
+                    next_raw_text = "\n\n".join(part for part in (raw_text, snippet) if part).strip()
+                content_hash = item_repo._content_hash_values(
+                    url=row["canonical_url"],
+                    text=next_raw_text,
+                    transcript_text=transcript.text,
+                )
+                await db.conn.execute(
+                    """
+                    UPDATE items
+                    SET raw_text = ?,
+                        transcript_text = ?,
+                        metadata_json = ?,
+                        content_hash = ?,
+                        updated_at = CURRENT_TIMESTAMP,
+                        content_embedding_json = NULL,
+                        content_embedding_model = NULL,
+                        content_embedding_text_hash = NULL,
+                        content_embedding_updated_at = NULL
+                    WHERE id = ?
+                    """,
+                    (
+                        next_raw_text,
+                        transcript.text,
+                        json.dumps(metadata),
+                        content_hash,
+                        int(row["id"]),
+                    ),
+                )
+                await segment_repo.delete_segments_for_item(item_id=int(row["id"]))
+                await db.conn.commit()
+                stats["updated"] += 1
+                print(f"Updated transcript item_id={row['id']} chars={len(transcript.text)}", flush=True)
+    finally:
+        await db.close()
+    return stats
+
+
 async def _add_source_url(
     settings: Settings,
     subject: str,
@@ -490,6 +653,13 @@ def build_parser() -> argparse.ArgumentParser:
         required=False,
         help="Optional original subject description. If omitted, stored description/current rules are used.",
     )
+    repair_descriptions_parser = sub.add_parser(
+        "repair-subject-descriptions",
+        help="Repair stored subject descriptions from a JSON mapping of subject id to original description",
+    )
+    repair_descriptions_group = repair_descriptions_parser.add_mutually_exclusive_group(required=True)
+    repair_descriptions_group.add_argument("--json", required=False, help='JSON object, e.g. {"1": "original text"}')
+    repair_descriptions_group.add_argument("--file", required=False, help="Path to JSON mapping file")
 
     link_route_parser = sub.add_parser("link-subject-chat", help="Link subject delivery route to Telegram chat/thread")
     link_route_parser.add_argument("--subject", required=True, help="Subject name")
@@ -614,6 +784,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Also create segment rows and warm segment embeddings for long transcripts/articles.",
     )
+    youtube_backfill_parser = sub.add_parser(
+        "youtube-rebackfill-transcripts",
+        help="Backfill missing YouTube transcripts for already-collected items",
+    )
+    youtube_backfill_parser.add_argument("--limit", required=False, type=int, help="Maximum YouTube items to inspect")
+    youtube_backfill_parser.add_argument(
+        "--concurrency",
+        required=False,
+        type=int,
+        help="Maximum concurrent transcript fetches. Defaults to PCCA_YOUTUBE_TRANSCRIPT_BACKFILL_CONCURRENCY.",
+    )
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -714,6 +895,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(result.message)
         print(f"include={result.data.get('include_terms', [])}")
         print(f"exclude={result.data.get('exclude_terms', [])}")
+        return
+
+    if args.command == "repair-subject-descriptions":
+        stats = asyncio.run(
+            _repair_subject_descriptions(
+                settings,
+                raw_json=args.json,
+                path=args.file,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
         return
 
     if args.command == "link-subject-chat":
@@ -829,6 +1021,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 rescore=not args.no_rescore,
                 include_segments=args.include_segments,
                 progress_callback=progress,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
+    if args.command == "youtube-rebackfill-transcripts":
+        stats = asyncio.run(
+            _youtube_rebackfill_transcripts(
+                settings,
+                limit=args.limit,
+                concurrency=args.concurrency,
             )
         )
         print(json.dumps(stats, indent=2, sort_keys=True))

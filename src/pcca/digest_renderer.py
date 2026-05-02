@@ -15,6 +15,7 @@ EXPAND_BRIEF_ACTION = "__expand_brief__"
 DEFAULT_FULL_TEXT_CHARS = 1800
 MIN_FULL_TEXT_CHARS = 200
 MAX_FULL_TEXT_CHARS = 4000
+MAX_REFINED_CHARS = 1500
 
 logger = logging.getLogger(__name__)
 
@@ -259,12 +260,14 @@ def _brief_full_text(
     reason: str,
     full_text_chars: int,
 ) -> str:
-    full_segment = _segment_body(candidate, limit=full_text_chars)
+    refined = _refined_segment_body(candidate, limit=full_text_chars)
+    segment_label = "Refined segment:" if refined is not None else "Full segment:"
+    full_segment = refined if refined is not None else _segment_body(candidate, limit=full_text_chars)
     return "\n".join(
         [
             _brief_short_text(candidate, subject_hashtag=subject_hashtag, run_date=run_date),
             "",
-            escape_markdown_v2("Full segment:"),
+            escape_markdown_v2(segment_label),
             escape_markdown_v2(full_segment),
             "",
             escape_markdown_v2(f"Why this matched: {reason}"),
@@ -383,6 +386,14 @@ def _segment_body(candidate: CandidateItem, *, limit: int) -> str:
     prefix = _timestamp_prefix(candidate)
     rendered = f"{prefix} {body}".strip() if prefix else body
     return _full_body(rendered, limit=limit)
+
+
+def _refined_segment_body(candidate: CandidateItem, *, limit: int) -> str | None:
+    if not candidate.refined_segment or not candidate.refined_segment.strip():
+        return None
+    prefix = _timestamp_prefix(candidate)
+    rendered = f"{prefix} {candidate.refined_segment.strip()}".strip() if prefix else candidate.refined_segment.strip()
+    return _full_body(rendered, limit=min(limit, MAX_REFINED_CHARS))
 
 
 def _timestamp_prefix(candidate: CandidateItem) -> str | None:

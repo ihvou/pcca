@@ -99,6 +99,7 @@ class PCCAApp:
             ollama_base_url=self.settings.ollama_base_url,
             embedding_model=self.settings.embedding_model,
             timeout_seconds=self.settings.embedding_timeout_seconds,
+            max_chars=self.settings.embedding_max_chars,
         )
         self.embedding_service = embedding_service
         self.subject_service = SubjectService(repository=subject_repo)

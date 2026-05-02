@@ -286,7 +286,12 @@ class FakeBatchModelRouter:
             candidate.item_id: type(
                 "Rerank",
                 (),
-                {"score_delta": 0.01, "rationale": "batch considered full description"},
+                {
+                    "score_delta": 0.01,
+                    "rationale": "batch considered full description",
+                    "key_message": f"Useful key message for item {candidate.item_id}.",
+                    "refined_segment": f"Refined segment for item {candidate.item_id}.",
+                },
             )()
             for candidate in candidates
         }
@@ -1364,6 +1369,14 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
     assert "Include:" not in model_router.batch_calls[0]["subject_description"]
     assert "Avoid:" not in model_router.batch_calls[0]["subject_description"]
     assert model_router.batch_calls[0]["candidate_count"] == 3
+    rows = await (
+        await db.conn.execute("SELECT rationale_json FROM item_segment_scores ORDER BY item_id")
+    ).fetchall()
+    assert len(rows) == 3
+    for row in rows:
+        rationale = json.loads(row["rationale_json"])
+        assert rationale["key_message"].startswith("Useful key message")
+        assert rationale["refined_segment"].startswith("Refined segment")
 
     await db.close()
 

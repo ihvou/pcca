@@ -27,6 +27,7 @@ class EmbeddingService:
     ollama_base_url: str
     embedding_model: str
     timeout_seconds: float = 30.0
+    max_chars: int = 7500
     http_client: httpx.AsyncClient | None = None
 
     async def embed(self, text: str) -> list[float] | None:
@@ -36,11 +37,20 @@ class EmbeddingService:
             return None
         if not normalized:
             return None
+        prompt = truncate_embedding_text(normalized, max_chars=self.max_chars)
+        if prompt != normalized:
+            logger.info(
+                "Embedding input truncated model=%s original_chars=%d truncated_chars=%d max_chars=%d",
+                self.embedding_model,
+                len(normalized),
+                len(prompt),
+                self.max_chars,
+            )
 
         started_at = time.monotonic()
         payload = {
             "model": self.embedding_model,
-            "prompt": normalized[:8000],
+            "prompt": prompt,
         }
         try:
             if self.http_client is not None:
@@ -59,7 +69,7 @@ class EmbeddingService:
                 "Embedding finished model=%s dims=%d text_chars=%d duration_ms=%d",
                 self.embedding_model,
                 len(vector),
-                len(normalized),
+                len(prompt),
                 int((time.monotonic() - started_at) * 1000),
             )
             return vector
@@ -67,9 +77,29 @@ class EmbeddingService:
             logger.warning(
                 "Embedding failed model=%s text_chars=%d duration_ms=%d error=%s",
                 self.embedding_model,
-                len(normalized),
+                len(prompt),
                 int((time.monotonic() - started_at) * 1000),
                 exc,
                 exc_info=True,
             )
             return None
+
+
+def truncate_embedding_text(text: str, *, max_chars: int = 7500) -> str:
+    normalized = (text or "").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    limit = max(1, int(max_chars))
+    window_start = max(0, limit - 100)
+    boundary_candidates = [
+        normalized.rfind("\n\n", window_start, limit),
+        normalized.rfind(". ", window_start, limit),
+        normalized.rfind("! ", window_start, limit),
+        normalized.rfind("? ", window_start, limit),
+    ]
+    boundary = max(boundary_candidates)
+    if boundary > 0:
+        if normalized[boundary : boundary + 2] == "\n\n":
+            return normalized[:boundary].rstrip()
+        return normalized[: boundary + 1].rstrip()
+    return normalized[:limit].rstrip()

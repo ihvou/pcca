@@ -330,6 +330,41 @@ async def test_desktop_rebuild_subject_rules_replaces_preferences(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_desktop_rebuild_subject_rules_preserves_description_text(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    original_description = "Track Ukraine war news. Include Ukraine, Russia, Kyiv, battlefield updates. Avoid propaganda."
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject = await SubjectRepository(conn=db.conn).create(
+            "Ukraine War News",
+            include_terms=["reputable sources", "high quality analytics"],
+            description_text=original_description,
+        )
+    finally:
+        await db.close()
+
+    result = await service.rebuild_subject_rules(subject_id=subject.id)
+
+    assert result.ok is True
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        stored = await SubjectRepository(conn=db.conn).get_description_text(subject.id)
+    finally:
+        await db.close()
+
+    assert stored == original_description
+
+
+@pytest.mark.asyncio
 async def test_desktop_can_confirm_telegram_draft_and_assign_route(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)

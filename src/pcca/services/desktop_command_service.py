@@ -1271,7 +1271,6 @@ class DesktopCommandService:
                 exclude_terms=draft.exclude_terms,
                 quality_notes=draft.quality_notes,
             )
-            await subject_repo.update_description(subject.id, source_text)
         finally:
             await db.close()
         self.log(f"Rebuilt subject rules for subject_id={subject_id} version={pref.version}.")

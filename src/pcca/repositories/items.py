@@ -391,7 +391,7 @@ class ItemRepository:
                 item.transcript_text or "",
             )
             if part and part.strip()
-        )[:8000]
+        )
 
     @staticmethod
     def embedding_text_hash(text: str) -> str:

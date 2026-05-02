@@ -114,11 +114,13 @@ async def test_candidate_preserves_key_message_and_metadata(tmp_path: Path) -> N
         final_score=0.91,
         rationale="useful details",
         key_message="The useful core idea.",
+        refined_segment="A cleaned-up version of the relevant segment.",
     )
 
     candidate = (await score_repo.top_candidates(subject_id=subject.id, limit=1))[0]
 
     assert candidate.key_message == "The useful core idea."
+    assert candidate.refined_segment == "A cleaned-up version of the relevant segment."
     assert candidate.metadata == {"duration_seconds": 1234}
 
     await db.close()

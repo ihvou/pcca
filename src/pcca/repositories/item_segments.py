@@ -174,7 +174,7 @@ class ItemSegmentRepository:
 
     @staticmethod
     def embedding_text(segment: ItemSegment) -> str:
-        return segment.text[:8000]
+        return segment.text
 
     @staticmethod
     def embedding_text_hash(text: str) -> str:

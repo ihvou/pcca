@@ -210,6 +210,51 @@ async def test_telegram_renderer_deep_links_youtube_matched_segment() -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_renderer_uses_refined_segment_for_more_text() -> None:
+    subject = Subject(
+        id=1,
+        name="AI Tools",
+        telegram_thread_id=None,
+        status="active",
+        created_at="2026-04-29 00:00:00",
+    )
+    candidate = CandidateItem(
+        item_id=1,
+        title_or_text="Claude Code demo",
+        url="https://www.youtube.com/watch?v=abc123",
+        author="Anthropic",
+        published_at="2026-04-29",
+        final_score=0.9,
+        rationale="segment has practical workflow",
+        platform="youtube",
+        segment_text="uh so you know Claude Code can kind of help with handoffs and uh repeated project setup",
+        segment_start_seconds=60.0,
+        segment_end_seconds=120.0,
+        key_message="Claude Code helps teams standardize handoffs.",
+        refined_segment=(
+            "The speaker explains that Claude Code can standardize team handoffs by capturing "
+            "repeatable project setup details and review expectations."
+        ),
+    )
+
+    payload = await TelegramDigestRenderer().render(
+        subject=subject,
+        ranked_items=[candidate],
+        context=DigestRenderContext(
+            digest_id=1,
+            run_date=__import__("datetime").date(2026, 5, 2),
+            create_button_token=_token_factory,
+        ),
+    )
+
+    full_text = payload.briefs[0].full_text
+    assert "Refined segment:" in full_text
+    assert "standardize team handoffs" in full_text
+    assert "uh so you know" not in full_text
+    assert "Why this matched:" in full_text
+
+
+@pytest.mark.asyncio
 async def test_telegram_renderer_youtube_timestamp_regression_1122_seconds() -> None:
     subject = Subject(
         id=1,

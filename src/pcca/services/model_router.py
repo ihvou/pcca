@@ -15,6 +15,7 @@ class ModelRerankResult:
     score_delta: float
     rationale: str
     key_message: str | None = None
+    refined_segment: str | None = None
 
 
 @dataclass
@@ -66,10 +67,12 @@ class ModelRouter:
         prompt = (
             "You are a strict curator. Score candidate items for one user's subject.\n"
             "Use the full subject description directly. Respect authority, conditional rules, anti-signals, novelty, and practicality stated by the user.\n"
-            "Return JSON only with field ranked: an array of objects with item_id, score_delta, reason, key_message.\n"
+            "Return JSON only with field ranked: an array of objects with item_id, score_delta, reason, key_message, refined_segment.\n"
             "score_delta must be between -0.25 and 0.25. Include every candidate item exactly once.\n\n"
             "key_message should be 1-2 concise sentences that rephrase the useful core idea for this user's subject. "
             "Do not include biography, hype, or internal scoring details.\n\n"
+            "refined_segment should be 3-6 concise sentences cleaning up the transcript: drop fillers and repetition, "
+            "keep concrete claims, quotes, numbers, and speaker context. Do not invent details.\n\n"
             f"SUBJECT TITLE: {subject_name}\n"
             f"FULL SUBJECT DESCRIPTION:\n{subject_description[:4000]}\n\n"
             f"CANDIDATES:\n{json.dumps(compact_candidates, ensure_ascii=False)}"
@@ -110,13 +113,23 @@ class ModelRouter:
                 delta = max(-0.25, min(0.25, float(row.get("score_delta", 0.0) or 0.0)))
                 reason = str(row.get("reason") or "model batch rerank").strip()
                 key_message = str(row.get("key_message") or "").strip() or None
-                out[item_id] = ModelRerankResult(score_delta=delta, rationale=reason, key_message=key_message)
+                refined_segment = str(row.get("refined_segment") or "").strip() or None
+                out[item_id] = ModelRerankResult(
+                    score_delta=delta,
+                    rationale=reason,
+                    key_message=key_message,
+                    refined_segment=refined_segment,
+                )
+            key_message_count = sum(1 for result in out.values() if result.key_message)
+            refined_segment_count = sum(1 for result in out.values() if result.refined_segment)
             logger.info(
-                "Model batch rerank finished subject=%s model=%s candidates=%d results=%d duration_ms=%d",
+                "Model batch rerank finished subject=%s model=%s top_k_count=%d results=%d key_message_count=%d refined_segment_count=%d duration_ms=%d",
                 subject_name,
                 self.ollama_model,
                 len(compact_candidates),
                 len(out),
+                key_message_count,
+                refined_segment_count,
                 int((time.monotonic() - started_at) * 1000),
             )
             return out
@@ -142,8 +155,9 @@ class ModelRouter:
             f"Subject: {subject_name}\n"
             f"Heuristic score: {heuristic_score:.3f}\n"
             "Given this content snippet, return JSON with fields:\n"
-            '{"score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "1-2 useful sentences"}\n'
+            '{"score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "1-2 useful sentences", "refined_segment": "3-6 cleaned-up sentences"}\n'
             "key_message should rephrase the useful core idea for the user and avoid biography, hype, and scoring details.\n"
+            "refined_segment should clean up the transcript without inventing facts: remove fillers/repetition, keep concrete claims, quotes, numbers, and speaker context.\n"
             "Only return JSON.\n\n"
             f"CONTENT:\n{text[:4000]}"
         )
@@ -172,14 +186,22 @@ class ModelRouter:
             delta = max(-0.25, min(0.25, delta))
             reason = str(parsed.get("reason", "model rerank")).strip()
             key_message = str(parsed.get("key_message") or "").strip() or None
+            refined_segment = str(parsed.get("refined_segment") or "").strip() or None
             logger.info(
-                "Model rerank finished subject=%s model=%s duration_ms=%d delta=%.3f",
+                "Model rerank finished subject=%s model=%s duration_ms=%d delta=%.3f key_message=%s refined_segment=%s",
                 subject_name,
                 self.ollama_model,
                 int((time.monotonic() - started_at) * 1000),
                 delta,
+                bool(key_message),
+                bool(refined_segment),
             )
-            return ModelRerankResult(score_delta=delta, rationale=reason, key_message=key_message)
+            return ModelRerankResult(
+                score_delta=delta,
+                rationale=reason,
+                key_message=key_message,
+                refined_segment=refined_segment,
+            )
         except Exception as exc:
             logger.warning(
                 "Model rerank failed subject=%s model=%s duration_ms=%d error=%s",

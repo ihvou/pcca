@@ -639,6 +639,7 @@ class PipelineOrchestrator:
 
         adjusted_segment_scores: dict[int, Any] = {}
         item_key_messages: dict[int, str] = {}
+        item_refined_segments: dict[int, str] = {}
         for item_id, item, scored, _used_embedding, segment in scored_rows:
             rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
             if rerank is not None:
@@ -648,6 +649,9 @@ class PipelineOrchestrator:
                 key_message = getattr(rerank, "key_message", None)
                 if key_message:
                     item_key_messages[item_id] = str(key_message)
+                refined_segment = getattr(rerank, "refined_segment", None)
+                if refined_segment:
+                    item_refined_segments[item_id] = str(refined_segment)[:1500]
                 stats["items_model_reranked"] += 1
             elif self.model_router is not None and item_id in shortlist_ids and not batch_attempted:
                 rerank = await self.model_router.rerank(
@@ -662,6 +666,9 @@ class PipelineOrchestrator:
                     key_message = getattr(rerank, "key_message", None)
                     if key_message:
                         item_key_messages[item_id] = str(key_message)
+                    refined_segment = getattr(rerank, "refined_segment", None)
+                    if refined_segment:
+                        item_refined_segments[item_id] = str(refined_segment)[:1500]
                     stats["items_model_reranked"] += 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
@@ -677,6 +684,7 @@ class PipelineOrchestrator:
                 final_score=scored.final_score,
                 rationale=scored.rationale,
                 key_message=item_key_messages.get(item_id),
+                refined_segment=item_refined_segments.get(item_id),
             )
             stats["items_scored"] += 1
 
@@ -695,6 +703,7 @@ class PipelineOrchestrator:
                 final_score=effective_scored.final_score,
                 rationale=effective_scored.rationale,
                 key_message=item_key_messages.get(item_id),
+                refined_segment=item_refined_segments.get(item_id),
             )
             stats["segments_scored"] = int(stats.get("segments_scored", 0)) + 1
 

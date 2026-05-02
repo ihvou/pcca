@@ -70,6 +70,7 @@ class SubjectRepository:
             SET description_text = COALESCE(NULLIF(?, ''), description_text),
                 description_embedding_json = NULL,
                 description_embedding_model = NULL,
+                description_embedding_text_hash = NULL,
                 description_embedding_updated_at = NULL
             WHERE id = ?
             """,
