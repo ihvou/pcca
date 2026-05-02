@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from pcca.collectors.base import CollectedItem, Collector
-from pcca.collectors.errors import SessionChallengedError
+from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.item_segments import ItemSegment, ItemSegmentRepository
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -257,6 +257,142 @@ class PipelineOrchestrator:
             fallback_rate,
         )
 
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        event: dict[str, Any],
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(event)
+        except Exception:
+            logger.exception("Pipeline progress callback failed event=%s", event)
+
+    def _not_found_recovery_candidates(self, source) -> list[str]:
+        metadata = source.metadata if isinstance(getattr(source, "metadata", None), dict) else {}
+        candidates: list[str] = []
+        for key in ("original_handle", "resolved_from", "raw_source", "source_url"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                candidates.append(value.strip())
+        current = str(source.account_or_channel_id or "").strip()
+        if current and not current.startswith("UC"):
+            candidates.append(current)
+        out: list[str] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate not in seen:
+                seen.add(candidate)
+                out.append(candidate)
+        return out
+
+    async def _attempt_not_found_recovery(
+        self,
+        *,
+        run_id: int,
+        source,
+        collector,
+        exc: SourceNotFoundError,
+        stats: dict,
+        metadata: dict,
+    ) -> bool:
+        resolver = getattr(collector, "resolve_source_identifier", None)
+        if source.platform != "youtube" or not callable(resolver):
+            return False
+        old_identifier = source.account_or_channel_id
+        for candidate in self._not_found_recovery_candidates(source):
+            try:
+                resolved_identifier = await resolver(candidate)
+            except Exception:
+                logger.info(
+                    "Source not-found re-resolution failed run_id=%s source_id=%s platform=%s candidate=%s",
+                    run_id,
+                    source.source_id,
+                    source.platform,
+                    candidate,
+                    exc_info=True,
+                )
+                continue
+            if (
+                not isinstance(resolved_identifier, str)
+                or not resolved_identifier.strip()
+                or resolved_identifier == old_identifier
+            ):
+                continue
+            resolved_identifier = resolved_identifier.strip()
+            await self.source_service.merge_source_metadata(
+                source_id=source.source_id,
+                values={
+                    "not_found_recovered_from": old_identifier,
+                    "not_found_recovered_via": candidate,
+                    "not_found_recovered_url": exc.current_url,
+                    "resolved_channel_id": resolved_identifier,
+                },
+            )
+            updated_source = await self.source_service.update_source_identifier(
+                source_id=source.source_id,
+                account_or_channel_id=resolved_identifier,
+            )
+            source.account_or_channel_id = resolved_identifier
+            if updated_source is not None:
+                source.source_id = updated_source.source_id
+            stats["sources_reresolved"] = int(stats.get("sources_reresolved", 0)) + 1
+            recovered = {
+                "source_id": source.source_id,
+                "platform": source.platform,
+                "old_identifier": old_identifier,
+                "new_identifier": resolved_identifier,
+                "candidate": candidate,
+            }
+            metadata.setdefault("sources_reresolved", []).append(recovered)
+            logger.info(
+                "Recovered source after not-found run_id=%s source_id=%s platform=%s old=%s new=%s candidate=%s",
+                run_id,
+                source.source_id,
+                source.platform,
+                old_identifier,
+                resolved_identifier,
+                candidate,
+            )
+            return True
+        return False
+
+    async def _mark_source_not_found(
+        self,
+        *,
+        run_id: int,
+        source,
+        exc: SourceNotFoundError,
+        stats: dict,
+        metadata: dict,
+    ) -> None:
+        stats["sources_not_found"] = int(stats.get("sources_not_found", 0)) + 1
+        detail = {
+            "source_id": source.source_id,
+            "platform": source.platform,
+            "identifier": source.account_or_channel_id,
+            "display_name": source.display_name,
+            "kind": exc.not_found_kind,
+            "url": exc.current_url,
+            "status_code": exc.status_code,
+        }
+        metadata.setdefault("sources_not_found", []).append(detail)
+        await self.source_service.mark_source_inactive(
+            source.source_id,
+            reason="channel_not_found" if source.platform == "youtube" else "source_not_found",
+            details=detail,
+        )
+        logger.warning(
+            "Source marked inactive after not-found run_id=%s source_id=%s platform=%s identifier=%s kind=%s url=%s",
+            run_id,
+            source.source_id,
+            source.platform,
+            source.account_or_channel_id,
+            exc.not_found_kind,
+            exc.current_url,
+        )
+
     async def _embedding_cold_cache_detail(
         self,
         *,
@@ -466,9 +602,11 @@ class PipelineOrchestrator:
         )
 
         batch_results = {}
+        batch_attempted = False
         batch_rerank = getattr(self.model_router, "rerank_batch", None) if self.model_router is not None else None
         shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding, _segment in shortlist_rows)
         if callable(batch_rerank) and shortlist_used_embedding and getattr(self.model_router, "enabled", True):
+            batch_attempted = True
             candidates = [
                 ModelRerankCandidate(
                     item_id=item_id,
@@ -499,7 +637,7 @@ class PipelineOrchestrator:
                 if key_message:
                     item_key_messages[item_id] = str(key_message)
                 stats["items_model_reranked"] += 1
-            elif self.model_router is not None and item_id in shortlist_ids and not batch_results:
+            elif self.model_router is not None and item_id in shortlist_ids and not batch_attempted:
                 rerank = await self.model_router.rerank(
                     subject_name=subject.name,
                     text=item.text or item.transcript_text or "",
@@ -752,13 +890,24 @@ class PipelineOrchestrator:
             "segments_scored_with_embedding": 0,
         }
 
-    async def rescore_existing_items(self, *, limit: int | None = None) -> dict:
+    async def rescore_existing_items(
+        self,
+        *,
+        limit: int | None = None,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         run_id = await self.run_log_repo.start_run("embedding_rescore")
         run_started_at = time.monotonic()
         stats = self._empty_scoring_stats()
-        metadata: dict[str, Any] = {"limit": limit}
+        metadata: dict[str, Any] = {
+            "limit": limit,
+            "subject_ids": sorted(subject_ids) if subject_ids is not None else None,
+        }
         try:
             subjects = await self.subject_service.list_subjects()
+            if subject_ids is not None:
+                subjects = [subject for subject in subjects if subject.id in subject_ids]
             item_rows = await self.item_repo.list_all_for_scoring(limit=limit)
             stats["subjects_seen"] = len(subjects)
             stats["items_seen"] = len(item_rows)
@@ -769,7 +918,27 @@ class PipelineOrchestrator:
                 len(item_rows),
                 self._scorer_mode(),
             )
-            for subject in subjects:
+            metadata["scoring_subjects"] = [subject.name for subject in subjects]
+            for subject_index, subject in enumerate(subjects, start=1):
+                event = {
+                    "kind": "scoring",
+                    "phase": "scoring",
+                    "run_id": run_id,
+                    "run_type": "embedding_rescore",
+                    "subject_index": subject_index,
+                    "subject_total": len(subjects),
+                    "subject_id": subject.id,
+                    "subject_name": subject.name,
+                }
+                stats.setdefault("scoring_progress_events", []).append(event)
+                logger.info(
+                    "Scoring progress run_id=%s run_type=embedding_rescore subject=%s subject_index=%d subject_total=%d",
+                    run_id,
+                    subject.name,
+                    subject_index,
+                    len(subjects),
+                )
+                self._emit_progress(progress_callback, event)
                 inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
                 await self._score_items_for_subject(
                     run_id=run_id,
@@ -853,6 +1022,8 @@ class PipelineOrchestrator:
             "items_updated": 0,
             "sources_crawled": 0,
             "sources_needing_reauth": 0,
+            "sources_not_found": 0,
+            "sources_reresolved": 0,
             "collector_errors": 0,
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
@@ -887,6 +1058,8 @@ class PipelineOrchestrator:
             "circuit_broken_reason": [],
             "circuit_broken_reasons_by_platform": {},
             "circuit_skipped": {},
+            "sources_not_found": [],
+            "sources_reresolved": [],
             "platform_filter": platform_filter,
             "embedding_degraded": False,
             "embedding_degraded_subjects": [],
@@ -1045,7 +1218,37 @@ class PipelineOrchestrator:
                             source.account_or_channel_id = resolved_identifier
                             if updated_source is not None:
                                 source.source_id = updated_source.source_id
-                    items = await collector.collect_from_source(source.account_or_channel_id)
+                    try:
+                        items = await collector.collect_from_source(source.account_or_channel_id)
+                    except SourceNotFoundError as exc:
+                        recovered = await self._attempt_not_found_recovery(
+                            run_id=run_id,
+                            source=source,
+                            collector=collector,
+                            exc=exc,
+                            stats=stats,
+                            metadata=metadata,
+                        )
+                        if not recovered:
+                            await self._mark_source_not_found(
+                                run_id=run_id,
+                                source=source,
+                                exc=exc,
+                                stats=stats,
+                                metadata=metadata,
+                            )
+                            continue
+                        try:
+                            items = await collector.collect_from_source(source.account_or_channel_id)
+                        except SourceNotFoundError as retry_exc:
+                            await self._mark_source_not_found(
+                                run_id=run_id,
+                                source=source,
+                                exc=retry_exc,
+                                stats=stats,
+                                metadata=metadata,
+                            )
+                            continue
                     for item in items:
                         item.metadata = {
                             **(item.metadata or {}),
@@ -1170,7 +1373,27 @@ class PipelineOrchestrator:
 
             if score:
                 changed_rows = list(changed_items.items())
-                for subject in subjects:
+                metadata["scoring_subjects"] = [subject.name for subject in subjects]
+                for subject_index, subject in enumerate(subjects, start=1):
+                    event = {
+                        "kind": "scoring",
+                        "phase": "scoring",
+                        "run_id": run_id,
+                        "run_type": "nightly_collection",
+                        "subject_index": subject_index,
+                        "subject_total": len(subjects),
+                        "subject_id": subject.id,
+                        "subject_name": subject.name,
+                    }
+                    stats.setdefault("scoring_progress_events", []).append(event)
+                    logger.info(
+                        "Scoring progress run_id=%s run_type=nightly_collection subject=%s subject_index=%d subject_total=%d",
+                        run_id,
+                        subject.name,
+                        subject_index,
+                        len(subjects),
+                    )
+                    self._emit_progress(progress_callback, event)
                     inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
                     unscored_rows = await self.item_repo.list_unscored_for_subject(subject_id=subject.id)
                     missing_segment_rows = await self.item_repo.list_missing_segment_scores_for_subject(

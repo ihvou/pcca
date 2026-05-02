@@ -13,7 +13,7 @@ import httpx
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
-from pcca.collectors.errors import SessionChallengedError
+from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
 from pcca.collectors.youtube_utils import extract_video_id
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 
@@ -378,6 +378,24 @@ class YouTubeCollector:
             feed_xml = await self._get_text(feed_url)
             parsed_channel_id, channel_name, raw_videos = parse_youtube_rss(feed_xml, max_items=self.max_items)
             channel_id = parsed_channel_id or channel_id
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+            if status_code == 404:
+                logger.warning(
+                    "YouTube RSS source not found source=%s feed_url=%s status=%s",
+                    source_id,
+                    feed_url,
+                    status_code,
+                )
+                raise SourceNotFoundError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=feed_url,
+                    not_found_kind="rss_404",
+                    status_code=status_code,
+                ) from exc
+            logger.exception("YouTube RSS collection failed for source=%s feed_url=%s", source_id, feed_url)
+            raise
         except Exception:
             logger.exception("YouTube RSS collection failed for source=%s feed_url=%s", source_id, feed_url)
             raise

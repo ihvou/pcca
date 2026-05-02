@@ -100,9 +100,12 @@ class HeadlineOnlyRenderer:
 class FakePipelineOrchestrator:
     def __init__(self) -> None:
         self.rescore_calls = 0
+        self.rescore_subject_ids: list[set[int] | None] = []
 
-    async def rescore_existing_items(self, *, limit=None):
+    async def rescore_existing_items(self, *, limit=None, subject_ids=None, progress_callback=None):
+        _ = progress_callback
         self.rescore_calls += 1
+        self.rescore_subject_ids.append(subject_ids)
         assert limit is None
         return {"items_scored": 1}
 
@@ -515,6 +518,7 @@ async def test_scheduled_morning_digest_runs_rescore_before_sending(tmp_path: Pa
     stats = await runner.run_morning_digest()
 
     assert fake_pipeline.rescore_calls == 1
+    assert fake_pipeline.rescore_subject_ids == [None]
     assert stats["pre_send_rescore"] == {"items_scored": 1}
     assert stats["deliveries_sent"] == 1
 
@@ -551,9 +555,10 @@ async def test_smart_briefs_rescores_before_sending(tmp_path: Path) -> None:
         digest_renderer=HeadlineOnlyRenderer(),
     )
 
-    stats = await runner.run_smart_briefs()
+    stats = await runner.run_smart_briefs(subject_ids={subject.id})
 
     assert fake_pipeline.rescore_calls == 1
+    assert fake_pipeline.rescore_subject_ids == [{subject.id}]
     assert stats["pre_send_rescore"] == {"items_scored": 1}
     assert stats["deliveries_sent"] == 1
 

@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from pcca.collectors.base import CollectedItem
-from pcca.collectors.errors import SessionChallengedError
+from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
 from pcca.db import Database
 from pcca.pipeline.orchestrator import PipelineOrchestrator
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -134,6 +134,58 @@ class ResolvingCollector(DummyRSSCollector):
         ]
 
 
+class YouTubeNotFoundThenResolvedCollector:
+    platform = "youtube"
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[str] = []
+        self.collect_calls: list[str] = []
+
+    async def resolve_source_identifier(self, source_id: str) -> str:
+        self.resolve_calls.append(source_id)
+        return "UCNEW" if source_id == "@openai" else source_id
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.collect_calls.append(source_id)
+        if source_id == "UCOLD":
+            raise SourceNotFoundError(
+                platform="youtube",
+                source_id=source_id,
+                current_url="https://www.youtube.com/feeds/videos.xml?channel_id=UCOLD",
+                not_found_kind="rss_404",
+                status_code=404,
+            )
+        return [
+            CollectedItem(
+                platform="youtube",
+                external_id="video-1",
+                author="OpenAI",
+                url="https://www.youtube.com/watch?v=video-1",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+
+
+class YouTubeAlwaysNotFoundCollector:
+    platform = "youtube"
+
+    def __init__(self) -> None:
+        self.collect_calls: list[str] = []
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.collect_calls.append(source_id)
+        raise SourceNotFoundError(
+            platform="youtube",
+            source_id=source_id,
+            current_url=f"https://www.youtube.com/feeds/videos.xml?channel_id={source_id}",
+            not_found_kind="rss_404",
+            status_code=404,
+        )
+
+
 class FakeModelRouter:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -204,6 +256,24 @@ class FakeBatchModelRouter:
 
     async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
         raise AssertionError("embedding path should use batch rerank")
+
+
+class EmptyBatchModelRouter:
+    enabled = True
+
+    def __init__(self) -> None:
+        self.batch_calls = 0
+        self.single_calls = 0
+
+    async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+        _ = subject_name, subject_description, candidates
+        self.batch_calls += 1
+        return {}
+
+    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
+        _ = subject_name, text, heuristic_score
+        self.single_calls += 1
+        raise AssertionError("single-item rerank should not run after an attempted batch rerank")
 
 
 class ChallengedCollector:
@@ -660,6 +730,89 @@ async def test_pipeline_can_scope_collection_to_one_platform(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_pipeline_reresolves_youtube_source_after_rss_404(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["claude code"])
+    await source_service.monitor_source(platform="youtube", account_or_channel_id="UCOLD", display_name="OpenAI")
+    source = await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCOLD")
+    assert source is not None
+    await source_service.merge_source_metadata(source_id=source.id, values={"resolved_from": "@openai"})
+
+    collector = YouTubeNotFoundThenResolvedCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"youtube": collector},
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="youtube")
+
+    assert collector.resolve_calls == ["UCOLD", "@openai"]
+    assert collector.collect_calls == ["UCOLD", "UCNEW"]
+    assert stats["sources_reresolved"] == 1
+    assert stats["sources_not_found"] == 0
+    assert stats["items_collected"] == 1
+    assert await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCOLD") is None
+    updated = await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCNEW")
+    assert updated is not None
+    assert updated.follow_state == "active"
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_marks_youtube_rss_404_inactive_without_reauth_or_circuit(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["claude code"])
+    await source_service.monitor_source(platform="youtube", account_or_channel_id="UCDEAD", display_name="Dead Channel")
+
+    collector = YouTubeAlwaysNotFoundCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"youtube": collector},
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="youtube")
+
+    assert stats["sources_not_found"] == 1
+    assert stats["sources_needing_reauth"] == 0
+    assert stats["collector_errors"] == 0
+    assert stats["circuit_broken"] == []
+    source = await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCDEAD")
+    assert source is not None
+    assert source.follow_state == "inactive"
+    assert source.metadata["inactive_reason"] == "channel_not_found"
+    assert await source_service.list_monitored_sources() == []
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_pipeline_collects_source_once_and_scores_for_all_subjects(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
@@ -696,6 +849,55 @@ async def test_pipeline_collects_source_once_and_scores_for_all_subjects(tmp_pat
     assert stats["items_scored"] == 2
     score_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")).fetchone()
     assert int(score_count["c"]) == 2
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_scoring_progress_events(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    events: list[dict] = []
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": CountingCollector()},
+    )
+
+    stats = await orchestrator.run_nightly_collection(progress_callback=events.append)
+
+    scoring_events = [event for event in events if event.get("kind") == "scoring"]
+    assert scoring_events == [
+        {
+            "kind": "scoring",
+            "phase": "scoring",
+            "run_id": 1,
+            "run_type": "nightly_collection",
+            "subject_index": 1,
+            "subject_total": 1,
+            "subject_id": 1,
+            "subject_name": "Vibe Coding",
+        }
+    ]
+    assert stats["scoring_progress_events"] == scoring_events
 
     await db.close()
 
@@ -988,6 +1190,131 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
     assert "Include:" not in model_router.batch_calls[0]["subject_description"]
     assert "Avoid:" not in model_router.batch_calls[0]["subject_description"]
     assert model_router.batch_calls[0]["candidate_count"] == 3
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_fall_back_to_serial_rerank_after_empty_batch(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "AI Tools & Tips",
+        include_terms=["claude"],
+        description_text="Practical AI agent updates and Claude Code workflow details.",
+    )
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    class AICollector:
+        platform = "rss"
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            return [
+                CollectedItem(
+                    platform="rss",
+                    external_id=f"ai-empty-batch-{idx}",
+                    author="Anthropic",
+                    url=f"https://example.com/ai-empty-batch-{idx}",
+                    text=f"Claude Code agent workflow implementation detail {idx}",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                )
+                for idx in range(2)
+            ]
+
+    model_router = EmptyBatchModelRouter()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        model_router=model_router,  # type: ignore[arg-type]
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": AICollector()},
+        scorer="both",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    assert stats["model_batch_rerank_calls"] == 1
+    assert stats["items_model_reranked"] == 0
+    assert model_router.batch_calls == 1
+    assert model_router.single_calls == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_rescore_existing_items_can_scope_to_subject_ids(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    subject_a = await subject_service.create_subject("Subject A", include_terms=["claude"])
+    subject_b = await subject_service.create_subject("Subject B", include_terms=["ukraine"])
+
+    item_repo = ItemRepository(conn=db.conn)
+    stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="shared",
+                author="Author",
+                url="https://example.com/shared",
+                text="Claude Code workflow detail and Ukraine update.",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+    )
+    item_id = stats["item_ids"][0]
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={},
+    )
+
+    events: list[dict] = []
+    rescore_stats = await orchestrator.rescore_existing_items(
+        subject_ids={subject_b.id},
+        progress_callback=events.append,
+    )
+    score_rows = await (
+        await db.conn.execute(
+            "SELECT subject_id FROM item_scores WHERE item_id = ? ORDER BY subject_id",
+            (item_id,),
+        )
+    ).fetchall()
+
+    assert rescore_stats["subjects_seen"] == 1
+    assert events[0]["kind"] == "scoring"
+    assert events[0]["subject_name"] == "Subject B"
+    assert events[0]["subject_total"] == 1
+    assert [int(row["subject_id"]) for row in score_rows] == [subject_b.id]
+    assert subject_a.id not in {int(row["subject_id"]) for row in score_rows}
 
     await db.close()
 

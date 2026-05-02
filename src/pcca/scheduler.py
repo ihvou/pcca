@@ -5,6 +5,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -90,6 +91,7 @@ class JobRunner:
         force_rebuild: bool = False,
         smart: bool = False,
         subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         started_at = time.monotonic()
         run_id = await self.run_log_repo.start_run(run_type) if self.run_log_repo is not None else None
@@ -121,8 +123,16 @@ class JobRunner:
                 sorted(subject_ids) if subject_ids is not None else None,
             )
             if run_type in {"morning_digest", "briefs"} and self.pipeline_orchestrator is not None:
-                logger.info("Brief pre-send rescore started run_id=%s run_type=%s.", run_id, run_type)
-                rescore_stats = await self.pipeline_orchestrator.rescore_existing_items()
+                logger.info(
+                    "Brief pre-send rescore started run_id=%s run_type=%s subject_ids=%s.",
+                    run_id,
+                    run_type,
+                    sorted(subject_ids) if subject_ids is not None else None,
+                )
+                rescore_stats = await self.pipeline_orchestrator.rescore_existing_items(
+                    subject_ids=subject_ids,
+                    progress_callback=progress_callback,
+                )
                 stats["pre_send_rescore"] = rescore_stats
                 logger.info(
                     "Brief pre-send rescore finished run_id=%s run_type=%s stats=%s",
@@ -422,11 +432,17 @@ class JobRunner:
             subject_ids=subject_ids,
         )
 
-    async def run_smart_briefs(self, *, subject_ids: set[int] | None = None) -> dict:
+    async def run_smart_briefs(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         return await self.run_morning_digest(
             run_type="briefs",
             smart=True,
             subject_ids=subject_ids,
+            progress_callback=progress_callback,
         )
 
 

@@ -13,6 +13,7 @@ from pcca.collectors.youtube_collector import (
     parse_youtube_rss,
     youtube_rss_url,
 )
+from pcca.collectors.errors import SourceNotFoundError
 from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
 from pcca.services.youtube_transcript_service import TranscriptResult
 
@@ -99,6 +100,30 @@ async def test_youtube_collector_uses_rss_without_browser() -> None:
     assert items[0].author == "OpenAI"
     assert items[0].published_at == "2026-04-28T10:00:00+00:00"
     assert items[0].metadata["view_count"] == 12345
+
+
+@pytest.mark.asyncio
+async def test_youtube_collector_raises_source_not_found_for_rss_404() -> None:
+    class NoTranscript:
+        async def get_transcript_text(self, _video_id: str):
+            return None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == youtube_rss_url(SAMPLE_CHANNEL_ID)
+        return httpx.Response(404, text="Not Found")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = YouTubeCollector(
+            transcript_service=NoTranscript(),  # type: ignore[arg-type]
+            http_client=client,
+            max_items=5,
+        )
+        with pytest.raises(SourceNotFoundError) as exc_info:
+            await collector.collect_from_source(SAMPLE_CHANNEL_ID)
+
+    assert exc_info.value.platform == "youtube"
+    assert exc_info.value.not_found_kind == "rss_404"
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio

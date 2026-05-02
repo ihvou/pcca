@@ -126,6 +126,7 @@ INDEX_HTML = r"""
               <button class="primary" onclick="postAction('/api/agent/start')">Start</button>
               <button class="secondary" onclick="postAction('/api/agent/stop')">Stop</button>
             </div>
+            <div id="useStatus" class="notice" style="display:none; margin-top:12px"></div>
           </div>
           <div class="card">
             <h2>Subjects</h2>
@@ -189,7 +190,7 @@ INDEX_HTML = r"""
             <h2>Source List</h2>
             <div class="split">
               <label>Filter platform <select id="sourceFilter" onchange="renderSources(lastState)"><option value="">All</option></select></label>
-              <label>Status <select id="statusFilter" onchange="renderSources(lastState)"><option value="">All</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="removed">Removed</option></select></label>
+              <label>Status <select id="statusFilter" onchange="renderSources(lastState)"><option value="">All</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="removed">Removed</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="needs_reauth">Needs re-login</option></select></label>
             </div>
             <div class="actions" style="margin-top:10px"><button class="secondary" onclick="monitorSources()">Monitor Pending Sources</button></div>
             <div class="list" id="sourcesBox" style="margin-top:12px"></div>
@@ -544,13 +545,19 @@ function renderSources(state) {
   if (!state) return;
   const platformValue = sourceFilter.value;
   const statusValue = statusFilter.value;
-  const rows = (state.staged_sources || []).filter(r => (!platformValue || r.platform === platformValue) && (!statusValue || r.status === statusValue));
+  const stagedRows = (state.staged_sources || []).map(r => ({...r, source_kind: 'staged', effective_status: r.status || 'pending'}));
+  const monitoredRows = (state.monitored_sources || []).map(r => ({...r, source_kind: 'monitored', effective_status: r.follow_state || 'active'}));
+  const rows = [...stagedRows, ...monitoredRows].filter(r => (!platformValue || r.platform === platformValue) && (!statusValue || r.effective_status === statusValue));
   sourcesBox.innerHTML = rows.length ? '' : '<div class="notice">No sources match this filter yet.</div>';
   for (const row of rows) {
     const div = document.createElement('div');
     div.className = 'row';
-    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.status}</small><small>${row.account_or_channel_id}</small></div><div class="actions"></div>`;
-    if (row.status === 'pending') {
+    const inactiveReason = row.metadata && row.metadata.inactive_reason ? ` · ${row.metadata.inactive_reason}` : '';
+    const hint = row.effective_status === 'inactive'
+      ? '<small>Channel not found. Re-run Get Sources to re-add it, or leave it inactive so collection skips it.</small>'
+      : '';
+    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.source_kind} · ${row.effective_status}${inactiveReason}</small><small>${row.account_or_channel_id}</small>${hint}</div><div class="actions"></div>`;
+    if (row.source_kind === 'staged' && row.status === 'pending') {
       const btn = document.createElement('button');
       btn.className = 'secondary';
       btn.textContent = 'Remove';
@@ -606,6 +613,9 @@ function updateActionControls(state) {
   const stageRunning = actionRunning(state, 'stage_follows');
   const backfillRunning = actionRunning(state, 'embedding_backfill');
   const rebuildAllRulesRunning = actionRunning(state, 'rebuild_all_subject_rules');
+  const briefsRunning = actionRunning(state, 'get_briefs');
+  if (briefsRunning) notice('useStatus', `Running: ${briefsRunning.label} (started ${String(briefsRunning.started_at || '').slice(11, 16) || 'now'}).`, '');
+  else notice('useStatus', '', '');
   if (readButton) {
     readButton.textContent = readRunning ? `Running: ${readRunning.label}` : `Get Content (${platformLabel(selectedPlatform)})`;
     readButton.disabled = busy || Boolean(readRunning);
@@ -667,6 +677,8 @@ async function loadState(options={}) {
     const failures = [];
     if (s.telegram_token_missing) failures.push(s.telegram_status);
     if ((data.reauth_sources || []).length) failures.push(`${data.reauth_sources.length} source(s) need re-login.`);
+    const inactiveSources = (data.monitored_sources || []).filter(source => source.follow_state === 'inactive');
+    if (inactiveSources.length) failures.push(`${inactiveSources.length} source(s) are inactive, usually because a public feed/channel was not found. Check Sources.`);
     if ((data.circuit_broken || []).length) {
       const reasons = data.circuit_broken_reasons_by_platform || {};
       const paused = (data.circuit_broken || []).map(platform => `${platform} (${reasons[platform] || 'bot_shaped'})`).join(', ');

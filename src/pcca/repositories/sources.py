@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import aiosqlite
@@ -16,6 +16,7 @@ class SourceRow:
     follow_state: str
     last_crawled_at: str | None
     is_monitored: bool = True
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -29,11 +30,23 @@ class SubjectSourceRow:
     last_crawled_at: str | None
     follow_state: str = "active"
     is_monitored: bool = True
+    metadata: dict = field(default_factory=dict)
 
 
 @dataclass
 class SourceRepository:
     conn: aiosqlite.Connection
+
+    def _metadata(self, row) -> dict:
+        try:
+            raw = row["metadata_json"] if "metadata_json" in row.keys() else "{}"
+        except Exception:
+            raw = "{}"
+        try:
+            metadata = json.loads(raw or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        return metadata if isinstance(metadata, dict) else {}
 
     def _source_row(self, row) -> SourceRow:
         return SourceRow(
@@ -44,6 +57,7 @@ class SourceRepository:
             follow_state=row["follow_state"],
             last_crawled_at=row["last_crawled_at"],
             is_monitored=bool(row["is_monitored"]),
+            metadata=self._metadata(row),
         )
 
     def _subject_source_row(self, row) -> SubjectSourceRow:
@@ -57,13 +71,15 @@ class SourceRepository:
             last_crawled_at=row["last_crawled_at"],
             follow_state=row["follow_state"],
             is_monitored=bool(row["is_monitored"]),
+            metadata=self._metadata(row),
         )
 
     async def get_by_identity(self, *, platform: str, account_or_channel_id: str) -> SourceRow | None:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 WHERE platform = ? AND account_or_channel_id = ?
                 """,
@@ -85,7 +101,8 @@ class SourceRepository:
         existing = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 WHERE platform = ? AND account_or_channel_id = ?
                 """,
@@ -106,7 +123,8 @@ class SourceRepository:
             refreshed = await (
                 await self.conn.execute(
                     """
-                    SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                    SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                           last_crawled_at, is_monitored, metadata_json
                     FROM sources
                     WHERE id = ?
                     """,
@@ -127,7 +145,8 @@ class SourceRepository:
         created = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 WHERE id = ?
                 """,
@@ -157,7 +176,8 @@ class SourceRepository:
         current = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 WHERE id = ?
                 """,
@@ -203,7 +223,8 @@ class SourceRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, platform, account_or_channel_id, display_name, follow_state, last_crawled_at, is_monitored
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 WHERE id = ?
                 """,
@@ -289,6 +310,39 @@ class SourceRepository:
         )
         await self.conn.commit()
 
+    async def mark_inactive(self, source_id: int, *, reason: str, details: dict | None = None) -> None:
+        metadata = await self.merge_metadata(
+            source_id,
+            {
+                "inactive_reason": reason,
+                "inactive_details": details or {},
+                "inactive_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        _ = metadata
+        await self.conn.execute(
+            """
+            UPDATE sources
+            SET follow_state = 'inactive'
+            WHERE id = ?
+            """,
+            (source_id,),
+        )
+        await self.conn.commit()
+
+    async def list_all(self) -> list[SourceRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
+                FROM sources
+                ORDER BY platform ASC, display_name ASC
+                """
+            )
+        ).fetchall()
+        return [self._source_row(row) for row in rows]
+
     async def mark_platform_active(self, platform: str) -> int:
         cursor = await self.conn.execute(
             """
@@ -331,7 +385,8 @@ class SourceRepository:
                   'active' AS status,
                   s.last_crawled_at,
                   s.follow_state,
-                  s.is_monitored
+                  s.is_monitored,
+                  s.metadata_json
                 FROM sources s
                 WHERE s.is_monitored = 1
                   {state_filter}
@@ -354,7 +409,8 @@ class SourceRepository:
                   COALESCE(ss.status, 'active') AS status,
                   s.last_crawled_at,
                   s.follow_state,
-                  s.is_monitored
+                  s.is_monitored,
+                  s.metadata_json
                 FROM sources s
                 LEFT JOIN subject_sources ss
                   ON ss.source_id = s.id
@@ -382,7 +438,8 @@ class SourceRepository:
                   ss.status AS status,
                   s.last_crawled_at,
                   s.follow_state,
-                  s.is_monitored
+                  s.is_monitored,
+                  s.metadata_json
                 FROM subject_sources ss
                 JOIN sources s ON s.id = ss.source_id
                 WHERE ss.subject_id = ?

@@ -262,7 +262,10 @@ class PCCAApp:
         )
         rescore_stats = {}
         if rescore and backfill_stats.get("enabled"):
-            rescore_stats = await self.pipeline_orchestrator.rescore_existing_items(limit=limit)
+            rescore_stats = await self.pipeline_orchestrator.rescore_existing_items(
+                limit=limit,
+                progress_callback=progress_callback,
+            )
         return {"backfill": backfill_stats, "rescore": rescore_stats}
 
     async def run_embedding_backfill_once(
@@ -293,11 +296,19 @@ class PCCAApp:
         finally:
             await self.stop()
 
-    async def run_briefs_once(self, *, subject_ids: set[int] | None = None) -> dict:
+    async def run_briefs_once(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)
         try:
-            stats = await self.scheduler.job_runner.run_smart_briefs(subject_ids=subject_ids)
+            stats = await self.scheduler.job_runner.run_smart_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
             logger.info("PCCA one-shot Briefs finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
             return stats
         finally:

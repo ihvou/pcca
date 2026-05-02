@@ -314,6 +314,7 @@ class DesktopCommandService:
             routes = await routing_service.list_all_routes()
             chats = await routing_service.list_registered_chats()
             reauth_sources = await source_service.list_sources_needing_reauth()
+            monitored_sources = await source_service.list_all_sources()
             run_log_rows = await (
                 await db.conn.execute(
                     """
@@ -413,6 +414,7 @@ class DesktopCommandService:
                     "completed_at": state.completed_at,
                 },
                 "staged_sources": [asdict(row) for row in staged],
+                "monitored_sources": [asdict(row) for row in monitored_sources],
                 "staged_counts": staged_counts,
                 "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
@@ -1207,6 +1209,18 @@ class DesktopCommandService:
                         "Reading content phase: embedding "
                         f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}"
                     )
+                elif event.get("kind") == "scoring":
+                    self._set_inflight_label(
+                        key="read_content",
+                        label=(
+                            f"Get Content: scoring {event.get('subject_name')} "
+                            f"({event.get('subject_index')}/{event.get('subject_total')})"
+                        ),
+                    )
+                    self.log(
+                        "Reading content phase: scoring "
+                        f"{event.get('subject_name')} ({event.get('subject_index')}/{event.get('subject_total')})"
+                    )
 
             if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
                 runner_method = self._agent_app.pipeline_orchestrator.run_nightly_collection
@@ -1276,6 +1290,19 @@ class DesktopCommandService:
             )
 
             def progress(event: dict[str, Any]) -> None:
+                if event.get("kind") == "scoring":
+                    self._set_inflight_label(
+                        key="embedding_backfill",
+                        label=(
+                            f"Backfill Embeddings: scoring {event.get('subject_name')} "
+                            f"({event.get('subject_index')}/{event.get('subject_total')})"
+                        ),
+                    )
+                else:
+                    self._set_inflight_label(
+                        key="embedding_backfill",
+                        label=f"Backfill Embeddings: {event.get('kind')} {event.get('processed')}/{event.get('total')}",
+                    )
                 self.log(
                     "Embedding backfill "
                     f"{event.get('kind')}: {event.get('processed')}/{event.get('total')}"
@@ -1319,7 +1346,26 @@ class DesktopCommandService:
         async def runner() -> CommandResult:
             subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
             self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
-            stats = await self._run_briefs_with_available_agent(subject_ids=subject_ids)
+
+            def progress(event: dict[str, Any]) -> None:
+                if event.get("kind") != "scoring":
+                    return
+                self._set_inflight_label(
+                    key="get_briefs",
+                    label=(
+                        f"Get Briefs: scoring {event.get('subject_name')} "
+                        f"({event.get('subject_index')}/{event.get('subject_total')})"
+                    ),
+                )
+                self.log(
+                    "Briefs phase: scoring "
+                    f"{event.get('subject_name')} ({event.get('subject_index')}/{event.get('subject_total')})"
+                )
+
+            stats = await self._run_briefs_with_available_agent(
+                subject_ids=subject_ids,
+                progress_callback=progress,
+            )
             self.log(f"Briefs finished: {json.dumps(stats or {}, sort_keys=True)}")
             return CommandResult(
                 True,
@@ -1339,13 +1385,21 @@ class DesktopCommandService:
             {"digest_stats": stats or {}},
         )
 
-    async def _run_briefs_with_available_agent(self, *, subject_ids: set[int] | None = None) -> dict:
+    async def _run_briefs_with_available_agent(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
             self.log("Using running local agent for Brief delivery.")
-            return await self._agent_app.scheduler.job_runner.run_smart_briefs(subject_ids=subject_ids)
+            return await self._agent_app.scheduler.job_runner.run_smart_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
         self.log("Local agent is unavailable; starting one-shot Brief delivery.")
         app = PCCAApp(settings=self.settings())
-        return await app.run_briefs_once(subject_ids=subject_ids)
+        return await app.run_briefs_once(subject_ids=subject_ids, progress_callback=progress_callback)
 
     async def _rebuild_briefs_with_available_agent(self) -> dict:
         if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):

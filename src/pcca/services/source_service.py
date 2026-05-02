@@ -77,6 +77,9 @@ class SourceService:
     async def list_monitored_sources(self) -> list[SubjectSourceRow]:
         return await self.source_repo.list_monitored(active_only=True)
 
+    async def list_all_sources(self):
+        return await self.source_repo.list_all()
+
     async def list_inactive_source_ids_for_subject(self, subject_id: int) -> set[int]:
         return await self.source_repo.list_inactive_source_ids_for_subject(subject_id)
 
@@ -118,3 +121,12 @@ class SourceService:
 
     async def mark_source_needs_reauth(self, source_id: int) -> None:
         await self.source_repo.mark_needs_reauth(source_id)
+
+    async def mark_source_inactive(
+        self,
+        source_id: int,
+        *,
+        reason: str,
+        details: dict | None = None,
+    ) -> None:
+        await self.source_repo.mark_inactive(source_id, reason=reason, details=details)
