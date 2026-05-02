@@ -244,7 +244,10 @@ def _brief_short_text(candidate: CandidateItem, *, subject_hashtag: str, run_dat
     url = _brief_url(candidate)
     if url:
         parts.append(_markdown_link(url))
-    parts.extend(["", subject_hashtag])
+    # T-104 hashtag must be MarkdownV2-escaped: `#` is reserved. Telegram's
+    # hashtag detector runs after MarkdownV2 parsing, so `\#word` still
+    # renders as a clickable `#word`.
+    parts.extend(["", escape_markdown_v2(subject_hashtag)])
     return "\n".join(part for part in parts if part is not None)
 
 

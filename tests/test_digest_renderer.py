@@ -31,6 +31,63 @@ def test_platform_icon_mapping(platform: str, icon: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_renderer_escapes_hashtag_for_markdown_v2() -> None:
+    """Regression: hashtag must be MarkdownV2-escaped or every Brief send returns
+    HTTP 400 'character #' is reserved'. T-107 — see live failure logged
+    2026-05-02 12:09:56 against subject AI PM Success Stories item 18."""
+    subject = Subject(
+        id=1,
+        name="AI PM Success Stories",
+        telegram_thread_id=None,
+        status="active",
+        created_at="2026-04-29 00:00:00",
+    )
+    candidate = CandidateItem(
+        item_id=1,
+        title_or_text="Cat Wu - How Anthropic moves faster",
+        url="https://www.youtube.com/watch?v=abc123",
+        author="Lenny's Podcast",
+        published_at="2026-04-30",
+        final_score=0.88,
+        rationale="matched segment",
+        platform="youtube",
+        segment_id=10,
+        segment_text="Anthropic's PM team uses Claude on every workflow.",
+        segment_start_seconds=42.0,
+        segment_end_seconds=120.0,
+        metadata={"duration_seconds": 1800},
+        key_message="Anthropic PMs use Claude for scoping and review on every task.",
+    )
+
+    payload = await TelegramDigestRenderer().render(
+        subject=subject,
+        ranked_items=[candidate],
+        context=DigestRenderContext(
+            digest_id=1,
+            run_date=__import__("datetime").date(2026, 5, 2),
+            create_button_token=_token_factory,
+        ),
+    )
+
+    brief = payload.briefs[0]
+    # Hashtag must appear escaped: \#AIPMSuccessStories — the backslash before
+    # # is what makes the message MarkdownV2-valid. Telegram's hashtag detector
+    # still recognizes \#word as a clickable hashtag after MarkdownV2 parsing.
+    assert "\\#AIPMSuccessStories" in brief.short_text
+    # No unescaped `#` should ever appear (except inside escaped sequences).
+    # Strip the literal `\#` occurrences and assert no bare `#` remains.
+    cleaned = brief.short_text.replace("\\#", "")
+    assert "#" not in cleaned, (
+        f"Unescaped # in short_text would break MarkdownV2 send: {brief.short_text!r}"
+    )
+    # Same check for full_text.
+    full_cleaned = brief.full_text.replace("\\#", "")
+    assert "#" not in full_cleaned, (
+        f"Unescaped # in full_text would break MarkdownV2 send: {brief.full_text!r}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_telegram_renderer_uses_per_subject_full_text_cap() -> None:
     subject = Subject(
         id=1,
