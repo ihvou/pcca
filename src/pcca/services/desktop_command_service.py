@@ -1221,6 +1221,15 @@ class DesktopCommandService:
                         "Reading content phase: scoring "
                         f"{event.get('subject_name')} ({event.get('subject_index')}/{event.get('subject_total')})"
                     )
+                elif event.get("kind") == "embedding_not_warmed":
+                    self._set_inflight_label(
+                        key="read_content",
+                        label=f"Get Content: embeddings not warmed for {event.get('subject_name')}; using keyword fallback",
+                    )
+                    self.log(
+                        "Reading content warning: embeddings not warmed "
+                        f"for {event.get('subject_name')} missing_rate={event.get('missing_rate')}"
+                    )
 
             if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "pipeline_orchestrator"):
                 runner_method = self._agent_app.pipeline_orchestrator.run_nightly_collection
@@ -1298,6 +1307,11 @@ class DesktopCommandService:
                             f"({event.get('subject_index')}/{event.get('subject_total')})"
                         ),
                     )
+                elif event.get("kind") == "embedding_not_warmed":
+                    self._set_inflight_label(
+                        key="embedding_backfill",
+                        label=f"Backfill Embeddings: embeddings not warmed for {event.get('subject_name')}; using keyword fallback",
+                    )
                 else:
                     self._set_inflight_label(
                         key="embedding_backfill",
@@ -1348,6 +1362,16 @@ class DesktopCommandService:
             self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
 
             def progress(event: dict[str, Any]) -> None:
+                if event.get("kind") == "embedding_not_warmed":
+                    self._set_inflight_label(
+                        key="get_briefs",
+                        label=f"Get Briefs: embeddings not warmed for {event.get('subject_name')}; using keyword fallback",
+                    )
+                    self.log(
+                        "Briefs warning: embeddings not warmed "
+                        f"for {event.get('subject_name')} missing_rate={event.get('missing_rate')}"
+                    )
+                    return
                 if event.get("kind") != "scoring":
                     return
                 self._set_inflight_label(

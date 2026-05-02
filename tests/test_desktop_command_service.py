@@ -596,3 +596,38 @@ async def test_desktop_read_content_guard_rejects_concurrent_runs(tmp_path: Path
             await service._agent_task
         except asyncio.CancelledError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_desktop_get_briefs_logs_cold_cache_progress_warning(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    class FakeRunner:
+        async def run_smart_briefs(self, *, subject_ids=None, progress_callback=None):
+            assert subject_ids == {3}
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "kind": "embedding_not_warmed",
+                        "subject_id": 3,
+                        "subject_name": "AI Tools",
+                        "missing_rate": 1.0,
+                    }
+                )
+            return {"deliveries_sent": 0}
+
+    fake_scheduler = type("FakeScheduler", (), {"job_runner": FakeRunner()})()
+    service._agent_app = type("FakeApp", (), {"scheduler": fake_scheduler})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        result = await service.get_briefs(subject_id=3)
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+    assert result.ok is True
+    assert any("Briefs warning: embeddings not warmed for AI Tools" in line for line in service.logs)

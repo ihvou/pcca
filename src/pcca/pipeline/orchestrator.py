@@ -449,6 +449,7 @@ class PipelineOrchestrator:
         item_rows: list[tuple[int, CollectedItem]],
         inactive_source_ids: set[int],
         stats: dict,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         if not item_rows:
             return
@@ -458,6 +459,17 @@ class PipelineOrchestrator:
         if cold_cache_detail is not None:
             stats["embedding_not_warmed"] = True
             stats.setdefault("embedding_not_warmed_subjects", []).append(cold_cache_detail)
+            self._emit_progress(
+                progress_callback,
+                {
+                    "kind": "embedding_not_warmed",
+                    "phase": "scoring",
+                    "run_id": run_id,
+                    "subject_id": subject.id,
+                    "subject_name": subject.name,
+                    **cold_cache_detail,
+                },
+            )
             logger.warning(
                 "Embedding cache is not warmed enough for scoring; using keyword fallback run_id=%s subject=%s sampled=%d missing=%d missing_rate=%.3f",
                 run_id,
@@ -946,6 +958,7 @@ class PipelineOrchestrator:
                     item_rows=item_rows,
                     inactive_source_ids=inactive_source_ids,
                     stats=stats,
+                    progress_callback=progress_callback,
                 )
             self._copy_embedding_degradation_metadata(stats, metadata)
             await self.run_log_repo.finish_run(run_id, status="success", stats=stats, metadata=metadata)
@@ -1414,6 +1427,7 @@ class PipelineOrchestrator:
                         item_rows=rows_to_score,
                         inactive_source_ids=inactive_source_ids,
                         stats=stats,
+                        progress_callback=progress_callback,
                     )
             else:
                 stats["scoring_skipped"] = True

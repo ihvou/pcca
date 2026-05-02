@@ -8,6 +8,7 @@ import pytest
 
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
+from pcca.config import Settings
 from pcca.db import Database
 from pcca.pipeline.orchestrator import PipelineOrchestrator
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -184,6 +185,42 @@ class YouTubeAlwaysNotFoundCollector:
             not_found_kind="rss_404",
             status_code=404,
         )
+
+
+class MixedYouTubeNotFoundCollector:
+    platform = "youtube"
+
+    def __init__(self) -> None:
+        self.resolve_calls: list[str] = []
+        self.collect_calls: list[str] = []
+        self.dead_ids = {"UCOLD1", "UCDEAD2", "UCDEAD3", "UCDEAD4", "UCDEAD5"}
+
+    async def resolve_source_identifier(self, source_id: str) -> str:
+        self.resolve_calls.append(source_id)
+        return "UCNEW1" if source_id == "@good" else source_id
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        self.collect_calls.append(source_id)
+        if source_id in self.dead_ids:
+            raise SourceNotFoundError(
+                platform="youtube",
+                source_id=source_id,
+                current_url=f"https://www.youtube.com/feeds/videos.xml?channel_id={source_id}",
+                not_found_kind="rss_404",
+                status_code=404,
+            )
+        return [
+            CollectedItem(
+                platform="youtube",
+                external_id=f"{source_id}-video",
+                author="OpenAI",
+                url=f"https://www.youtube.com/watch?v={source_id}",
+                text="Claude Code workflow feature release with implementation steps",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
 
 
 class FakeModelRouter:
@@ -595,7 +632,90 @@ async def test_pipeline_runtime_lock_rejects_overlapping_collection(tmp_path: Pa
                 await first
             except asyncio.CancelledError:
                 pass
-        await db.close()
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_run_nightly_once_no_backfill_skips_embed(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+    item_repo = ItemRepository(conn=db.conn)
+    embedding_service = FakeEmbeddingService()
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=embedding_service,  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+        auto_backfill_embeddings=True,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss", auto_backfill=False, score=False)
+
+    assert stats["auto_backfill_enabled"] is False
+    assert stats["embedding_backfill"] == {}
+    assert embedding_service.calls == []
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pcca_auto_backfill_env_false_disables_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PCCA_AUTO_BACKFILL", "false")
+    settings = Settings.from_env()
+
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+    embedding_service = FakeEmbeddingService()
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=embedding_service,  # type: ignore[arg-type]
+        collectors={"rss": DummyRSSCollector()},
+        scorer="embedding",
+        auto_backfill_embeddings=settings.auto_backfill_embeddings,
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="rss", score=False)
+
+    assert settings.auto_backfill_embeddings is False
+    assert stats["auto_backfill_enabled"] is False
+    assert stats["embedding_backfill"] == {}
+    assert embedding_service.calls == []
+
+    await db.close()
 
 
 @pytest.mark.asyncio
@@ -808,6 +928,60 @@ async def test_pipeline_marks_youtube_rss_404_inactive_without_reauth_or_circuit
     assert source.follow_state == "inactive"
     assert source.metadata["inactive_reason"] == "channel_not_found"
     assert await source_service.list_monitored_sources() == []
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_handles_mixed_youtube_rss_404_run_without_session_repair_or_circuit(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    for source_id in ("UCOLD1", "UCDEAD2", "UCDEAD3", "UCDEAD4", "UCDEAD5", "UCOK6", "UCOK7"):
+        await source_service.monitor_source(
+            platform="youtube",
+            account_or_channel_id=source_id,
+            display_name=source_id,
+        )
+    old_source = await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCOLD1")
+    assert old_source is not None
+    await source_service.merge_source_metadata(source_id=old_source.id, values={"resolved_from": "@good"})
+
+    collector = MixedYouTubeNotFoundCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=SubjectService(repository=subject_repo),
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"youtube": collector},
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="youtube", score=False)
+    all_sources = await source_service.list_all_sources()
+    inactive_sources = [source for source in all_sources if source.follow_state == "inactive"]
+
+    assert "@good" in collector.resolve_calls
+    assert "UCNEW1" in collector.collect_calls
+    assert stats["items_collected"] == 3
+    assert stats["sources_reresolved"] == 1
+    assert stats["sources_not_found"] == 4
+    assert stats["sources_needing_reauth"] == 0
+    assert stats["collector_errors"] == 0
+    assert stats["circuit_broken"] == []
+    assert sorted(source.account_or_channel_id for source in inactive_sources) == [
+        "UCDEAD2",
+        "UCDEAD3",
+        "UCDEAD4",
+        "UCDEAD5",
+    ]
+    assert await source_repo.get_by_identity(platform="youtube", account_or_channel_id="UCNEW1") is not None
 
     await db.close()
 
@@ -1315,6 +1489,64 @@ async def test_rescore_existing_items_can_scope_to_subject_ids(tmp_path: Path) -
     assert events[0]["subject_total"] == 1
     assert [int(row["subject_id"]) for row in score_rows] == [subject_b.id]
     assert subject_a.id not in {int(row["subject_id"]) for row in score_rows}
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_rescore_existing_items_emits_cold_cache_progress_event(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    subject = await subject_service.create_subject(
+        "AI Tools",
+        include_terms=["claude code"],
+        description_text="Practical Claude Code and AI tooling updates.",
+    )
+    item_repo = ItemRepository(conn=db.conn)
+    await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id=f"cold-{index}",
+                author="Author",
+                url=f"https://example.com/cold-{index}",
+                text=f"Claude Code workflow update {index}",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+            for index in range(21)
+        ]
+    )
+    events: list[dict] = []
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        scorer="embedding",
+    )
+
+    stats = await orchestrator.rescore_existing_items(
+        subject_ids={subject.id},
+        progress_callback=events.append,
+    )
+    cold_events = [event for event in events if event.get("kind") == "embedding_not_warmed"]
+
+    assert stats["embedding_not_warmed"] is True
+    assert cold_events
+    assert cold_events[0]["subject_name"] == "AI Tools"
+    assert cold_events[0]["missing_rate"] == 1.0
+    assert cold_events[0]["sampled_items"] == 21
 
     await db.close()
 
