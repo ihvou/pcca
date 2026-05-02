@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -631,3 +632,121 @@ async def test_desktop_get_briefs_logs_cold_cache_progress_warning(tmp_path: Pat
 
     assert result.ok is True
     assert any("Briefs warning: embeddings not warmed for AI Tools" in line for line in service.logs)
+
+
+@pytest.mark.asyncio
+async def test_desktop_async_read_content_returns_action_id_and_cached_result(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class SlowOrchestrator:
+        async def run_nightly_collection(self, *, platform: str | None = None):
+            entered.set()
+            await release.wait()
+            return {"platform_filter": platform, "items_collected": 1}
+
+    service._agent_app = type("FakeApp", (), {"pipeline_orchestrator": SlowOrchestrator()})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        started = await service.read_content(
+            platform="youtube",
+            async_response=True,
+            action_id="desktop-action-1",
+        )
+        assert started.ok is True
+        assert started.data["pending"] is True
+        assert started.data["action_id"] == "desktop-action-1"
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert service.inflight_actions()[0]["action_id"] == "desktop-action-1"
+
+        pending_status, pending = await service.get_action_result(action_id="desktop-action-1")
+        assert pending_status == 404
+        assert pending.data["pending"] is True
+
+        release.set()
+        for _ in range(20):
+            status, result = await service.get_action_result(action_id="desktop-action-1")
+            if status == 200:
+                break
+            await asyncio.sleep(0.05)
+        assert status == 200
+        assert result.ok is True
+        assert result.data["action_id"] == "desktop-action-1"
+        assert result.data["platform"] == "youtube"
+        assert service.inflight_actions() == []
+    finally:
+        release.set()
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_desktop_action_result_expires_after_ttl(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    service._action_result_ttl_seconds = 1
+    entered = asyncio.Event()
+
+    class FastOrchestrator:
+        async def run_nightly_collection(self, *, platform: str | None = None):
+            entered.set()
+            return {"platform_filter": platform, "items_collected": 1}
+
+    service._agent_app = type("FakeApp", (), {"pipeline_orchestrator": FastOrchestrator()})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        await service.read_content(platform="youtube", async_response=True, action_id="desktop-action-expire")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        for _ in range(20):
+            status, _result = await service.get_action_result(action_id="desktop-action-expire")
+            if status == 200:
+                break
+            await asyncio.sleep(0.05)
+        assert status == 200
+        service._completed_actions["desktop-action-expire"].expires_at_monotonic = time.monotonic() - 1
+        service._known_action_expiry["desktop-action-expire"] = time.monotonic() - 1
+        expired_status, expired = await service.get_action_result(action_id="desktop-action-expire")
+        assert expired_status == 410
+        assert expired.data["expired"] is True
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_desktop_records_last_200_wizard_events(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    for index in range(205):
+        await service.record_wizard_event(
+            {
+                "event_kind": "fetch_error",
+                "action_key": "read_content",
+                "action_id": f"action-{index}",
+                "elapsed_ms": index,
+                "error_type": "TypeError",
+                "error_message": "Load failed",
+            }
+        )
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        row = await (await db.conn.execute("SELECT COUNT(*) AS c, MIN(id) AS first_id FROM wizard_events")).fetchone()
+    finally:
+        await db.close()
+
+    assert int(row["c"]) == 200
+    assert int(row["first_id"]) == 6

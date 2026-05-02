@@ -172,6 +172,114 @@ def test_desktop_server_rebuild_rules_endpoint(tmp_path) -> None:
     assert fake_service.rebuilt == [(7, None)]
 
 
+def test_desktop_server_long_actions_return_202_and_result_endpoint(tmp_path) -> None:
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+
+    from pcca.desktop_web.server import DesktopWebServer
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.started_action_id: str | None = None
+
+        async def startup_for_wizard(self):
+            return CommandResult(True, "started")
+
+        async def shutdown(self):
+            return None
+
+        async def read_content(
+            self,
+            *,
+            platform: str | None = None,
+            async_response: bool = False,
+            action_id: str | None = None,
+        ):
+            self.started_action_id = action_id
+            return CommandResult(
+                True,
+                "Get Content started.",
+                {"pending": True, "action_id": action_id, "platform": platform},
+            )
+
+        async def get_action_result(self, *, action_id: str):
+            return 200, CommandResult(True, "Get Content finished.", {"action_id": action_id})
+
+    fake_service = FakeService()
+    server = DesktopWebServer(
+        settings=make_settings(tmp_path),
+        token="secret-token",
+        port=8765,
+        service=fake_service,  # type: ignore[arg-type]
+    )
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        started = client.post(
+            "/api/content/read",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"platform": "youtube"},
+        )
+        assert started.status_code == 202
+        started_json = started.json()
+        assert started_json["data"]["pending"] is True
+        assert started_json["data"]["action_id"] == started_json["action_id"]
+        assert fake_service.started_action_id == started_json["action_id"]
+
+        finished = client.get(
+            f"/api/actions/{started_json['action_id']}/result",
+            headers={"Authorization": "Bearer secret-token"},
+        )
+        assert finished.status_code == 200
+        assert finished.json()["message"] == "Get Content finished."
+
+
+def test_desktop_server_wizard_events_endpoint_validates_size(tmp_path) -> None:
+    pytest.importorskip("starlette")
+    from starlette.testclient import TestClient
+
+    from pcca.desktop_web.server import DesktopWebServer
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.events: list[dict] = []
+
+        async def startup_for_wizard(self):
+            return CommandResult(True, "started")
+
+        async def shutdown(self):
+            return None
+
+        async def record_wizard_event(self, event: dict):
+            self.events.append(event)
+            return CommandResult(True, "recorded")
+
+    fake_service = FakeService()
+    server = DesktopWebServer(
+        settings=make_settings(tmp_path),
+        token="secret-token",
+        port=8765,
+        service=fake_service,  # type: ignore[arg-type]
+    )
+    app = server.create_app()
+
+    with TestClient(app) as client:
+        ok = client.post(
+            "/api/debug/wizard-events",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"event_kind": "fetch_error", "action_key": "read_content", "error_message": "Load failed"},
+        )
+        assert ok.status_code == 200
+        assert fake_service.events[0]["event_kind"] == "fetch_error"
+
+        too_large = client.post(
+            "/api/debug/wizard-events",
+            headers={"Authorization": "Bearer secret-token", "Content-Type": "application/json"},
+            content="{" + '"x":"' + ("a" * 1100) + '"}',
+        )
+        assert too_large.status_code == 413
+
+
 def test_desktop_wizard_has_tabbed_product_surface() -> None:
     from pcca.desktop_web.server import INDEX_HTML
 
@@ -187,6 +295,20 @@ def test_desktop_wizard_has_tabbed_product_surface() -> None:
     assert "High-quality examples" not in INDEX_HTML
 
 
+def test_desktop_wizard_uses_fire_and_poll_for_long_actions() -> None:
+    from pcca.desktop_web.server import INDEX_HTML
+
+    assert "async function longAction" in INDEX_HTML
+    assert "/api/actions/${encodeURIComponent(actionId)}/result" in INDEX_HTML
+    assert "/api/debug/wizard-events" in INDEX_HTML
+    assert "actionKey:'stage_follows'" in INDEX_HTML
+    assert "actionKey:'read_content'" in INDEX_HTML
+    assert "actionKey:'embedding_backfill'" in INDEX_HTML
+    assert "actionKey:'get_briefs'" in INDEX_HTML
+    assert "actionKey:'rebuild_all_subject_rules'" in INDEX_HTML
+    assert "payloadFailureClass(payload) === 'session_challenge'" in INDEX_HTML
+
+
 def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     from pcca.desktop_web.server import INDEX_HTML
 
@@ -196,7 +318,7 @@ def test_desktop_wizard_preserves_form_edits_during_refresh() -> None:
     assert "subjectDraftStatus" in INDEX_HTML
     assert "setInterval(() => busy ? refreshRunningState() : loadState(), 5000)" in INDEX_HTML
     assert "Get Content (${platformLabel(selectedPlatform)})" in INDEX_HTML
-    assert "timeoutMs: 1800000" in INDEX_HTML
+    assert "pollActionResult" in INDEX_HTML
     assert "inflight_actions" in INDEX_HTML
     assert "/api/subjects/rebuild-rules" in INDEX_HTML
     assert "/api/subjects/rebuild-all-rules" in INDEX_HTML

@@ -9,9 +9,10 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from pcca.app import PCCAApp
+from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
 from pcca.config import Settings
 from pcca.db import Database
 from pcca.repositories.onboarding import OnboardingRepository
@@ -68,6 +69,17 @@ class InflightAction:
     label: str
     started_at: str
     task: asyncio.Task
+    action_id: str
+
+
+@dataclass
+class CompletedAction:
+    action_id: str
+    key: str
+    label: str
+    finished_at: str
+    result: CommandResult
+    expires_at_monotonic: float
 
 
 def cron_to_digest_time(cron: str) -> str:
@@ -150,6 +162,9 @@ class DesktopCommandService:
         self._agent_app: PCCAApp | None = None
         self._agent_task: asyncio.Task | None = None
         self._inflight_actions: dict[str, InflightAction] = {}
+        self._completed_actions: dict[str, CompletedAction] = {}
+        self._known_action_expiry: dict[str, float] = {}
+        self._action_result_ttl_seconds = 300
         self._inflight_lock = asyncio.Lock()
         self._logs: list[str] = []
 
@@ -168,10 +183,27 @@ class DesktopCommandService:
             if action.task.done():
                 stale.append(key)
                 continue
-            out.append({"key": action.key, "label": action.label, "started_at": action.started_at})
+            out.append(
+                {
+                    "key": action.key,
+                    "label": action.label,
+                    "started_at": action.started_at,
+                    "action_id": action.action_id,
+                }
+            )
         for key in stale:
             self._inflight_actions.pop(key, None)
         return out
+
+    def _prune_completed_actions(self) -> None:
+        now = time.monotonic()
+        expired = [
+            action_id
+            for action_id, completed in self._completed_actions.items()
+            if completed.expires_at_monotonic <= now
+        ]
+        for action_id in expired:
+            self._completed_actions.pop(action_id, None)
 
     def _set_inflight_label(self, *, key: str, label: str) -> None:
         action = self._inflight_actions.get(key)
@@ -184,7 +216,9 @@ class DesktopCommandService:
         key: str,
         label: str,
         runner: Callable[[], Awaitable[CommandResult]],
+        action_id: str | None = None,
     ) -> CommandResult:
+        action_id = action_id or f"{key}-{time.time_ns()}"
         async with self._inflight_lock:
             existing = self._inflight_actions.get(key)
             if existing is not None and not existing.task.done():
@@ -193,7 +227,12 @@ class DesktopCommandService:
                 return CommandResult(
                     False,
                     message,
-                    {"already_running": True, "inflight": self.inflight_actions()},
+                    {
+                        "already_running": True,
+                        "pending": True,
+                        "action_id": existing.action_id,
+                        "inflight": self.inflight_actions(),
+                    },
                 )
             task = asyncio.create_task(runner())
             self._inflight_actions[key] = InflightAction(
@@ -201,6 +240,7 @@ class DesktopCommandService:
                 label=label,
                 started_at=datetime.now(timezone.utc).isoformat(),
                 task=task,
+                action_id=action_id,
             )
         try:
             return await task
@@ -209,6 +249,205 @@ class DesktopCommandService:
                 current = self._inflight_actions.get(key)
                 if current is not None and current.task is task:
                     self._inflight_actions.pop(key, None)
+
+    async def _dispatch_guarded_action(
+        self,
+        *,
+        key: str,
+        label: str,
+        action_id: str,
+        runner: Callable[[], Awaitable[CommandResult]],
+    ) -> CommandResult:
+        async with self._inflight_lock:
+            self._prune_completed_actions()
+            existing = self._inflight_actions.get(key)
+            if existing is not None and not existing.task.done():
+                message = f"{existing.label} is already running; watching the existing run."
+                self.log(message)
+                return CommandResult(
+                    True,
+                    message,
+                    {
+                        "accepted": True,
+                        "already_running": True,
+                        "pending": True,
+                        "action_id": existing.action_id,
+                        "inflight": self.inflight_actions(),
+                    },
+                )
+
+            async def background_runner() -> CommandResult:
+                try:
+                    result = await runner()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.exception("Background desktop action failed action_id=%s key=%s", action_id, key)
+                    result = CommandResult(
+                        False,
+                        f"{label} failed: {exc}",
+                        {
+                            "error_type": type(exc).__name__,
+                            "failure_class": self._failure_class_for_exception(exc),
+                        },
+                    )
+                await self._complete_dispatched_action(
+                    key=key,
+                    action_id=action_id,
+                    label=label,
+                    result=result,
+                )
+                return result
+
+            task = asyncio.create_task(background_runner())
+            self._inflight_actions[key] = InflightAction(
+                key=key,
+                label=label,
+                started_at=datetime.now(timezone.utc).isoformat(),
+                task=task,
+                action_id=action_id,
+            )
+
+        self.log(f"{label} started in the background action_id={action_id}.")
+        return CommandResult(
+            True,
+            f"{label} started.",
+            {
+                "accepted": True,
+                "pending": True,
+                "action_id": action_id,
+                "inflight": self.inflight_actions(),
+            },
+        )
+
+    async def _complete_dispatched_action(
+        self,
+        *,
+        key: str,
+        action_id: str,
+        label: str,
+        result: CommandResult,
+    ) -> None:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        expires_at = time.monotonic() + self._action_result_ttl_seconds
+        result.data = {
+            **(result.data or {}),
+            "action_id": action_id,
+            "finished_at": finished_at,
+            "expires_in_seconds": self._action_result_ttl_seconds,
+        }
+        async with self._inflight_lock:
+            current = self._inflight_actions.get(key)
+            if current is not None and current.action_id == action_id:
+                self._inflight_actions.pop(key, None)
+            self._completed_actions[action_id] = CompletedAction(
+                action_id=action_id,
+                key=key,
+                label=label,
+                finished_at=finished_at,
+                result=result,
+                expires_at_monotonic=expires_at,
+            )
+            self._known_action_expiry[action_id] = expires_at
+            self._prune_completed_actions()
+
+    def _failure_class_for_exception(self, exc: Exception) -> str | None:
+        if isinstance(exc, SessionChallengedError):
+            return "session_challenge"
+        if isinstance(exc, SourceNotFoundError):
+            return "not_found"
+        return None
+
+    async def get_action_result(self, *, action_id: str) -> tuple[int, CommandResult]:
+        normalized = action_id.strip()
+        if not normalized:
+            return 400, CommandResult(False, "Action id is required.", {"action_id": action_id})
+        async with self._inflight_lock:
+            self._prune_completed_actions()
+            for action in self._inflight_actions.values():
+                if action.action_id == normalized and not action.task.done():
+                    return 404, CommandResult(
+                        False,
+                        "Action is still running.",
+                        {"pending": True, "action_id": normalized, "inflight": self.inflight_actions()},
+                    )
+            completed = self._completed_actions.get(normalized)
+            if completed is not None:
+                return 200, completed.result
+            expiry = self._known_action_expiry.get(normalized)
+            if expiry is not None and expiry <= time.monotonic():
+                return 410, CommandResult(
+                    False,
+                    "Action result expired. Run the action again if needed.",
+                    {"expired": True, "action_id": normalized},
+                )
+        return 404, CommandResult(
+            False,
+            "Action result is not ready or was not found.",
+            {"pending": True, "action_id": normalized},
+        )
+
+    async def record_wizard_event(self, event: dict[str, Any]) -> CommandResult:
+        allowed_kinds = {"fetch_error", "timeout", "success"}
+        event_kind = str(event.get("event_kind") or "").strip()
+        if event_kind not in allowed_kinds:
+            raise ValueError("Unsupported wizard event kind.")
+        action_key = str(event.get("action_key") or "")[:80]
+        action_id = str(event.get("action_id") or "")[:120]
+        timestamp = str(event.get("timestamp") or datetime.now(timezone.utc).isoformat())[:80]
+        error_type = str(event.get("error_type") or "")[:80]
+        error_message = str(event.get("error_message") or "")[:500]
+        elapsed_ms = int(event.get("elapsed_ms") or 0)
+        http_status = int(event.get("http_status") or 0) or None
+        logger.info(
+            "[wizard] event=%s action_key=%s action_id=%s elapsed_ms=%s http_status=%s error_type=%s message=%s",
+            event_kind,
+            action_key,
+            action_id,
+            elapsed_ms,
+            http_status,
+            error_type,
+            error_message,
+        )
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            await db.conn.execute(
+                """
+                INSERT INTO wizard_events(
+                  timestamp, action_key, action_id, event_kind, elapsed_ms,
+                  http_status, error_type, error_message
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    timestamp,
+                    action_key,
+                    action_id,
+                    event_kind,
+                    elapsed_ms,
+                    http_status,
+                    error_type,
+                    error_message,
+                ),
+            )
+            await db.conn.execute(
+                """
+                DELETE FROM wizard_events
+                WHERE id NOT IN (
+                  SELECT id FROM wizard_events ORDER BY id DESC LIMIT 200
+                )
+                """
+            )
+            await db.conn.commit()
+        finally:
+            await db.close()
+        return CommandResult(True, "Wizard event recorded.")
 
     def settings(self) -> Settings:
         return self._settings_factory()
@@ -577,7 +816,14 @@ class DesktopCommandService:
             },
         )
 
-    async def stage_follows(self, *, platform: str, limit: int = 100) -> CommandResult:
+    async def stage_follows(
+        self,
+        *,
+        platform: str,
+        limit: int = 100,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
         platform = platform.strip().lower()
         all_platforms = platform in {"", "all"}
         if not all_platforms and platform not in SUPPORTED_ONBOARDING_PLATFORMS:
@@ -625,6 +871,15 @@ class DesktopCommandService:
                 {"count": total_count, "counts": counts, "errors": errors, "platform": platform},
             )
 
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="stage_follows",
+                label="Get Sources",
+                action_id=action_id,
+                runner=runner,
+            )
         return await self._run_guarded_action(key="stage_follows", label="Get Sources", runner=runner)
 
     async def list_staged_sources(self) -> CommandResult:
@@ -1032,7 +1287,12 @@ class DesktopCommandService:
             },
         )
 
-    async def rebuild_all_subject_rules(self) -> CommandResult:
+    async def rebuild_all_subject_rules(
+        self,
+        *,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
         async def runner() -> CommandResult:
             settings = self.settings()
             settings.ensure_dirs()
@@ -1114,6 +1374,15 @@ class DesktopCommandService:
                 },
             )
 
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="rebuild_all_subject_rules",
+                label="Rebuild All Subjects",
+                action_id=action_id,
+                runner=runner,
+            )
         return await self._run_guarded_action(
             key="rebuild_all_subject_rules",
             label="Rebuild All Subjects",
@@ -1192,7 +1461,13 @@ class DesktopCommandService:
             },
         )
 
-    async def read_content(self, *, platform: str | None = None) -> CommandResult:
+    async def read_content(
+        self,
+        *,
+        platform: str | None = None,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
         platform_filter = platform.strip().lower() if platform and platform.strip() else None
 
         async def runner() -> CommandResult:
@@ -1275,6 +1550,15 @@ class DesktopCommandService:
                 },
             )
 
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="read_content",
+                label="Get Content",
+                action_id=action_id,
+                runner=runner,
+            )
         return await self._run_guarded_action(key="read_content", label="Get Content", runner=runner)
 
     async def backfill_embeddings(
@@ -1284,6 +1568,8 @@ class DesktopCommandService:
         limit: int | None = None,
         rescore: bool = True,
         include_segments: bool = True,
+        async_response: bool = False,
+        action_id: str | None = None,
     ) -> CommandResult:
         async def runner() -> CommandResult:
             started_at = time.monotonic()
@@ -1350,13 +1636,28 @@ class DesktopCommandService:
                 )
             return CommandResult(True, "Embedding backfill finished.", {"embedding_stats": stats or {}})
 
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="embedding_backfill",
+                label="Backfill Embeddings",
+                action_id=action_id,
+                runner=runner,
+            )
         return await self._run_guarded_action(
             key="embedding_backfill",
             label="Backfill Embeddings",
             runner=runner,
         )
 
-    async def get_briefs(self, *, subject_id: int | None = None) -> CommandResult:
+    async def get_briefs(
+        self,
+        *,
+        subject_id: int | None = None,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
         async def runner() -> CommandResult:
             subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
             self.log(f"Getting Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
@@ -1397,6 +1698,15 @@ class DesktopCommandService:
                 {"digest_stats": stats or {}},
             )
 
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="get_briefs",
+                label="Get Briefs",
+                action_id=action_id,
+                runner=runner,
+            )
         return await self._run_guarded_action(key="get_briefs", label="Get Briefs", runner=runner)
 
     async def rebuild_todays_digest(self) -> CommandResult:

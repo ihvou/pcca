@@ -457,6 +457,26 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE subjects ADD COLUMN telegram_hashtag TEXT;
         """,
     ),
+    (
+        16,
+        """
+        CREATE TABLE IF NOT EXISTS wizard_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          timestamp TEXT NOT NULL,
+          action_key TEXT,
+          action_id TEXT,
+          event_kind TEXT NOT NULL,
+          elapsed_ms INTEGER,
+          http_status INTEGER,
+          error_type TEXT,
+          error_message TEXT,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_wizard_events_created_at
+          ON wizard_events(created_at);
+        """,
+    ),
 ]
 
 

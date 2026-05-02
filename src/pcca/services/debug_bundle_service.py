@@ -95,6 +95,16 @@ def _add_db_summary(zf: zipfile.ZipFile, db_path: Path) -> None:
                 conn,
                 "SELECT current_step, timezone, digest_time, telegram_verified, subject_name, completed_at FROM onboarding_state",
             ),
+            "wizard_events": _query_rows(
+                conn,
+                """
+                SELECT id, timestamp, action_key, action_id, event_kind, elapsed_ms,
+                       http_status, error_type, error_message, created_at
+                FROM wizard_events
+                ORDER BY id DESC
+                LIMIT 200
+                """,
+            ),
             "counts": {
                 table: _count(conn, table)
                 for table in [
@@ -105,6 +115,7 @@ def _add_db_summary(zf: zipfile.ZipFile, db_path: Path) -> None:
                     "digests",
                     "digest_deliveries",
                     "feedback_events",
+                    "wizard_events",
                 ]
             },
         }

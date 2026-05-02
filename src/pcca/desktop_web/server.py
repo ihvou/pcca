@@ -297,19 +297,73 @@ function setBusy(next) { busy = next; document.querySelectorAll('button').forEac
 function showTab(name) { document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === name)); document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === `view-${name}`)); }
 function notice(id, text, kind='') { const el = document.getElementById(id); el.style.display = text ? 'block' : 'none'; el.className = `notice ${kind}`.trim(); el.textContent = text || ''; }
 function logLine(line) { const el = document.getElementById('logsBox'); el.textContent = `${new Date().toLocaleTimeString()} ${line}\n` + el.textContent; }
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+async function sendWizardEvent(event) {
+  try {
+    const payload = {
+      timestamp: new Date().toISOString(),
+      action_key: event.action_key || '',
+      action_id: event.action_id || '',
+      event_kind: event.event_kind || 'fetch_error',
+      elapsed_ms: Math.max(0, Math.round(event.elapsed_ms || 0)),
+      http_status: event.http_status || null,
+      error_type: event.error_type || '',
+      error_message: String(event.error_message || '').slice(0, 500),
+    };
+    let body = JSON.stringify(payload);
+    if (body.length > 1024) {
+      payload.error_message = payload.error_message.slice(0, 240) + '…';
+      body = JSON.stringify(payload);
+    }
+    if (body.length <= 1024) {
+      await fetch('/api/debug/wizard-events', {method:'POST', headers, body});
+    }
+  } catch (_err) {
+    // Diagnostics must never break the user's action flow.
+  }
+}
+function payloadFailureClass(payload) {
+  return payload && payload.data ? payload.data.failure_class : (payload ? payload.failure_class : null);
+}
+function isSessionRepairable(errOrPayload) {
+  const payload = errOrPayload && errOrPayload.payload ? errOrPayload.payload : errOrPayload;
+  const status = errOrPayload && errOrPayload.httpStatus ? errOrPayload.httpStatus : (payload ? payload.http_status : null);
+  return payloadFailureClass(payload) === 'session_challenge' || status === 401 || status === 403;
+}
+function errorFromPayload(payload, fallback='Action failed.') {
+  const err = new Error((payload && (payload.message || payload.detail)) || fallback);
+  err.payload = payload;
+  err.failure_class = payloadFailureClass(payload);
+  return err;
+}
 async function request(path, opts={}) {
   const timeoutMs = opts.timeoutMs || 120000;
+  const startedAt = performance.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const cleanOpts = {...opts};
     delete cleanOpts.timeoutMs;
+    delete cleanOpts.actionKey;
+    delete cleanOpts.actionId;
+    delete cleanOpts.recordSuccess;
+    delete cleanOpts.allowOkFalse;
     const res = await fetch(path, {...cleanOpts, signal: controller.signal, headers: {...headers, ...(opts.headers || {})}});
     const data = await res.json();
     const alreadyRunning = data && data.data && data.data.already_running;
-    if (!res.ok || (data.ok === false && !alreadyRunning)) throw new Error(data.message || data.detail || `Request failed: ${path}`);
+    if (opts.recordSuccess) {
+      await sendWizardEvent({event_kind:'success', action_key: opts.actionKey, action_id: opts.actionId || data.action_id || (data.data && data.data.action_id), elapsed_ms: performance.now() - startedAt, http_status: res.status});
+    }
+    if (!res.ok || (data.ok === false && !alreadyRunning && !opts.allowOkFalse)) {
+      const err = errorFromPayload(data, `Request failed: ${path}`);
+      err.httpStatus = res.status;
+      err.path = path;
+      throw err;
+    }
     return data;
   } catch (err) {
+    const eventKind = err.name === 'AbortError' ? 'timeout' : 'fetch_error';
+    await sendWizardEvent({event_kind: eventKind, action_key: opts.actionKey, action_id: opts.actionId, elapsed_ms: performance.now() - startedAt, http_status: err.httpStatus, error_type: err.name || err.constructor.name || 'Error', error_message: err.message || String(err)});
     if (err.name === 'AbortError') {
       throw new Error(`Still working after ${Math.round(timeoutMs / 1000)}s. Check Debug logs; avoid retrying immediately so the current import can finish.`);
     }
@@ -323,6 +377,56 @@ async function postAction(path, body={}, options={}) {
   catch (err) { logLine(`ERROR: ${err.message}`); alert(err.message); }
   finally { setBusy(false); }
 }
+async function pollActionResult(actionId, actionKey, statusId=null) {
+  const startedAt = performance.now();
+  const deadline = Date.now() + 1800000;
+  while (Date.now() < deadline) {
+    await sleep(1500);
+    const state = await refreshRunningState();
+    const running = actionRunning(state || lastState || {}, actionKey);
+    if (running && (!actionId || running.action_id === actionId)) {
+      if (statusId) notice(statusId, `Running: ${running.label}`, '');
+      continue;
+    }
+    const res = await fetch(`/api/actions/${encodeURIComponent(actionId)}/result`, {headers});
+    let data = {};
+    try { data = await res.json(); } catch (_err) { data = {}; }
+    if (res.status === 404) continue;
+    if (res.status === 410) {
+      await sendWizardEvent({event_kind:'fetch_error', action_key: actionKey, action_id: actionId, elapsed_ms: performance.now() - startedAt, http_status: res.status, error_type:'ExpiredActionResult', error_message:data.message || 'Action result expired'});
+      throw errorFromPayload(data, 'Action result expired. Check Debug logs; the backend may still have completed.');
+    }
+    if (!res.ok) {
+      const err = errorFromPayload(data, `Action result failed: ${actionKey}`);
+      err.httpStatus = res.status;
+      throw err;
+    }
+    await sendWizardEvent({event_kind:'success', action_key: actionKey, action_id: actionId, elapsed_ms: performance.now() - startedAt, http_status: res.status});
+    return data;
+  }
+  throw new Error(`Timed out waiting for ${actionKey}. Check Debug logs before retrying.`);
+}
+async function longAction(path, body={}, options={}) {
+  const actionKey = options.actionKey || path;
+  const statusId = options.statusId || null;
+  const startedText = options.startedText || 'Starting action...';
+  try {
+    setBusy(true);
+    pauseRefresh(1800000);
+    if (statusId) notice(statusId, startedText, '');
+    const kick = await request(path, {method:'POST', timeoutMs: 45000, actionKey, recordSuccess:true, body: JSON.stringify(body)});
+    const actionId = (kick.data && kick.data.action_id) || kick.action_id;
+    logLine(`${actionId ? actionId + ' · ' : ''}${kick.message || 'action started'}`);
+    if (!actionId) return kick;
+    const data = await pollActionResult(actionId, actionKey, statusId);
+    logLine(`${actionId} · ${data.message || 'action finished'}`);
+    await loadState({force:true});
+    if (data.ok === false) throw errorFromPayload(data, data.message || 'Action failed.');
+    return data;
+  } finally {
+    setBusy(false);
+  }
+}
 async function saveSettings() {
   const data = await postAction('/api/settings', {token: byId('telegramToken').value, timezone: byId('timezone').value, digest_time: byId('digestTime').value});
   if (data) notice('configStatus', data.message, 'ok');
@@ -334,8 +438,7 @@ async function getSources() {
   const isAll = !platform;
   notice('sourceStatus', isAll ? 'Staging follows for all platforms sequentially...' : `Importing ${platform} sources...`, '');
   try {
-    setBusy(true);
-    const data = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform, limit: Number(limitEl.value || 100)})});
+    const data = await longAction('/api/stage-follows', {platform, limit: Number(limitEl.value || 100)}, {actionKey:'stage_follows', statusId:'sourceStatus', startedText: isAll ? 'Staging follows for all platforms sequentially...' : `Importing ${platform} sources...`});
     logLine(`${data.action_id ? data.action_id + ' · ' : ''}${data.message || 'sources imported'}`);
     notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
     await loadState({force:true});
@@ -346,12 +449,14 @@ async function getSources() {
       alert(err.message);
       return;
     }
-    const shouldRepair = confirm(`${err.message}\n\nTry a session repair from your local browser, then import again?`);
+    const shouldRepair = isSessionRepairable(err)
+      ? confirm(`${err.message}\n\nTry a session repair from your local browser, then import again?`)
+      : false;
     if (shouldRepair) {
       try {
         notice('sourceStatus', `Repairing ${platformEl.value} session...`, '');
         await request('/api/session/capture', {method:'POST', body: JSON.stringify({platform: platformEl.value})});
-        const retry = await request('/api/stage-follows', {method:'POST', timeoutMs: 1800000, body: JSON.stringify({platform: platformEl.value, limit: Number(limitEl.value || 100)})});
+        const retry = await longAction('/api/stage-follows', {platform: platformEl.value, limit: Number(limitEl.value || 100)}, {actionKey:'stage_follows', statusId:'sourceStatus', startedText: `Retrying ${platformEl.value} sources...`});
         notice('sourceStatus', retry.message, 'ok');
         await loadState({force:true});
       } catch (repairErr) {
@@ -359,7 +464,8 @@ async function getSources() {
         alert(repairErr.message);
       }
     } else {
-      notice('sourceStatus', err.message, 'bad');
+      const suffix = isSessionRepairable(err) ? '' : '\n\nNo session repair suggested for this error. Check Debug logs for details.';
+      notice('sourceStatus', `${err.message}${suffix}`, 'bad');
     }
   } finally {
     setBusy(false);
@@ -369,21 +475,46 @@ async function readContent() {
   const platformEl = byId('platform');
   const platform = platformEl ? platformEl.value : '';
   notice('sourceStatus', `Collecting ${platformLabel(platform)} content, then embedding new items...`, '');
-  const data = await postAction('/api/content/read', {platform}, {timeoutMs: 1800000});
-  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  try {
+    const data = await longAction('/api/content/read', {platform}, {actionKey:'read_content', statusId:'sourceStatus', startedText:`Collecting ${platformLabel(platform)} content, then embedding new items...`});
+    if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('sourceStatus', err.message, 'bad');
+  }
 }
 async function readContentAll() {
   notice('sourceStatus', 'Running all-platform content collection...', '');
-  const data = await postAction('/api/content/read', {}, {timeoutMs: 1800000});
-  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  try {
+    const data = await longAction('/api/content/read', {}, {actionKey:'read_content', statusId:'sourceStatus', startedText:'Running all-platform content collection...'});
+    if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('sourceStatus', err.message, 'bad');
+  }
 }
 async function backfillEmbeddings() {
-  const data = await postAction('/api/embeddings/backfill', {rescore: true, include_segments: true}, {timeoutMs: 1800000});
-  if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  try {
+    const data = await longAction('/api/embeddings/backfill', {rescore: true, include_segments: true}, {actionKey:'embedding_backfill', statusId:'sourceStatus', startedText:'Backfilling embeddings...'});
+    if (data) notice('sourceStatus', data.message, data.ok === false ? '' : 'ok');
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('sourceStatus', err.message, 'bad');
+  }
 }
 async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
-async function getBrief(subjectId) { return postAction('/api/briefs', {subject_id: subjectId}, {timeoutMs: 1800000}); }
+async function getBrief(subjectId) {
+  try {
+    const data = await longAction('/api/briefs', {subject_id: subjectId}, {actionKey:'get_briefs', statusId:'useStatus', startedText:'Getting Briefs...'});
+    if (data) notice('useStatus', data.message, 'ok');
+    return data;
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('useStatus', err.message, 'bad');
+    return null;
+  }
+}
 async function draftSubject(subjectId=null, text=null) {
   const subjectTextEl = byId('subjectText');
   const raw = text !== null ? text : (subjectId ? '' : (subjectTextEl ? subjectTextEl.value : ''));
@@ -428,7 +559,15 @@ async function rebuildSubjectRules(subjectId) {
 }
 async function rebuildAllSubjectRules() {
   pauseRefresh(1800000);
-  return postAction('/api/subjects/rebuild-all-rules', {}, {timeoutMs: 1800000});
+  try {
+    const data = await longAction('/api/subjects/rebuild-all-rules', {}, {actionKey:'rebuild_all_subject_rules', statusId:'sourceStatus', startedText:'Rebuilding all subjects and warming embeddings...'});
+    if (data) notice('sourceStatus', data.message, 'ok');
+    return data;
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('sourceStatus', err.message, 'bad');
+    return null;
+  }
 }
 async function confirmSubjectDraft(chatId=null) { return postAction('/api/subjects/confirm-draft', chatId === null ? {} : {chat_id: chatId}); }
 async function cancelSubjectDraft(chatId=null) { const subjectTextEl = byId('subjectText'); if (chatId === null && subjectTextEl) subjectTextEl.value = ''; return postAction('/api/subjects/cancel-draft', chatId === null ? {} : {chat_id: chatId}); }
@@ -704,8 +843,10 @@ async function refreshRunningState() {
     lastState = data;
     updateActionControls(data);
     logsBox.textContent = (data.logs || []).slice().reverse().join('\n');
+    return data;
   } catch (err) {
     logLine(`ERROR: ${err.message}`);
+    return null;
   }
 }
 document.addEventListener('input', event => {
@@ -767,7 +908,12 @@ class DesktopWebServer:
             except Exception:
                 return {}
 
-        async def run_result(handler: Callable[[dict[str, Any]], Awaitable[Any]], request):
+        async def run_result(
+            handler: Callable[..., Awaitable[Any]],
+            request,
+            *,
+            pass_action_id: bool = False,
+        ):
             started_at = time.monotonic()
             action_id = new_action_id(request.url.path.strip("/").replace("/", "_") or "index")
             try:
@@ -778,7 +924,7 @@ class DesktopWebServer:
                     request.url.path,
                     summarize_payload(payload),
                 )
-                result = await handler(payload)
+                result = await handler(payload, action_id) if pass_action_id else await handler(payload)
                 if hasattr(result, "to_dict"):
                     body = result.to_dict()
                 else:
@@ -795,7 +941,8 @@ class DesktopWebServer:
                     ok,
                     monotonic_ms_since(started_at),
                 )
-                return JSONResponse(body)
+                status_code = 202 if isinstance(body, dict) and body.get("data", {}).get("pending") else 200
+                return JSONResponse(body, status_code=status_code)
             except ValueError as exc:
                 logger.warning(
                     "Desktop request rejected action_id=%s path=%s message=%s duration_ms=%d",
@@ -820,6 +967,31 @@ class DesktopWebServer:
         async def state(_request):
             assert self.service is not None
             return JSONResponse(await self.service.get_state())
+
+        async def action_result(request):
+            assert self.service is not None
+            action_id = str(request.path_params.get("action_id") or "")
+            status_code, result = await self.service.get_action_result(
+                action_id=action_id
+            )
+            body = result.to_dict()
+            body["action_id"] = action_id
+            return JSONResponse(body, status_code=status_code)
+
+        async def wizard_event(request):
+            assert self.service is not None
+            body = await request.body()
+            if len(body) > 1024:
+                return JSONResponse({"ok": False, "message": "Wizard event is too large."}, status_code=413)
+            try:
+                payload = json.loads(body.decode("utf-8") or "{}")
+            except json.JSONDecodeError:
+                return JSONResponse({"ok": False, "message": "Invalid wizard event JSON."}, status_code=400)
+            try:
+                result = await self.service.record_wizard_event(payload if isinstance(payload, dict) else {})
+            except ValueError as exc:
+                return JSONResponse({"ok": False, "message": str(exc)}, status_code=400)
+            return JSONResponse(result.to_dict())
 
         async def settings(request):
             assert self.service is not None
@@ -864,11 +1036,14 @@ class DesktopWebServer:
         async def stage_follows(request):
             assert self.service is not None
             return await run_result(
-                lambda p: self.service.stage_follows(
+                lambda p, action_id: self.service.stage_follows(
                     platform=str(p.get("platform") or ""),
                     limit=int(p.get("limit") or 100),
+                    async_response=True,
+                    action_id=action_id,
                 ),
                 request,
+                pass_action_id=True,
             )
 
         async def staged_sources(request):
@@ -897,7 +1072,14 @@ class DesktopWebServer:
 
         async def rebuild_all_subject_rules(request):
             assert self.service is not None
-            return await run_result(lambda _p: self.service.rebuild_all_subject_rules(), request)
+            return await run_result(
+                lambda _p, action_id: self.service.rebuild_all_subject_rules(
+                    async_response=True,
+                    action_id=action_id,
+                ),
+                request,
+                pass_action_id=True,
+            )
 
         async def confirm_subject_draft(request):
             assert self.service is not None
@@ -947,31 +1129,40 @@ class DesktopWebServer:
         async def read_content(request):
             assert self.service is not None
             return await run_result(
-                lambda p: self.service.read_content(
+                lambda p, action_id: self.service.read_content(
                     platform=str(p.get("platform") or "") or None,
+                    async_response=True,
+                    action_id=action_id,
                 ),
                 request,
+                pass_action_id=True,
             )
 
         async def backfill_embeddings(request):
             assert self.service is not None
             return await run_result(
-                lambda p: self.service.backfill_embeddings(
+                lambda p, action_id: self.service.backfill_embeddings(
                     concurrency=int(p["concurrency"]) if p.get("concurrency") else None,
                     limit=int(p.get("limit")) if p.get("limit") else None,
                     rescore=bool(p.get("rescore", True)),
                     include_segments=bool(p.get("include_segments", True)),
+                    async_response=True,
+                    action_id=action_id,
                 ),
                 request,
+                pass_action_id=True,
             )
 
         async def briefs(request):
             assert self.service is not None
             return await run_result(
-                lambda p: self.service.get_briefs(
-                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None
+                lambda p, action_id: self.service.get_briefs(
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None,
+                    async_response=True,
+                    action_id=action_id,
                 ),
                 request,
+                pass_action_id=True,
             )
 
         async def rebuild_digest(request):
@@ -1027,6 +1218,8 @@ class DesktopWebServer:
         routes = [
             Route("/", index, methods=["GET"]),
             Route("/api/state", state, methods=["GET"]),
+            Route("/api/actions/{action_id}/result", action_result, methods=["GET"]),
+            Route("/api/debug/wizard-events", wizard_event, methods=["POST"]),
             Route("/api/settings", settings, methods=["POST"]),
             Route("/api/init-db", init_db, methods=["POST"]),
             Route("/api/agent/start", start_agent, methods=["POST"]),
