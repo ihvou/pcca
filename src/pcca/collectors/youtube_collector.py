@@ -13,9 +13,10 @@ import httpx
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
-from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
+from pcca.collectors.errors import SourceNotFoundError
 from pcca.collectors.youtube_utils import extract_video_id
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
+from pcca.services.yt_dlp_service import YtDlpService, YtDlpUnavailableError
 
 logger = logging.getLogger(__name__)
 
@@ -340,6 +341,7 @@ def extract_youtube_initial_data_video_rows(data: dict[str, Any] | None, *, max_
 class YouTubeCollector:
     session_manager: BrowserSessionManager | None = None
     transcript_service: YouTubeTranscriptService = field(default_factory=YouTubeTranscriptService)
+    yt_dlp_service: YtDlpService | None = None
     max_items: int = 8
     platform: str = "youtube"
     http_client: httpx.AsyncClient | None = None
@@ -370,6 +372,10 @@ class YouTubeCollector:
         return channel_id
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        yt_dlp_items = await self._collect_with_yt_dlp(source_id)
+        if yt_dlp_items:
+            return yt_dlp_items
+
         channel_id = source_id.strip()
         if not is_youtube_channel_id(channel_id):
             channel_id = await self.resolve_source_identifier(source_id)
@@ -446,3 +452,86 @@ class YouTubeCollector:
                 )
             )
         return results
+
+    async def _collect_with_yt_dlp(self, source_id: str) -> list[CollectedItem]:
+        if self.yt_dlp_service is None:
+            return []
+        cookiefile = await self._yt_dlp_cookiefile()
+        try:
+            videos = await self.yt_dlp_service.list_channel_videos(
+                source_id,
+                max_items=self.max_items,
+                cookiefile=cookiefile,
+            )
+        except YtDlpUnavailableError:
+            logger.info("yt-dlp unavailable for YouTube collection; falling back to RSS source=%s", source_id)
+            return []
+        except Exception:
+            logger.exception("yt-dlp YouTube collection failed; falling back to RSS source=%s", source_id)
+            return []
+        if not videos:
+            return []
+        results: list[CollectedItem] = []
+        for video in videos:
+            transcript = None
+            try:
+                transcript = await self.yt_dlp_service.get_transcript(video.external_id, cookiefile=cookiefile)
+            except YtDlpUnavailableError:
+                logger.info("yt-dlp unavailable for YouTube transcript; falling back to transcript service video=%s", video.external_id)
+            except Exception:
+                logger.info("yt-dlp transcript failed video=%s; falling back to transcript service", video.external_id, exc_info=True)
+            if transcript is None:
+                transcript_loader = getattr(self.transcript_service, "get_transcript", None)
+                if callable(transcript_loader):
+                    transcript = await transcript_loader(video.external_id)
+            transcript_text = transcript.text if transcript is not None else None
+            text = self._item_text(title=video.title, description=video.description, transcript_text=transcript_text)
+            metadata = {
+                "source_id": source_id,
+                "channel_id": video.channel_id,
+                "title": video.title,
+                "description": video.description,
+                "view_count": video.view_count,
+                "like_count": video.like_count,
+                "duration_seconds": video.duration_seconds,
+                "youtube_data_source": "yt_dlp",
+                "cookiefile_used": bool(cookiefile),
+            }
+            if transcript is not None:
+                metadata["transcript_rows"] = transcript.rows
+                metadata["transcript_language"] = transcript.language_code
+                metadata["transcript_translated"] = transcript.translated
+            results.append(
+                CollectedItem(
+                    platform=self.platform,
+                    external_id=video.external_id,
+                    author=video.channel_name or source_id,
+                    url=video.url,
+                    text=text,
+                    transcript_text=transcript_text,
+                    published_at=video.published_at,
+                    metadata=metadata,
+                )
+            )
+        logger.info("YouTube collection used yt-dlp source=%s items=%d", source_id, len(results))
+        return results
+
+    async def _yt_dlp_cookiefile(self):
+        if self.session_manager is None:
+            return None
+        exporter = getattr(self.session_manager, "export_netscape_cookies", None)
+        if not callable(exporter):
+            return None
+        try:
+            return await exporter(platform="youtube")
+        except Exception:
+            logger.info("Could not export YouTube cookies for yt-dlp; continuing without cookies.", exc_info=True)
+            return None
+
+    @staticmethod
+    def _item_text(*, title: str | None, description: str | None, transcript_text: str | None) -> str:
+        text = "\n\n".join(part for part in (title or "", description or "") if part).strip()
+        if transcript_text:
+            snippet = transcript_text[:1200]
+            text = f"{text}\n\n{snippet}".strip()
+        return text

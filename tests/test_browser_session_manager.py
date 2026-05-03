@@ -87,3 +87,30 @@ async def test_empty_result_snapshot_writes_metadata_and_screenshot(tmp_path: Pa
     payload = metadata_path.read_text(encoding="utf-8")
     assert "OpenAI - YouTube" in payload
     assert "No videos yet" in payload
+
+
+@pytest.mark.asyncio
+async def test_export_netscape_cookies_writes_yt_dlp_cookie_file(tmp_path: Path) -> None:
+    class FakeContext:
+        async def cookies(self):
+            return [
+                {
+                    "domain": ".youtube.com",
+                    "name": "SID",
+                    "value": "secret",
+                    "path": "/",
+                    "secure": True,
+                    "expires": 1893456000,
+                }
+            ]
+
+    manager = BrowserSessionManager(profiles_root=tmp_path / "profiles")
+    manager._contexts["youtube"] = FakeContext()  # type: ignore[assignment]
+    manager._playwright = object()
+
+    path = await manager.export_netscape_cookies(platform="youtube")
+
+    assert path is not None
+    text = path.read_text(encoding="utf-8")
+    assert "# Netscape HTTP Cookie File" in text
+    assert ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret" in text

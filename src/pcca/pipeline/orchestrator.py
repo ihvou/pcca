@@ -441,6 +441,12 @@ class PipelineOrchestrator:
         metadata["embedding_not_warmed"] = bool(stats.get("embedding_not_warmed"))
         metadata["embedding_not_warmed_subjects"] = list(stats.get("embedding_not_warmed_subjects") or [])
 
+    @staticmethod
+    def _model_candidate_text(*, item: CollectedItem, segment=None) -> str:
+        if segment is not None and getattr(segment, "text", None):
+            return str(segment.text)
+        return item.transcript_text or item.text or ""
+
     async def _score_items_for_subject(
         self,
         *,
@@ -622,13 +628,13 @@ class PipelineOrchestrator:
             candidates = [
                 ModelRerankCandidate(
                     item_id=item_id,
-                    text=item.text or item.transcript_text or "",
+                    text=self._model_candidate_text(item=item, segment=segment),
                     heuristic_score=scored.final_score,
                     author=item.author,
                     url=item.url,
                     published_at=item.published_at,
                 )
-                for item_id, item, scored, _used_embedding, _segment in shortlist_rows
+                for item_id, item, scored, _used_embedding, segment in shortlist_rows
             ]
             batch_results = await batch_rerank(
                 subject_name=subject.name,
@@ -656,7 +662,7 @@ class PipelineOrchestrator:
             elif self.model_router is not None and item_id in shortlist_ids and not batch_attempted:
                 rerank = await self.model_router.rerank(
                     subject_name=subject.name,
-                    text=item.text or item.transcript_text or "",
+                    text=self._model_candidate_text(item=item, segment=segment),
                     heuristic_score=scored.final_score,
                 )
                 if rerank is not None:
@@ -672,6 +678,34 @@ class PipelineOrchestrator:
                     stats["items_model_reranked"] += 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
+
+        refine_batch = getattr(self.model_router, "refine_batch", None) if self.model_router is not None else None
+        if callable(refine_batch) and getattr(self.model_router, "enabled", True):
+            top_refine_rows = sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[:5]
+            if top_refine_rows:
+                refined = await refine_batch(
+                    subject_name=subject.name,
+                    subject_description=subject_embedding_text,
+                    candidates=[
+                        ModelRerankCandidate(
+                            item_id=item_id,
+                            text=self._model_candidate_text(item=item, segment=segment),
+                            heuristic_score=scored.final_score,
+                            author=item.author,
+                            url=item.url,
+                            published_at=item.published_at,
+                        )
+                        for item_id, item, scored, _used_embedding, segment in top_refine_rows
+                    ],
+                    limit=5,
+                )
+                stats["model_refinement_batch_calls"] = int(stats.get("model_refinement_batch_calls", 0)) + 1
+                for item_id, refined_segment in refined.items():
+                    if refined_segment:
+                        item_refined_segments[int(item_id)] = str(refined_segment)[:1500]
+                stats["items_model_refined"] = int(stats.get("items_model_refined", 0)) + len(refined)
+
+        for item_id, item, scored, _used_embedding, segment in scored_rows:
             await self.item_score_repo.upsert_score(
                 item_id=item_id,
                 subject_id=subject.id,
@@ -895,7 +929,9 @@ class PipelineOrchestrator:
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
+            "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
+            "model_refinement_batch_calls": 0,
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
@@ -1050,7 +1086,9 @@ class PipelineOrchestrator:
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
+            "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
+            "model_refinement_batch_calls": 0,
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,

@@ -16,6 +16,7 @@ from pcca.collectors.youtube_collector import (
 from pcca.collectors.errors import SourceNotFoundError
 from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
 from pcca.services.youtube_transcript_service import TranscriptResult
+from pcca.services.yt_dlp_service import YtDlpVideo, parse_caption_payload, select_caption
 
 
 SAMPLE_CHANNEL_ID = "UC1234567890123456789012"
@@ -160,6 +161,80 @@ async def test_youtube_collector_preserves_transcript_rows_for_segmenter() -> No
     assert items[0].transcript_text == "first transcript row\nsecond transcript row"
     assert items[0].metadata["transcript_rows"][0]["start"] == 10.0
     assert items[0].metadata["transcript_language"] == "en"
+
+
+@pytest.mark.asyncio
+async def test_youtube_collector_prefers_yt_dlp_with_cookie_export() -> None:
+    class FakeYtDlpService:
+        async def list_channel_videos(self, source_id: str, *, max_items: int, cookiefile):
+            assert source_id == "@openai"
+            assert max_items == 5
+            assert str(cookiefile).endswith("cookies.txt")
+            return [
+                YtDlpVideo(
+                    external_id="video1234567",
+                    url="https://www.youtube.com/watch?v=video1234567",
+                    title="Practical Claude Code rollout",
+                    description="Specific workflow details.",
+                    published_at="2026-05-03",
+                    channel_name="OpenAI",
+                    channel_id=SAMPLE_CHANNEL_ID,
+                    view_count=1234,
+                    like_count=56,
+                    duration_seconds=600,
+                )
+            ]
+
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            assert video_id == "video1234567"
+            return TranscriptResult(
+                text="The rollout adds a practical handoff workflow.",
+                rows=[{"text": "The rollout adds a practical handoff workflow.", "start": 30.0, "duration": 5.0}],
+                language_code="en",
+                translated=False,
+            )
+
+    class FakeSession:
+        async def export_netscape_cookies(self, *, platform: str):
+            assert platform == "youtube"
+            return "/tmp/cookies.txt"
+
+    collector = YouTubeCollector(
+        session_manager=FakeSession(),  # type: ignore[arg-type]
+        yt_dlp_service=FakeYtDlpService(),  # type: ignore[arg-type]
+        max_items=5,
+    )
+
+    items = await collector.collect_from_source("@openai")
+
+    assert len(items) == 1
+    assert items[0].external_id == "video1234567"
+    assert items[0].metadata["youtube_data_source"] == "yt_dlp"
+    assert items[0].metadata["view_count"] == 1234
+    assert items[0].metadata["like_count"] == 56
+    assert items[0].metadata["duration_seconds"] == 600
+    assert items[0].metadata["cookiefile_used"] is True
+    assert items[0].transcript_text == "The rollout adds a practical handoff workflow."
+
+
+def test_yt_dlp_caption_helpers_parse_json_and_select_caption() -> None:
+    info = {
+        "subtitles": {},
+        "automatic_captions": {
+            "uk": [{"ext": "json3", "url": "https://caption.test/uk.json3"}],
+            "en": [{"ext": "vtt", "url": "https://caption.test/en.vtt"}],
+        },
+    }
+
+    assert select_caption(info, prefer_languages=("en",), translate_to="en") == (
+        "https://caption.test/en.vtt",
+        "en",
+        False,
+    )
+    rows = parse_caption_payload(
+        '{"events":[{"tStartMs":12000,"dDurationMs":3000,"segs":[{"utf8":"hello "},{"utf8":"world"}]}]}'
+    )
+    assert rows == [{"text": "hello world", "start": 12.0, "duration": 3.0}]
 
 
 def test_youtube_login_url_detection() -> None:

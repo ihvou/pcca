@@ -27,6 +27,7 @@ from pcca.services.subject_service import SubjectService
 from pcca.services.desktop_command_service import DesktopCommandService
 from pcca.services.debug_bundle_service import create_debug_bundle
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
+from pcca.services.yt_dlp_service import YtDlpService, YtDlpUnavailableError
 
 
 async def _init_db(settings: Settings) -> None:
@@ -347,6 +348,7 @@ async def _youtube_rebackfill_transcripts(
         ).fetchall()
         stats["scanned"] = len(rows)
         service = YouTubeTranscriptService()
+        yt_dlp_service = YtDlpService()
         item_repo = ItemRepository(conn=db.conn)
         segment_repo = ItemSegmentRepository(conn=db.conn)
         effective_concurrency = max(1, int(concurrency or settings.youtube_transcript_backfill_concurrency))
@@ -356,7 +358,12 @@ async def _youtube_rebackfill_transcripts(
             if not video_id:
                 return row, None, False
             try:
-                transcript = await service.get_transcript(video_id)
+                try:
+                    transcript = await yt_dlp_service.get_transcript(video_id)
+                except YtDlpUnavailableError:
+                    transcript = None
+                if transcript is None:
+                    transcript = await service.get_transcript(video_id)
                 return row, transcript, False
             except Exception as exc:
                 print(f"Transcript fetch failed item_id={row['id']} video_id={video_id}: {exc}")

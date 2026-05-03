@@ -139,7 +139,13 @@ def test_youtube_rebackfill_transcripts_updates_historical_items(
                 translated=True,
             )
 
+    class FakeYtDlpService:
+        async def get_transcript(self, video_id: str):
+            _ = video_id
+            return None
+
     monkeypatch.setattr(cli, "YouTubeTranscriptService", FakeYouTubeTranscriptService)
+    monkeypatch.setattr(cli, "YtDlpService", FakeYtDlpService)
 
     async def setup() -> tuple[int, str | None]:
         settings = Settings.from_env()

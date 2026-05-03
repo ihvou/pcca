@@ -54,6 +54,7 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     telegram_bot_token: str | None
+    model_router_timeout_seconds: int = 180
     session_refresh_enabled: bool = True
     session_refresh_cooldown_seconds: int = 1800
     session_refresh_browser: str | None = None
@@ -91,6 +92,10 @@ class Settings:
         # morning_cron auto-send for users who have a stable nightly+morning routine.
         digest_auto_send_raw = (_env("PCCA_DIGEST_AUTO_SEND", "false") or "false").strip().lower()
         digest_auto_send = digest_auto_send_raw in {"1", "true", "yes", "on"}
+        try:
+            model_router_timeout_seconds = int(_env("PCCA_MODEL_ROUTER_TIMEOUT_SECONDS", "180") or "180")
+        except ValueError:
+            model_router_timeout_seconds = 180
         session_refresh_enabled_raw = (_env("PCCA_SESSION_REFRESH_ENABLED", "true") or "true").strip().lower()
         session_refresh_enabled = session_refresh_enabled_raw in {"1", "true", "yes", "on"}
         try:
@@ -151,6 +156,7 @@ class Settings:
             ollama_enabled=ollama_enabled,
             ollama_base_url=_env("PCCA_OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434",
             ollama_model=_env("PCCA_OLLAMA_MODEL", "qwen2.5:7b") or "qwen2.5:7b",
+            model_router_timeout_seconds=max(1, model_router_timeout_seconds),
             telegram_bot_token=_env("PCCA_TELEGRAM_BOT_TOKEN"),
             session_refresh_enabled=session_refresh_enabled,
             session_refresh_cooldown_seconds=max(0, session_refresh_cooldown_seconds),

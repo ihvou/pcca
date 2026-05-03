@@ -273,6 +273,7 @@ class FailingEmbeddingService:
 class FakeBatchModelRouter:
     def __init__(self) -> None:
         self.batch_calls: list[dict] = []
+        self.refine_calls: list[dict] = []
 
     async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
         self.batch_calls.append(
@@ -280,6 +281,7 @@ class FakeBatchModelRouter:
                 "subject_name": subject_name,
                 "subject_description": subject_description,
                 "candidate_count": len(candidates),
+                "candidate_texts": [candidate.text for candidate in candidates],
             }
         )
         return {
@@ -290,10 +292,24 @@ class FakeBatchModelRouter:
                     "score_delta": 0.01,
                     "rationale": "batch considered full description",
                     "key_message": f"Useful key message for item {candidate.item_id}.",
-                    "refined_segment": f"Refined segment for item {candidate.item_id}.",
                 },
             )()
             for candidate in candidates
+        }
+
+    async def refine_batch(self, *, subject_name: str, subject_description: str, candidates: list, limit: int = 5):
+        self.refine_calls.append(
+            {
+                "subject_name": subject_name,
+                "subject_description": subject_description,
+                "candidate_count": len(candidates),
+                "limit": limit,
+                "candidate_texts": [candidate.text for candidate in candidates],
+            }
+        )
+        return {
+            candidate.item_id: f"Refined segment for item {candidate.item_id}."
+            for candidate in candidates[:limit]
         }
 
     async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
@@ -1363,12 +1379,15 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
     stats = await orchestrator.run_nightly_collection()
 
     assert stats["model_batch_rerank_calls"] == 1
+    assert stats["model_refinement_batch_calls"] == 1
     assert stats["items_model_reranked"] == 3
+    assert stats["items_model_refined"] == 3
     assert model_router.batch_calls[0]["subject_name"] == "AI Tools & Tips"
     assert "leading AI companies" in model_router.batch_calls[0]["subject_description"]
     assert "Include:" not in model_router.batch_calls[0]["subject_description"]
     assert "Avoid:" not in model_router.batch_calls[0]["subject_description"]
     assert model_router.batch_calls[0]["candidate_count"] == 3
+    assert model_router.refine_calls[0]["candidate_count"] == 3
     rows = await (
         await db.conn.execute("SELECT rationale_json FROM item_segment_scores ORDER BY item_id")
     ).fetchall()

@@ -35,6 +35,7 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     assert settings.platform_empty_threshold == 25
     assert settings.scorer == "both"
     assert settings.embedding_model == "nomic-embed-text:v1.5"
+    assert settings.model_router_timeout_seconds == 180
     assert settings.auto_backfill_embeddings is True
 
 
@@ -59,6 +60,7 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
                 "PCCA_PLATFORM_EMPTY_THRESHOLD=42",
                 "PCCA_SCORER=embedding",
                 "PCCA_EMBEDDING_MODEL=bge-small-en-v1.5",
+                "PCCA_MODEL_ROUTER_TIMEOUT_SECONDS=240",
                 "PCCA_AUTO_BACKFILL=false",
             ]
         ),
@@ -73,4 +75,5 @@ def test_session_refresh_settings(tmp_path, monkeypatch) -> None:
     assert settings.platform_empty_threshold == 42
     assert settings.scorer == "embedding"
     assert settings.embedding_model == "bge-small-en-v1.5"
+    assert settings.model_router_timeout_seconds == 240
     assert settings.auto_backfill_embeddings is False

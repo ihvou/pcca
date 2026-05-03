@@ -42,6 +42,7 @@ from pcca.services.source_service import SourceService
 from pcca.services.subject_service import SubjectService
 from pcca.services.telegram_service import TelegramService
 from pcca.services.voice_transcription_service import VoiceTranscriptionService
+from pcca.services.yt_dlp_service import YtDlpService
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class PCCAApp:
             enabled=self.settings.ollama_enabled,
             ollama_base_url=self.settings.ollama_base_url,
             ollama_model=self.settings.ollama_model,
+            timeout_seconds=self.settings.model_router_timeout_seconds,
         )
         embedding_service = EmbeddingService(
             enabled=self.settings.ollama_enabled and self.settings.scorer in {"embedding", "both"},
@@ -147,7 +149,10 @@ class PCCAApp:
             collectors={
                 "x": XCollector(session_manager=self.browser_session_manager),
                 "linkedin": LinkedInCollector(session_manager=self.browser_session_manager),
-                "youtube": YouTubeCollector(session_manager=self.browser_session_manager),
+                "youtube": YouTubeCollector(
+                    session_manager=self.browser_session_manager,
+                    yt_dlp_service=YtDlpService(),
+                ),
                 "reddit": RedditCollector(),
                 "rss": RSSCollector(),
                 "substack": RSSCollector(platform="substack"),

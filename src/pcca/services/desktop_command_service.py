@@ -458,6 +458,7 @@ class DesktopCommandService:
             enabled=settings.ollama_enabled,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
+            timeout_seconds=settings.model_router_timeout_seconds,
         )
         return PreferenceExtractionService(model_router=model_router)
 
