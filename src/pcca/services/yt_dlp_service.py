@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -38,6 +38,7 @@ class YtDlpVideo:
 @dataclass
 class YtDlpService:
     timeout_seconds: float = 60.0
+    failure_counts: dict[str, int] = field(default_factory=dict)
 
     async def list_channel_videos(
         self,
@@ -54,6 +55,15 @@ class YtDlpService:
             playlistend=max_items,
             extract_flat="in_playlist",
         )
+        failure_class = _failure_class(info)
+        if failure_class:
+            logger.warning(
+                "yt-dlp channel listing failed source=%s failure_class=%s message=%s",
+                source_id,
+                failure_class,
+                info.get("_failure_message"),
+            )
+            return []
         entries = info.get("entries") if isinstance(info, dict) else None
         if not isinstance(entries, list):
             entries = [info] if isinstance(info, dict) else []
@@ -84,6 +94,15 @@ class YtDlpService:
             extract_flat=False,
         )
         if not isinstance(info, dict):
+            return None
+        failure_class = _failure_class(info)
+        if failure_class:
+            logger.warning(
+                "yt-dlp transcript info failed video_id=%s failure_class=%s message=%s",
+                video_id,
+                failure_class,
+                info.get("_failure_message"),
+            )
             return None
         selected = select_caption(info, prefer_languages=prefer_languages, translate_to=translate_to)
         if selected is None:
@@ -131,9 +150,30 @@ class YtDlpService:
             options["playlistend"] = max(1, int(playlistend))
         if cookiefile is not None and Path(cookiefile).exists():
             options["cookiefile"] = str(cookiefile)
-        with YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=False)
+        try:
+            with YoutubeDL(options) as ydl:
+                info = ydl.extract_info(url, download=False)
+        except Exception as exc:
+            failure_class = classify_yt_dlp_error(exc)
+            self.failure_counts[failure_class] = self.failure_counts.get(failure_class, 0) + 1
+            logger.warning(
+                "yt-dlp extract_info failed url=%s failure_class=%s error=%s",
+                url,
+                failure_class,
+                exc,
+                exc_info=failure_class == "unknown",
+            )
+            return {
+                "_failure_class": failure_class,
+                "_failure_message": str(exc),
+                "_url": url,
+            }
         return info if isinstance(info, dict) else {}
+
+    def drain_failure_counts(self) -> dict[str, int]:
+        out = dict(self.failure_counts)
+        self.failure_counts.clear()
+        return out
 
     @staticmethod
     def _video_from_info(info: dict[str, Any]) -> YtDlpVideo | None:
@@ -185,6 +225,27 @@ def select_caption(
             url = _caption_url(entries)
             if url:
                 return (url, str(lang), translated)
+    return None
+
+
+def classify_yt_dlp_error(exc: Exception) -> str:
+    name = type(exc).__name__.lower()
+    if "georestricted" in name or ("geo" in name and "restricted" in name):
+        return "geo_restricted"
+    if "unavailablevideo" in name or "unavailable" in name:
+        return "unavailable"
+    if "regexnotfound" in name or "regex" in name:
+        return "regex_not_found"
+    if "extractor" in name:
+        return "extractor_error"
+    if "download" in name:
+        return "download_error"
+    return "unknown"
+
+
+def _failure_class(info: Any) -> str | None:
+    if isinstance(info, dict) and isinstance(info.get("_failure_class"), str):
+        return str(info["_failure_class"])
     return None
 
 

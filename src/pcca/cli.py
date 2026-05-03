@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from pcca.app import PCCAApp
+from pcca.browser.session_manager import BrowserSessionManager
 from pcca.config import Settings
 from pcca.db import Database
 from pcca.logging_utils import configure_logging
@@ -328,6 +329,7 @@ async def _youtube_rebackfill_transcripts(
     await db.connect()
     await db.initialize()
     stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0}
+    cookiefile_path: Path | None = await _export_youtube_cookiefile_for_cli(settings)
     try:
         if db.conn is None:
             raise RuntimeError("Database connection unavailable.")
@@ -359,7 +361,7 @@ async def _youtube_rebackfill_transcripts(
                 return row, None, False
             try:
                 try:
-                    transcript = await yt_dlp_service.get_transcript(video_id)
+                    transcript = await yt_dlp_service.get_transcript(video_id, cookiefile=cookiefile_path)
                 except YtDlpUnavailableError:
                     transcript = None
                 if transcript is None:
@@ -427,6 +429,47 @@ async def _youtube_rebackfill_transcripts(
     finally:
         await db.close()
     return stats
+
+
+async def _export_youtube_cookiefile_for_cli(settings: Settings) -> Path | None:
+    profile_dir = settings.browser_profiles_dir / "youtube"
+    if not profile_dir.exists():
+        message = (
+            "YouTube cookie file present=False. Running anonymously - "
+            "IpBlocked is likely on larger rebackfills. Capture a YouTube session first."
+        )
+        print(message, flush=True)
+        logging.getLogger(__name__).warning(message)
+        return None
+    manager = BrowserSessionManager(
+        profiles_root=settings.browser_profiles_dir,
+        headless=settings.browser_headless,
+        headful_platforms=settings.browser_headful_platforms,
+        browser_channel=settings.browser_channel,
+    )
+    try:
+        cookiefile = await manager.export_netscape_cookies(platform="youtube")
+    except Exception as exc:
+        message = (
+            "YouTube cookie file present=False. Running anonymously - "
+            f"could not export local session cookies: {exc}"
+        )
+        print(message, flush=True)
+        logging.getLogger(__name__).warning(message, exc_info=True)
+        return None
+    finally:
+        try:
+            await manager.stop()
+        except Exception:
+            logging.getLogger(__name__).debug("Could not stop temporary browser session manager.", exc_info=True)
+
+    present = cookiefile is not None and Path(cookiefile).exists()
+    message = f"YouTube cookie file present={present}"
+    if not present:
+        message += ". Running anonymously - IpBlocked is likely on larger rebackfills."
+    print(message, flush=True)
+    logging.getLogger(__name__).info(message)
+    return Path(cookiefile) if present and cookiefile is not None else None
 
 
 async def _add_source_url(

@@ -528,6 +528,15 @@ class YouTubeCollector:
             logger.info("Could not export YouTube cookies for yt-dlp; continuing without cookies.", exc_info=True)
             return None
 
+    def drain_failure_stats(self) -> dict[str, dict[str, int]]:
+        if self.yt_dlp_service is None:
+            return {}
+        drainer = getattr(self.yt_dlp_service, "drain_failure_counts", None)
+        if not callable(drainer):
+            return {}
+        failures = drainer()
+        return {"yt_dlp_failures_by_class": failures} if failures else {}
+
     @staticmethod
     def _item_text(*, title: str | None, description: str | None, transcript_text: str | None) -> str:
         text = "\n\n".join(part for part in (title or "", description or "") if part).strip()

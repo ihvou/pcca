@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
@@ -140,7 +141,8 @@ def test_youtube_rebackfill_transcripts_updates_historical_items(
             )
 
     class FakeYtDlpService:
-        async def get_transcript(self, video_id: str):
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            _ = cookiefile
             _ = video_id
             return None
 
@@ -223,3 +225,97 @@ def test_youtube_rebackfill_transcripts_updates_historical_items(
     assert metadata["transcript_rows"] == [{"text": "frontline details", "start": 12.0, "duration": 4.0}]
     assert new_hash != old_hash
     assert embedding_json is None
+
+
+def test_youtube_rebackfill_passes_cookiefile_to_yt_dlp(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+    seen: dict[str, object] = {}
+    cookiefile = tmp_path / "cookies.txt"
+    cookiefile.write_text("# cookies\n", encoding="utf-8")
+
+    class FakeBrowserSessionManager:
+        def __init__(self, **kwargs):
+            seen["manager_kwargs"] = kwargs
+
+        async def export_netscape_cookies(self, *, platform: str):
+            seen["platform"] = platform
+            return cookiefile
+
+        async def stop(self):
+            seen["stopped"] = True
+
+    class FakeYtDlpService:
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            seen["video_id"] = video_id
+            seen["cookiefile"] = cookiefile
+            return TranscriptResult(
+                text="Authenticated transcript text.",
+                rows=[{"text": "Authenticated transcript text.", "start": 1.0, "duration": 2.0}],
+                language_code="en",
+                translated=False,
+            )
+
+    class UnusedLegacyTranscriptService:
+        async def get_transcript(self, video_id: str):
+            raise AssertionError(f"legacy transcript fallback should not run for {video_id}")
+
+    monkeypatch.setattr(cli, "BrowserSessionManager", FakeBrowserSessionManager)
+    monkeypatch.setattr(cli, "YtDlpService", FakeYtDlpService)
+    monkeypatch.setattr(cli, "YouTubeTranscriptService", UnusedLegacyTranscriptService)
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        (settings.browser_profiles_dir / "youtube").mkdir(parents=True)
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            item_repo = ItemRepository(conn=db.conn)
+            stats = await item_repo.upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video-auth",
+                        author="OpenAI",
+                        url="https://www.youtube.com/watch?v=video-auth",
+                        text="Original title",
+                        transcript_text=None,
+                        published_at="2026-05-01T10:00:00",
+                        metadata={},
+                    )
+                ]
+            )
+            return stats["item_ids"][0]
+        finally:
+            await db.close()
+
+    item_id = asyncio.run(setup())
+
+    cli.main(["youtube-rebackfill-transcripts", "--limit", "10", "--concurrency", "1"])
+
+    assert seen["platform"] == "youtube"
+    assert seen["stopped"] is True
+    assert seen["video_id"] == "video-auth"
+    assert seen["cookiefile"] == cookiefile
+
+    async def inspect() -> str | None:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute("SELECT transcript_text FROM items WHERE id = ?", (item_id,))
+            ).fetchone()
+            return row["transcript_text"]
+        finally:
+            await db.close()
+
+    assert asyncio.run(inspect()) == "Authenticated transcript text."

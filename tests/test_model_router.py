@@ -153,3 +153,45 @@ async def test_model_router_logs_malformed_json_preview(caplog: pytest.LogCaptur
 
     assert results == {}
     assert "response_preview=not json and no ranked objects" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_preference_extraction_uses_shared_model_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = {}
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout):
+            seen["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url: str, *, json: dict):
+            seen["url"] = url
+            seen["prompt"] = json["prompt"]
+            return httpx.Response(
+                200,
+                json={
+                    "response": '{"title":"Ukraine War News","include_terms":["ukraine"],"exclude_terms":["rumors"],"quality_notes":"Authority: reputable"}'
+                },
+                request=httpx.Request("POST", url),
+            )
+
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    router = ModelRouter(
+        enabled=True,
+        ollama_base_url="http://ollama.test",
+        ollama_model="qwen2.5:7b",
+        timeout_seconds=37.0,
+    )
+
+    result = await router.extract_subject_preferences(text="Ukraine war updates from reputable sources")
+
+    assert seen["timeout"] == 37.0
+    assert seen["url"] == "http://ollama.test/api/generate"
+    assert result is not None
+    assert result.title == "Ukraine War News"
+    assert result.include_terms == ["ukraine"]

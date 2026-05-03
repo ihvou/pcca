@@ -1,0 +1,25 @@
+{
+  "events": [
+    {
+      "tStartMs": 1000,
+      "dDurationMs": 2500,
+      "segs": [
+        {"utf8": "Привіт "},
+        {"utf8": "світе"}
+      ]
+    },
+    {
+      "tStartMs": 4200,
+      "dDurationMs": 1800,
+      "segs": [
+        {"utf8": "<b>Claude</b> &amp; Code "},
+        {"utf8": "ships handoffs"}
+      ]
+    },
+    {
+      "tStartMs": 6500,
+      "dDurationMs": 500,
+      "segs": [{"utf8": "   "}]
+    }
+  ]
+}

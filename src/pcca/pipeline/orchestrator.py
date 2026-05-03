@@ -442,6 +442,29 @@ class PipelineOrchestrator:
         metadata["embedding_not_warmed_subjects"] = list(stats.get("embedding_not_warmed_subjects") or [])
 
     @staticmethod
+    def _merge_count_map(target: dict, incoming: dict | None) -> None:
+        if not isinstance(incoming, dict):
+            return
+        for key, value in incoming.items():
+            try:
+                count = int(value)
+            except (TypeError, ValueError):
+                continue
+            target[str(key)] = int(target.get(str(key), 0)) + count
+
+    def _drain_collector_observability(self, collector, stats: dict, metadata: dict) -> None:
+        drainer = getattr(collector, "drain_failure_stats", None)
+        if not callable(drainer):
+            return
+        payload = drainer()
+        if not isinstance(payload, dict):
+            return
+        yt_dlp_failures = payload.get("yt_dlp_failures_by_class")
+        if isinstance(yt_dlp_failures, dict):
+            self._merge_count_map(stats.setdefault("yt_dlp_failures_by_class", {}), yt_dlp_failures)
+            self._merge_count_map(metadata.setdefault("yt_dlp_failures_by_class", {}), yt_dlp_failures)
+
+    @staticmethod
     def _model_candidate_text(*, item: CollectedItem, segment=None) -> str:
         if segment is not None and getattr(segment, "text", None):
             return str(segment.text)
@@ -1083,6 +1106,7 @@ class PipelineOrchestrator:
             "sources_not_found": 0,
             "sources_reresolved": 0,
             "collector_errors": 0,
+            "yt_dlp_failures_by_class": {},
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
@@ -1127,6 +1151,7 @@ class PipelineOrchestrator:
             "embedding_items_scored": 0,
             "embedding_not_warmed": False,
             "embedding_not_warmed_subjects": [],
+            "yt_dlp_failures_by_class": {},
         }
         bot_failure_streaks: dict[str, int] = {}
         empty_streaks: dict[str, int] = {}
@@ -1280,7 +1305,9 @@ class PipelineOrchestrator:
                                 source.source_id = updated_source.source_id
                     try:
                         items = await collector.collect_from_source(source.account_or_channel_id)
+                        self._drain_collector_observability(collector, stats, metadata)
                     except SourceNotFoundError as exc:
+                        self._drain_collector_observability(collector, stats, metadata)
                         recovered = await self._attempt_not_found_recovery(
                             run_id=run_id,
                             source=source,
@@ -1300,7 +1327,9 @@ class PipelineOrchestrator:
                             continue
                         try:
                             items = await collector.collect_from_source(source.account_or_channel_id)
+                            self._drain_collector_observability(collector, stats, metadata)
                         except SourceNotFoundError as retry_exc:
+                            self._drain_collector_observability(collector, stats, metadata)
                             await self._mark_source_not_found(
                                 run_id=run_id,
                                 source=source,
@@ -1355,6 +1384,7 @@ class PipelineOrchestrator:
                             len(changed_item_ids),
                         )
                 except SessionChallengedError as exc:
+                    self._drain_collector_observability(collector, stats, metadata)
                     await self.source_service.mark_source_needs_reauth(source.source_id)
                     stats["sources_needing_reauth"] += 1
                     record_platform_failure(source.platform, reason=f"session_challenged:{exc.challenge_kind}")
@@ -1368,6 +1398,7 @@ class PipelineOrchestrator:
                         int((time.monotonic() - source_started_at) * 1000),
                     )
                 except Exception:
+                    self._drain_collector_observability(collector, stats, metadata)
                     logger.exception(
                         "Collector failed run_id=%s platform=%s source=%s duration_ms=%d",
                         run_id,

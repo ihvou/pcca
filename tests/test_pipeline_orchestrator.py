@@ -2098,3 +2098,69 @@ async def test_platform_circuit_breaker_resets_after_success_and_isolates_platfo
     assert second["sources_seen"] == 6
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_records_yt_dlp_failure_counts_in_run_logs(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    class ObservableYouTubeCollector:
+        platform = "youtube"
+
+        def __init__(self) -> None:
+            self.drained = False
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            return [
+                CollectedItem(
+                    platform="youtube",
+                    external_id=f"{source_id}-video",
+                    author="OpenAI",
+                    url=f"https://www.youtube.com/watch?v={source_id}",
+                    text="Claude Code workflow feature release with implementation steps",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                )
+            ]
+
+        def drain_failure_stats(self) -> dict[str, dict[str, int]]:
+            if self.drained:
+                return {}
+            self.drained = True
+            return {"yt_dlp_failures_by_class": {"extractor_error": 2, "download_error": 1}}
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    await source_service.monitor_source(platform="youtube", account_or_channel_id="UCYT", display_name="YouTube")
+
+    run_log_repo = RunLogRepository(conn=db.conn)
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=run_log_repo,
+        collectors={"youtube": ObservableYouTubeCollector()},
+    )
+
+    stats = await orchestrator.run_nightly_collection(platform="youtube", score=False)
+    row = await (
+        await db.conn.execute(
+            "SELECT stats_json, metadata_json FROM run_logs WHERE run_type = 'nightly_collection' ORDER BY id DESC LIMIT 1"
+        )
+    ).fetchone()
+    assert row is not None
+    persisted_stats = json.loads(row["stats_json"])
+    persisted_metadata = json.loads(row["metadata_json"])
+
+    assert stats["yt_dlp_failures_by_class"] == {"extractor_error": 2, "download_error": 1}
+    assert persisted_stats["yt_dlp_failures_by_class"] == {"extractor_error": 2, "download_error": 1}
+    assert persisted_metadata["yt_dlp_failures_by_class"] == {"extractor_error": 2, "download_error": 1}
+
+    await db.close()

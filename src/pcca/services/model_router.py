@@ -46,6 +46,8 @@ class ModelRouter:
     http_client: httpx.AsyncClient | None = field(default=None, repr=False)
 
     async def _post_generate(self, payload: dict) -> dict:
+        # All model calls, including subject creation/rebuild, share this
+        # timeout so PCCA_MODEL_ROUTER_TIMEOUT_SECONDS has one meaning.
         if self.http_client is not None:
             response = await self.http_client.post(f"{self.ollama_base_url}/api/generate", json=payload)
         else:
@@ -344,15 +346,9 @@ class ModelRouter:
                 len(text),
                 previous_title,
             )
-            # Subject creation is a rare, one-off interaction. The first call
-            # after Ollama startup loads the model into VRAM, which can take
-            # 30-60s on a 7B model — bumped from 25s to tolerate cold start.
-            async with httpx.AsyncClient(timeout=90.0) as client:
-                response = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
-                response.raise_for_status()
-                data = response.json()
+            data = await self._post_generate(payload)
             raw = data.get("response", "")
-            parsed = json.loads(raw)
+            parsed = parse_model_json_response(raw, context="preference extraction") or {}
             title = str(parsed.get("title") or previous_title or "New Subject").strip()
             include_terms = [
                 str(term).strip().lower()
