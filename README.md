@@ -1,7 +1,19 @@
 # PCCA — Personal Content Curation Agent
 
-Local-first agent that watches the sources you choose, scores everything against
-the subjects you care about, and sends concise **Briefs** to Telegram.
+Core problem:
+- People cannot read all the content from everyone they follow.
+- People usually care about specific interests; most followed content is
+  irrelevant to those interests.
+- With follows spread across many platforms, people miss the few updates that
+  are actually relevant.
+
+PCCA solves this by:
+- Finding truly relevant content for the user's specific subjects across
+  X, YouTube, LinkedIn, Reddit, Apple Podcasts, Spotify, Substack, Medium, and
+  other sources.
+- Collecting posts, videos, transcripts, podcasts, and metadata into a local
+  SQLite database.
+- Delivering key ideas as compact **Briefs** to the user's Telegram.
 
 [scenarios.md](./scenarios.md) is the product source of truth. This README is
 how to run the current implementation today.
