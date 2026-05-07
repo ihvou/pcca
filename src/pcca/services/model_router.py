@@ -11,6 +11,57 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+RERANK_BATCH_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "ranked": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "score_delta": {"type": "number"},
+                    "reason": {"type": "string"},
+                    "key_message": {"type": "string"},
+                },
+                "required": ["item_id", "score_delta", "reason", "key_message"],
+            },
+        }
+    },
+    "required": ["ranked"],
+}
+
+
+REFINE_BATCH_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "refined": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "item_id": {"type": "integer"},
+                    "refined_segment": {"type": "string"},
+                },
+                "required": ["item_id", "refined_segment"],
+            },
+        }
+    },
+    "required": ["refined"],
+}
+
+
+SINGLE_RERANK_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "score_delta": {"type": "number"},
+        "reason": {"type": "string"},
+        "key_message": {"type": "string"},
+    },
+    "required": ["score_delta", "reason", "key_message"],
+}
+
+
 @dataclass
 class ModelRerankResult:
     score_delta: float
@@ -45,14 +96,17 @@ class ModelRouter:
     timeout_seconds: float = 180.0
     http_client: httpx.AsyncClient | None = field(default=None, repr=False)
 
-    async def _post_generate(self, payload: dict) -> dict:
+    async def _post_generate(self, payload: dict, *, schema: dict | None = None) -> dict:
         # All model calls, including subject creation/rebuild, share this
         # timeout so PCCA_MODEL_ROUTER_TIMEOUT_SECONDS has one meaning.
+        request_payload = dict(payload)
+        if schema is not None:
+            request_payload["format"] = schema
         if self.http_client is not None:
-            response = await self.http_client.post(f"{self.ollama_base_url}/api/generate", json=payload)
+            response = await self.http_client.post(f"{self.ollama_base_url}/api/generate", json=request_payload)
         else:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
-                response = await client.post(f"{self.ollama_base_url}/api/generate", json=payload)
+                response = await client.post(f"{self.ollama_base_url}/api/generate", json=request_payload)
         response.raise_for_status()
         return response.json()
 
@@ -103,7 +157,7 @@ class ModelRouter:
                 self.ollama_model,
                 len(compact_candidates),
             )
-            data = await self._post_generate(payload)
+            data = await self._post_generate(payload, schema=RERANK_BATCH_RESPONSE_SCHEMA)
             raw = data.get("response", "")
             parsed = parse_model_json_response(raw, context=f"batch rerank subject={subject_name}") or {}
             ranked = parsed.get("ranked", [])
@@ -203,7 +257,7 @@ class ModelRouter:
                 self.ollama_model,
                 len(compact_candidates),
             )
-            data = await self._post_generate(payload)
+            data = await self._post_generate(payload, schema=REFINE_BATCH_RESPONSE_SCHEMA)
             raw = data.get("response", "")
             parsed = parse_model_json_response(raw, context=f"refinement subject={subject_name}") or {}
             refined = parsed.get("refined", [])
@@ -281,7 +335,7 @@ class ModelRouter:
                 len(text),
                 heuristic_score,
             )
-            data = await self._post_generate(payload)
+            data = await self._post_generate(payload, schema=SINGLE_RERANK_RESPONSE_SCHEMA)
             raw = data.get("response", "")
             parsed = parse_model_json_response(raw, context=f"single rerank subject={subject_name}") or {}
             delta = float(parsed.get("score_delta", 0.0))

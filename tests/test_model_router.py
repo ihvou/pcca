@@ -7,6 +7,8 @@ import pytest
 from pcca.services.model_router import (
     ModelRerankCandidate,
     ModelRouter,
+    REFINE_BATCH_RESPONSE_SCHEMA,
+    RERANK_BATCH_RESPONSE_SCHEMA,
     build_preference_extraction_prompt,
     parse_model_json_response,
 )
@@ -81,6 +83,7 @@ async def test_model_router_batch_rerank_uses_configured_timeout_and_key_message
         )
 
     assert seen["path"] == "/api/generate"
+    assert seen["payload"]["format"] == RERANK_BATCH_RESPONSE_SCHEMA
     assert "refined_segment" not in seen["payload"]["prompt"]
     assert results[1].score_delta == pytest.approx(0.1)
     assert results[1].key_message == "The useful point is clear."
@@ -127,8 +130,53 @@ async def test_model_router_refinement_batch_is_separate_top_n_call() -> None:
         )
 
     assert "refined_segment" in seen["payload"]["prompt"]
+    assert seen["payload"]["format"] == REFINE_BATCH_RESPONSE_SCHEMA
     assert "not selected" not in seen["payload"]["prompt"]
     assert results == {2: "Cleaned up practical explanation."}
+
+
+@pytest.mark.asyncio
+async def test_model_router_batch_rerank_gracefully_handles_wrong_structured_shape(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.read().decode())
+        assert payload["format"] == RERANK_BATCH_RESPONSE_SCHEMA
+        return httpx.Response(
+            200,
+            json={
+                "response": json.dumps(
+                    {
+                        "articles": [
+                            {
+                                "title": "Fabricated feed item",
+                                "url": "https://example.com",
+                                "author": "Model",
+                                "date": "2026-05-04",
+                            }
+                        ]
+                    }
+                )
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = ModelRouter(
+            enabled=True,
+            ollama_base_url="http://ollama.test",
+            ollama_model="qwen2.5:7b",
+            http_client=client,
+        )
+        with caplog.at_level(logging.WARNING):
+            results = await router.rerank_batch(
+                subject_name="AI Jobs",
+                subject_description="Impact of AI on IT labor market.",
+                candidates=[ModelRerankCandidate(item_id=1, text="AI jobs analysis", heuristic_score=0.7)],
+            )
+
+    assert results == {}
+    assert "returned no ranked items" in caplog.text
+    assert "articles" in caplog.text
 
 
 @pytest.mark.asyncio
