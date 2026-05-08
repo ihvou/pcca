@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -11,6 +12,7 @@ from pcca.app import PCCAApp
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.config import Settings
 from pcca.db import Database
+from pcca.dependency_doctor import check_runtime_dependencies, format_dependency_report
 from pcca.logging_utils import configure_logging
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.onboarding import OnboardingRepository
@@ -29,6 +31,22 @@ from pcca.services.desktop_command_service import DesktopCommandService
 from pcca.services.debug_bundle_service import create_debug_bundle
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 from pcca.services.yt_dlp_service import YtDlpService, YtDlpUnavailableError
+
+
+def _is_truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _check_dependency_health_for_startup(*, strict: bool = False) -> None:
+    checks = check_runtime_dependencies()
+    missing = [check for check in checks if not check.installed]
+    if not missing:
+        return
+    report = format_dependency_report(checks)
+    if strict:
+        print(report)
+        raise SystemExit(1)
+    logging.getLogger(__name__).warning("Runtime dependency check found missing dependencies:\n%s", report)
 
 
 async def _init_db(settings: Settings) -> None:
@@ -318,21 +336,117 @@ async def _repair_subject_descriptions(
     return {"repaired": repaired, "missing": missing}
 
 
+def _raw_text_without_transcript(raw_text: str | None, transcript_text: str | None) -> str:
+    raw = str(raw_text or "")
+    transcript = str(transcript_text or "").strip()
+    if not raw or not transcript:
+        return raw.strip()
+    cleaned = raw
+    if transcript in cleaned:
+        cleaned = cleaned.replace(transcript, "")
+    snippet = transcript[:1200].strip()
+    if snippet and snippet in cleaned:
+        cleaned = cleaned.replace(snippet, "")
+    return "\n\n".join(part.strip() for part in cleaned.splitlines() if part.strip())
+
+
+async def _clean_youtube_livechat_junk(
+    db: Database,
+    *,
+    item_repo: ItemRepository,
+    segment_repo: ItemSegmentRepository,
+) -> int:
+    if db.conn is None:
+        raise RuntimeError("Database connection unavailable.")
+    rows = await (
+        await db.conn.execute(
+            """
+            SELECT id, canonical_url, raw_text, transcript_text, metadata_json
+            FROM items
+            WHERE platform = 'youtube'
+              AND transcript_text IS NOT NULL
+              AND (
+                LOWER(transcript_text) LIKE '%live_chat%'
+                OR LOWER(transcript_text) LIKE '%live chat%'
+                OR LOWER(transcript_text) LIKE '%rechat%'
+                OR LOWER(transcript_text) LIKE '%replaychat%'
+                OR LOWER(transcript_text) LIKE '%fan_funded%'
+                OR LOWER(metadata_json) LIKE '%live_chat%'
+                OR LOWER(metadata_json) LIKE '%rechat%'
+                OR LOWER(metadata_json) LIKE '%replaychat%'
+              )
+            """
+        )
+    ).fetchall()
+    cleaned = 0
+    for row in rows:
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            metadata = {}
+        for key in ("transcript_rows", "transcript_language", "transcript_translated"):
+            metadata.pop(key, None)
+        metadata["transcript_cleaned_livechat_junk"] = True
+        next_raw_text = _raw_text_without_transcript(row["raw_text"], row["transcript_text"])
+        content_hash = item_repo._content_hash_values(
+            url=row["canonical_url"],
+            text=next_raw_text,
+            transcript_text=None,
+        )
+        await db.conn.execute(
+            """
+            UPDATE items
+            SET raw_text = ?,
+                transcript_text = NULL,
+                metadata_json = ?,
+                content_hash = ?,
+                updated_at = CURRENT_TIMESTAMP,
+                content_embedding_json = NULL,
+                content_embedding_model = NULL,
+                content_embedding_text_hash = NULL,
+                content_embedding_updated_at = NULL
+            WHERE id = ?
+            """,
+            (
+                next_raw_text,
+                json.dumps(metadata),
+                content_hash,
+                int(row["id"]),
+            ),
+        )
+        await segment_repo.delete_segments_for_item(item_id=int(row["id"]))
+        await db.conn.commit()
+        cleaned += 1
+        print(f"Cleaned live-chat transcript junk item_id={row['id']}", flush=True)
+    return cleaned
+
+
 async def _youtube_rebackfill_transcripts(
     settings: Settings,
     *,
     limit: int | None = None,
     concurrency: int | None = None,
+    clean_livechat_junk: bool = False,
 ) -> dict[str, int]:
     settings.ensure_dirs()
     db = Database(path=settings.db_path)
     await db.connect()
     await db.initialize()
-    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0}
+    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0, "cleaned": 0}
     cookiefile_path: Path | None = await _export_youtube_cookiefile_for_cli(settings)
     try:
         if db.conn is None:
             raise RuntimeError("Database connection unavailable.")
+        item_repo = ItemRepository(conn=db.conn)
+        segment_repo = ItemSegmentRepository(conn=db.conn)
+        if clean_livechat_junk:
+            stats["cleaned"] = await _clean_youtube_livechat_junk(
+                db,
+                item_repo=item_repo,
+                segment_repo=segment_repo,
+            )
         limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
         params: tuple[int, ...] = (int(limit),) if limit_clause else ()
         rows = await (
@@ -351,8 +465,6 @@ async def _youtube_rebackfill_transcripts(
         stats["scanned"] = len(rows)
         service = YouTubeTranscriptService()
         yt_dlp_service = YtDlpService()
-        item_repo = ItemRepository(conn=db.conn)
-        segment_repo = ItemSegmentRepository(conn=db.conn)
         effective_concurrency = max(1, int(concurrency or settings.youtube_transcript_backfill_concurrency))
 
         async def fetch(row) -> tuple[Any, Any, bool]:
@@ -644,7 +756,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="pcca", description="Personal Content Curation Agent")
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("doctor", help="Check runtime dependency imports against pyproject.toml")
     sub.add_parser("init-db", help="Initialize local database schema")
+
 
     create_subject_parser = sub.add_parser("create-subject", help="Create a subject with non-empty preferences")
     create_subject_parser.add_argument("--name", required=True, help="Subject name")
@@ -845,6 +959,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         help="Maximum concurrent transcript fetches. Defaults to PCCA_YOUTUBE_TRANSCRIPT_BACKFILL_CONCURRENCY.",
     )
+    youtube_backfill_parser.add_argument(
+        "--clean-livechat-junk",
+        action="store_true",
+        help="Reset existing YouTube transcript rows that contain live-chat/rechat junk before rebackfilling.",
+    )
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -861,6 +980,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     configure_logging()
     args = build_parser().parse_args(argv)
     settings = Settings.from_env()
+
+    if args.command == "doctor":
+        checks = check_runtime_dependencies()
+        print(format_dependency_report(checks))
+        if any(not check.installed for check in checks):
+            raise SystemExit(1)
+        return
+
+    _check_dependency_health_for_startup(strict=_is_truthy(os.getenv("PCCA_STRICT_DEPS")))
 
     if args.command == "init-db":
         result = asyncio.run(DesktopCommandService().init_db())
@@ -1082,6 +1210,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 limit=args.limit,
                 concurrency=args.concurrency,
+                clean_livechat_junk=args.clean_livechat_junk,
             )
         )
         print(json.dumps(stats, indent=2, sort_keys=True))

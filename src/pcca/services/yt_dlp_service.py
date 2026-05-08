@@ -4,12 +4,11 @@ import asyncio
 import json
 import logging
 import re
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-
-import httpx
 
 from pcca.collectors.youtube_utils import build_channel_videos_url, extract_video_id
 from pcca.services.youtube_transcript_service import TranscriptResult
@@ -33,6 +32,14 @@ class YtDlpVideo:
     view_count: int | None = None
     like_count: int | None = None
     duration_seconds: int | None = None
+
+
+@dataclass(frozen=True)
+class CaptionSelection:
+    url: str
+    language_code: str | None
+    translated: bool
+    source: str
 
 
 @dataclass
@@ -104,27 +111,39 @@ class YtDlpService:
                 info.get("_failure_message"),
             )
             return None
-        selected = select_caption(info, prefer_languages=prefer_languages, translate_to=translate_to)
+        selected = _select_caption_track(info, prefer_languages=prefer_languages, translate_to=translate_to)
         if selected is None:
             logger.info("yt-dlp transcript unavailable video_id=%s", video_id)
             return None
-        caption_url, language_code, translated = selected
-        async with httpx.AsyncClient(timeout=self.timeout_seconds, follow_redirects=True) as client:
-            response = await client.get(caption_url)
-            response.raise_for_status()
-        rows = parse_caption_payload(response.text)
+        raw_caption = await asyncio.to_thread(
+            self._download_caption_payload,
+            video_url,
+            selection=selected,
+            cookiefile=Path(cookiefile) if cookiefile else None,
+        )
+        if not raw_caption:
+            logger.info("yt-dlp transcript download produced no subtitle file video_id=%s", video_id)
+            return None
+        rows = parse_caption_payload(raw_caption)
         text = "\n".join(row["text"] for row in rows if row.get("text")).strip()
-        if not text:
+        if not _caption_rows_are_usable(rows, text):
+            logger.info(
+                "yt-dlp transcript rejected by sanity checks video_id=%s language=%s rows=%d chars=%d",
+                video_id,
+                selected.language_code,
+                len(rows),
+                len(text),
+            )
             return None
         logger.info(
             "yt-dlp transcript fetched video_id=%s language=%s translated=%s rows=%d chars=%d",
             video_id,
-            language_code,
-            translated,
+            selected.language_code,
+            selected.translated,
             len(rows),
             len(text),
         )
-        return TranscriptResult(text=text, rows=rows, language_code=language_code, translated=translated)
+        return TranscriptResult(text=text, rows=rows, language_code=selected.language_code, translated=selected.translated)
 
     def _extract_info(
         self,
@@ -170,6 +189,52 @@ class YtDlpService:
             }
         return info if isinstance(info, dict) else {}
 
+    def _download_caption_payload(
+        self,
+        video_url: str,
+        *,
+        selection: CaptionSelection,
+        cookiefile: Path | None,
+    ) -> str | None:
+        try:
+            from yt_dlp import YoutubeDL  # type: ignore[import-not-found]
+        except Exception as exc:  # pragma: no cover - environment dependent
+            raise YtDlpUnavailableError("yt-dlp is not installed. Install project dependencies and retry.") from exc
+
+        with tempfile.TemporaryDirectory(prefix="pcca-yt-captions-") as tmpdir:
+            tmp_path = Path(tmpdir)
+            options: dict[str, Any] = {
+                "quiet": True,
+                "no_warnings": True,
+                "skip_download": True,
+                "writesubtitles": selection.source == "subtitles",
+                "writeautomaticsub": selection.source == "automatic_captions",
+                "subtitlesformat": "json3/vtt/best",
+                "outtmpl": str(tmp_path / "%(id)s.%(ext)s"),
+                "socket_timeout": self.timeout_seconds,
+            }
+            if selection.language_code:
+                options["subtitleslangs"] = [selection.language_code]
+            if cookiefile is not None and Path(cookiefile).exists():
+                options["cookiefile"] = str(cookiefile)
+            try:
+                with YoutubeDL(options) as ydl:
+                    ydl.download([video_url])
+            except Exception as exc:
+                failure_class = classify_yt_dlp_error(exc)
+                self.failure_counts[failure_class] = self.failure_counts.get(failure_class, 0) + 1
+                logger.warning(
+                    "yt-dlp subtitle download failed url=%s language=%s source=%s failure_class=%s error=%s",
+                    video_url,
+                    selection.language_code,
+                    selection.source,
+                    failure_class,
+                    exc,
+                    exc_info=failure_class == "unknown",
+                )
+                return None
+            return _read_best_caption_file(tmp_path)
+
     def drain_failure_counts(self) -> dict[str, int]:
         out = dict(self.failure_counts)
         self.failure_counts.clear()
@@ -206,25 +271,39 @@ def select_caption(
     prefer_languages: list[str] | tuple[str, ...] = ("en",),
     translate_to: str = "en",
 ) -> tuple[str, str | None, bool] | None:
+    selection = _select_caption_track(info, prefer_languages=prefer_languages, translate_to=translate_to)
+    if selection is None:
+        return None
+    return (selection.url, selection.language_code, selection.translated)
+
+
+def _select_caption_track(
+    info: dict[str, Any],
+    *,
+    prefer_languages: list[str] | tuple[str, ...] = ("en",),
+    translate_to: str = "en",
+) -> CaptionSelection | None:
     subtitles = info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {}
     automatic = info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {}
     preferred = [lang for lang in prefer_languages if lang]
-    lookup_order: list[tuple[dict, str, bool]] = []
+    lookup_order: list[tuple[dict, str, bool, str]] = []
     for lang in preferred:
-        lookup_order.append((subtitles, lang, False))
-        lookup_order.append((automatic, lang, False))
+        lookup_order.append((subtitles, lang, False, "subtitles"))
+        lookup_order.append((automatic, lang, False, "automatic_captions"))
     if translate_to and translate_to not in preferred:
-        lookup_order.append((subtitles, translate_to, True))
-        lookup_order.append((automatic, translate_to, True))
-    for caption_map, lang, translated in lookup_order:
-        url = _caption_url(caption_map.get(lang))
+        lookup_order.append((subtitles, translate_to, True, "subtitles"))
+        lookup_order.append((automatic, translate_to, True, "automatic_captions"))
+    for caption_map, lang, translated, source in lookup_order:
+        entry = _caption_entry(caption_map.get(lang), lang=lang)
+        url = str(entry.get("url")) if entry and entry.get("url") else None
         if url:
-            return (url, lang, translated)
-    for caption_map, translated in ((subtitles, False), (automatic, False)):
+            return CaptionSelection(url=url, language_code=lang, translated=translated, source=source)
+    for caption_map, translated, source in ((subtitles, False, "subtitles"), (automatic, False, "automatic_captions")):
         for lang, entries in caption_map.items():
-            url = _caption_url(entries)
+            entry = _caption_entry(entries, lang=str(lang))
+            url = str(entry.get("url")) if entry and entry.get("url") else None
             if url:
-                return (url, str(lang), translated)
+                return CaptionSelection(url=url, language_code=str(lang), translated=translated, source=source)
     return None
 
 
@@ -259,9 +338,16 @@ def parse_caption_payload(raw: str) -> list[dict[str, Any]]:
 
 
 def _caption_url(entries: Any) -> str | None:
+    entry = _caption_entry(entries, lang=None)
+    return str(entry.get("url")) if entry and entry.get("url") else None
+
+
+def _caption_entry(entries: Any, *, lang: str | None) -> dict[str, Any] | None:
     if isinstance(entries, dict):
         entries = [entries]
     if not isinstance(entries, list):
+        return None
+    if _is_denied_caption_track(lang, entries):
         return None
     preferred_exts = ("json3", "vtt", "srv3", "ttml")
     for ext in preferred_exts:
@@ -269,11 +355,54 @@ def _caption_url(entries: Any) -> str | None:
             if not isinstance(entry, dict):
                 continue
             if str(entry.get("ext") or "").lower() == ext and entry.get("url"):
-                return str(entry["url"])
+                return entry
     for entry in entries:
         if isinstance(entry, dict) and entry.get("url"):
-            return str(entry["url"])
+            return entry
     return None
+
+
+def _is_denied_caption_track(lang: str | None, entries: list[Any]) -> bool:
+    lang_text = str(lang or "").strip().lower()
+    if any(token in lang_text for token in ("live_chat", "rechat", "live", "fan_funded")):
+        return True
+    if lang_text in {"live", "auto"}:
+        return True
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or entry.get("label") or "").strip().lower()
+        if any(token in name for token in ("live_chat", "live chat", "rechat", "fan_funded", "fan funded")):
+            return True
+    return False
+
+
+def _caption_rows_are_usable(rows: list[dict[str, Any]], text: str) -> bool:
+    if len(rows) < 10 or len(text.strip()) < 200:
+        return False
+    starts: dict[str, int] = {}
+    for row in rows:
+        key = str(row.get("start"))
+        starts[key] = starts.get(key, 0) + 1
+    if starts and max(starts.values()) / max(1, len(rows)) >= 0.8:
+        return False
+    return True
+
+
+def _read_best_caption_file(directory: Path) -> str | None:
+    preferred_exts = (".json3", ".vtt", ".srv3", ".ttml")
+    files = [
+        path
+        for path in directory.rglob("*")
+        if path.is_file() and path.suffix.lower() in preferred_exts
+    ]
+    if not files:
+        return None
+    files.sort(key=lambda path: preferred_exts.index(path.suffix.lower()))
+    try:
+        return files[0].read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return files[0].read_text(encoding="utf-8", errors="ignore")
 
 
 def _parse_json3_caption(text: str) -> list[dict[str, Any]]:

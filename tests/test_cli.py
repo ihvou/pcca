@@ -11,6 +11,7 @@ from pcca import cli
 from pcca.collectors.base import CollectedItem
 from pcca.config import Settings
 from pcca.db import Database
+from pcca.dependency_doctor import DependencyCheck
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.youtube_transcript_service import TranscriptResult
@@ -60,6 +61,54 @@ def test_run_nightly_once_score_flag_restores_legacy_scoring(monkeypatch: pytest
     cli.main(["run-nightly-once", "--score"])
 
     assert calls == [{"auto_backfill": True, "score": True}]
+
+
+def test_doctor_command_reports_dependency_health(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        cli,
+        "check_runtime_dependencies",
+        lambda: [
+            DependencyCheck(
+                distribution="yt-dlp",
+                import_name="yt_dlp",
+                installed=True,
+                version="2025.10.14",
+            )
+        ],
+    )
+
+    cli.main(["doctor"])
+
+    out = capsys.readouterr().out
+    assert "OK yt-dlp @ 2025.10.14" in out
+    assert "Summary: 1/1 runtime dependencies import cleanly." in out
+
+
+def test_doctor_command_exits_nonzero_when_dependency_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    monkeypatch.setattr(
+        cli,
+        "check_runtime_dependencies",
+        lambda: [
+            DependencyCheck(
+                distribution="yt-dlp",
+                import_name="yt_dlp",
+                installed=False,
+                error="ModuleNotFoundError: No module named yt_dlp",
+            )
+        ],
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["doctor"])
+
+    assert excinfo.value.code == 1
 
 
 def test_repair_subject_descriptions_command_updates_description_and_invalidates_embedding(
@@ -319,3 +368,109 @@ def test_youtube_rebackfill_passes_cookiefile_to_yt_dlp(
             await db.close()
 
     assert asyncio.run(inspect()) == "Authenticated transcript text."
+
+
+def test_youtube_rebackfill_clean_livechat_junk_resets_corrupt_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    class EmptyYtDlpService:
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            return None
+
+    class EmptyLegacyTranscriptService:
+        async def get_transcript(self, video_id: str):
+            return None
+
+    monkeypatch.setattr(cli, "YtDlpService", EmptyYtDlpService)
+    monkeypatch.setattr(cli, "YouTubeTranscriptService", EmptyLegacyTranscriptService)
+
+    junk = '{"live_chat": [{"replayChatItemAction": "spam"}]}'
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            item_repo = ItemRepository(conn=db.conn)
+            stats = await item_repo.upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video-live-chat",
+                        author="OpenAI",
+                        url="https://www.youtube.com/watch?v=video-live-chat",
+                        text=f"Original title\n\n{junk[:1200]}",
+                        transcript_text=junk,
+                        published_at="2026-05-01T10:00:00",
+                        metadata={"transcript_rows": [{"text": "junk"}], "existing": True},
+                    )
+                ]
+            )
+            item_id = stats["item_ids"][0]
+            await item_repo.save_content_embedding(
+                item_id,
+                model="fake",
+                embedding=[0.1],
+                text_hash="old",
+            )
+            await db.conn.execute(
+                """
+                INSERT INTO item_segments(item_id, start_offset, end_offset, segment_text, segment_type)
+                VALUES (?, 0, 5, 'junk', 'transcript')
+                """,
+                (item_id,),
+            )
+            await db.conn.commit()
+            return item_id
+        finally:
+            await db.close()
+
+    item_id = asyncio.run(setup())
+
+    cli.main(["youtube-rebackfill-transcripts", "--clean-livechat-junk", "--limit", "1", "--concurrency", "1"])
+
+    async def inspect() -> tuple[str | None, str | None, dict, str | None, int]:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute(
+                    """
+                    SELECT transcript_text, raw_text, metadata_json, content_embedding_json
+                    FROM items
+                    WHERE id = ?
+                    """,
+                    (item_id,),
+                )
+            ).fetchone()
+            segment_row = await (
+                await db.conn.execute("SELECT COUNT(*) AS c FROM item_segments WHERE item_id = ?", (item_id,))
+            ).fetchone()
+            return (
+                row["transcript_text"],
+                row["raw_text"],
+                json.loads(row["metadata_json"]),
+                row["content_embedding_json"],
+                int(segment_row["c"]),
+            )
+        finally:
+            await db.close()
+
+    transcript_text, raw_text, metadata, embedding_json, segment_count = asyncio.run(inspect())
+    assert transcript_text is None
+    assert raw_text == "Original title"
+    assert metadata["existing"] is True
+    assert metadata["transcript_cleaned_livechat_junk"] is True
+    assert "transcript_rows" not in metadata
+    assert embedding_json is None
+    assert segment_count == 0

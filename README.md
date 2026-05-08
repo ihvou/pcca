@@ -96,6 +96,9 @@ needed.
   tab. Sources flagged `needs_reauth` need session repair from the Sources tab.
 - **Briefs feel stale after preference change.** Use `/briefs`; it now rebuilds
   automatically when preferences changed since the last delivered Brief.
+- **A feature says a package is missing or silently falls back.** Run
+  `pcca doctor`; if anything is missing, run `pip install -e ".[dev]"` from
+  the repo root and try again.
 
 For deeper debugging, run `pcca debug-bundle` — it writes a redacted zip with
 logs and DB summaries (no raw cookies).
@@ -116,6 +119,8 @@ pcca run-briefs-once          # one-shot Brief delivery
 pcca rebuild-briefs-once      # force-recompute today's Briefs
 pcca capture-session --platform x [--browser auto|chrome|arc|brave|edge]
 pcca import-follows --subject "Subject Name" --platform x [--limit 150]
+pcca youtube-rebackfill-transcripts --clean-livechat-junk
+pcca doctor                   # verify installed runtime dependencies
 pcca debug-bundle             # redacted local support bundle
 ```
 
@@ -152,6 +157,7 @@ PCCA_OLLAMA_BASE_URL=http://localhost:11434
 # Logging
 PCCA_LOG_LEVEL=INFO               # DEBUG for verbose
 PCCA_LOG_FILE=                    # default .pcca/logs/pcca.log; "off" to disable
+PCCA_STRICT_DEPS=false            # true = fail startup if pyproject deps are missing
 ```
 
 ### Where things live

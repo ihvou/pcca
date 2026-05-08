@@ -73,6 +73,11 @@ Skipping any of these creates the silent platform-mismatch class of bug that alr
 
 **Schema changes** require a new migration tuple in `db.py::MIGRATIONS`. Tests in `test_db_bootstrap.py` must still pass on a fresh DB.
 
+**Dependency changes** require re-syncing the local environment. After editing
+`pyproject.toml` dependencies, run `pip install -e ".[dev]"`, then
+`pcca doctor`. The dependency smoke test fails if a declared runtime dependency
+does not import from the active venv.
+
 **Tests** live in `tests/`. Async tests use `pytest-asyncio`. Prefer integration tests against an on-disk tmpfile SQLite for repositories; mock only external IO (HTTP, Playwright page).
 
 **Before a PR**: `pytest` from the repo root must pass without setting `PYTHONPATH`. Don't create commits unless the user explicitly asks.

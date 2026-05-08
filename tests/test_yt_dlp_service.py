@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import builtins
+import json
 import sys
 import types
 from pathlib import Path
 
-import httpx
 import pytest
 
 from pcca.services.yt_dlp_service import (
@@ -18,6 +18,26 @@ from pcca.services.yt_dlp_service import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "yt_dlp"
+
+
+def _caption_json3(*, rows: int = 12, repeated_start: bool = False) -> str:
+    events = []
+    for idx in range(rows):
+        events.append(
+            {
+                "tStartMs": 1000 if repeated_start else idx * 2500,
+                "dDurationMs": 1800,
+                "segs": [
+                    {
+                        "utf8": (
+                            f"Transcript row {idx} explains concrete Ukrainian frontline context, "
+                            "why the update matters, and what practical signal a reader should keep."
+                        )
+                    }
+                ],
+            }
+        )
+    return json.dumps({"events": events})
 
 
 def test_json3_caption_fixture_parses_timing_unicode_and_markup() -> None:
@@ -71,6 +91,22 @@ def test_select_caption_priority_rungs() -> None:
     ) == ("https://caption.test/manual-uk", "uk", False)
 
 
+def test_select_caption_skips_live_chat_tracks() -> None:
+    manual_uk = {"ext": "json3", "url": "https://caption.test/manual-uk"}
+    live_chat = {"ext": "json3", "url": "https://caption.test/live-chat", "name": "Live chat replay"}
+
+    assert select_caption(
+        {"subtitles": {"live_chat": [live_chat], "uk": [manual_uk]}, "automatic_captions": {}},
+        prefer_languages=("en",),
+        translate_to="en",
+    ) == ("https://caption.test/manual-uk", "uk", False)
+    assert select_caption(
+        {"subtitles": {"live_chat": [live_chat]}, "automatic_captions": {"rechat": [live_chat]}},
+        prefer_languages=("en",),
+        translate_to="en",
+    ) is None
+
+
 def test_extract_info_sets_cookiefile_when_provided(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     seen: dict[str, object] = {}
     cookiefile = tmp_path / "cookies.txt"
@@ -79,6 +115,7 @@ def test_extract_info_sets_cookiefile_when_provided(monkeypatch: pytest.MonkeyPa
     class FakeYoutubeDL:
         def __init__(self, options):
             seen["options"] = options
+            self.options = options
 
         def __enter__(self):
             return self
@@ -112,6 +149,7 @@ def test_extract_info_omits_cookiefile_when_none(monkeypatch: pytest.MonkeyPatch
     class FakeYoutubeDL:
         def __init__(self, options):
             seen["options"] = options
+            self.options = options
 
         def __enter__(self):
             return self
@@ -199,36 +237,124 @@ async def test_list_channel_videos_maps_extract_info_fields(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_get_transcript_sets_translated_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
     class FakeService(YtDlpService):
         def _extract_info(self, *args, **kwargs):
-            return {"subtitles": {"en": [{"ext": "vtt", "url": "https://caption.test/en.vtt"}]}, "automatic_captions": {}}
+            return {
+                "subtitles": {
+                    "en": [
+                        {
+                            "ext": "json3",
+                            "url": "https://caption.test/en.json3",
+                            "impersonate": True,
+                        }
+                    ]
+                },
+                "automatic_captions": {},
+            }
 
-    class FakeClient:
-        def __init__(self, *args, **kwargs):
-            pass
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            seen["options"] = options
+            self.options = options
 
-        async def __aenter__(self):
+        def __enter__(self):
             return self
 
-        async def __aexit__(self, exc_type, exc, tb):
+        def __exit__(self, exc_type, exc, tb):
             return False
 
-        async def get(self, url: str):
-            assert url == "https://caption.test/en.vtt"
-            return httpx.Response(
-                200,
-                text=(FIXTURES / "captions.vtt").read_text(encoding="utf-8"),
-                request=httpx.Request("GET", url),
-            )
+        def download(self, urls):
+            seen["urls"] = urls
+            tmpdir = Path(str(self.options["outtmpl"])).parent
+            (tmpdir / "video1234567.en.json3").write_text(_caption_json3(), encoding="utf-8")
 
-    monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
 
     transcript = await FakeService().get_transcript("video1234567", prefer_languages=("uk",), translate_to="en")
 
     assert transcript is not None
     assert transcript.language_code == "en"
     assert transcript.translated is True
-    assert "First cue" in transcript.text
+    assert "Ukrainian frontline context" in transcript.text
+    assert seen["urls"] == ["https://www.youtube.com/watch?v=video1234567"]
+    assert seen["options"]["writesubtitles"] is True
+    assert seen["options"]["writeautomaticsub"] is False
+    assert seen["options"]["subtitleslangs"] == ["en"]
+
+
+@pytest.mark.asyncio
+async def test_get_transcript_ignores_only_live_chat_tracks() -> None:
+    class FakeService(YtDlpService):
+        def _extract_info(self, *args, **kwargs):
+            return {
+                "subtitles": {
+                    "live_chat": [
+                        {
+                            "ext": "json3",
+                            "url": "https://caption.test/live-chat.json3",
+                            "name": "Live chat replay",
+                        }
+                    ]
+                },
+                "automatic_captions": {},
+            }
+
+    assert await FakeService().get_transcript("video1234567") is None
+
+
+@pytest.mark.asyncio
+async def test_get_transcript_rejects_too_short_caption_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeService(YtDlpService):
+        def _extract_info(self, *args, **kwargs):
+            return {"subtitles": {"en": [{"ext": "json3", "url": "https://caption.test/en.json3"}]}, "automatic_captions": {}}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            tmpdir = Path(str(self.options["outtmpl"])).parent
+            (tmpdir / "video1234567.en.json3").write_text(_caption_json3(rows=2), encoding="utf-8")
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    assert await FakeService().get_transcript("video1234567") is None
+
+
+@pytest.mark.asyncio
+async def test_get_transcript_rejects_repeated_timestamp_caption_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeService(YtDlpService):
+        def _extract_info(self, *args, **kwargs):
+            return {"subtitles": {"en": [{"ext": "json3", "url": "https://caption.test/en.json3"}]}, "automatic_captions": {}}
+
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def download(self, urls):
+            tmpdir = Path(str(self.options["outtmpl"])).parent
+            (tmpdir / "video1234567.en.json3").write_text(
+                _caption_json3(rows=12, repeated_start=True),
+                encoding="utf-8",
+            )
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    assert await FakeService().get_transcript("video1234567") is None
 
 
 @pytest.mark.parametrize(
