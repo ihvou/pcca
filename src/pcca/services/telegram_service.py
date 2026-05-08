@@ -76,6 +76,7 @@ class TelegramService:
         app = ApplicationBuilder().token(self.bot_token).build()
         app.add_handler(CommandHandler("start", self._on_start))
         app.add_handler(CommandHandler("help", self._on_help))
+        app.add_handler(CommandHandler("settings", self._on_settings))
         app.add_handler(CommandHandler("setup", self._on_setup))
         app.add_handler(CommandHandler("onboard", self._on_setup))
         app.add_handler(CommandHandler("read_content", self._on_read_content_command))
@@ -288,11 +289,24 @@ class TelegramService:
             "- run collection now (`/read_content`)\n"
             "- get Briefs now (`/briefs`)\n"
             "- force rebuild today's Briefs (`/rebuild_briefs`)\n"
+            "- show delivery settings (`/settings`)\n"
             "- collect per-Brief feedback (buttons or replies)\n"
             "- accept voice notes (transcription backend pending)",
             reply_markup=self._quick_actions_reply_keyboard(),
         )
         await self._send_quick_actions(update.message)
+
+    async def _on_settings(self, update: Update, _context: ContextTypes.DEFAULT_TYPE | None) -> None:
+        if update.message is None:
+            return
+        await update.message.reply_text(
+            "Brief settings:\n"
+            "- PCCA uses a minimum relevance floor before sending Briefs.\n"
+            "- Default: `PCCA_MIN_BRIEF_RELEVANCE=0.55`.\n"
+            "- If a subject has no strongly relevant candidates, PCCA sends a no-Briefs notice instead of noisy items.\n"
+            "- Set the env var lower to allow weaker matches, or to `0` to disable the floor globally.",
+            reply_markup=self._quick_actions_reply_keyboard(),
+        )
 
     async def _on_read_content_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:

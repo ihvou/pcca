@@ -20,6 +20,7 @@ class SubjectService:
         quality_notes: str | None = None,
         description_text: str | None = None,
         brief_full_text_chars: int = 1800,
+        min_relevance_threshold: float | None = None,
         allow_empty_preferences: bool = False,
     ) -> Subject:
         normalized_name = " ".join(name.split()).strip()
@@ -44,6 +45,7 @@ class SubjectService:
             quality_notes=quality_notes,
             description_text=description_text,
             brief_full_text_chars=brief_full_text_chars,
+            min_relevance_threshold=min_relevance_threshold,
         )
 
     async def list_subjects(self) -> list[Subject]:

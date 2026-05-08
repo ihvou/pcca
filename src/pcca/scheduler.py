@@ -56,6 +56,23 @@ def _format_circuit_breaker_footer(metadata: dict) -> str | None:
     return "Collection safety note: " + " ".join(lines)
 
 
+def _subject_relevance_threshold(subject, default_threshold: float) -> float:
+    override = getattr(subject, "min_relevance_threshold", None)
+    if override is None:
+        return max(0.0, min(1.0, float(default_threshold)))
+    return max(0.0, min(1.0, float(override)))
+
+
+def _format_relevance_floor_footer(*, top_score: float, threshold: float) -> str:
+    return (
+        "No strongly-relevant content this run.\n\n"
+        f"Most-relevant candidates scored {top_score:.2f} "
+        f"(below threshold {threshold:.2f}).\n"
+        "Consider: adding sources for this subject, refining the description, "
+        "or lowering PCCA_MIN_BRIEF_RELEVANCE."
+    )
+
+
 @dataclass
 class JobRunner:
     subject_service: SubjectService
@@ -66,6 +83,7 @@ class JobRunner:
     pipeline_orchestrator: PipelineOrchestrator | None = None
     telegram_service: TelegramService | None = None
     digest_renderer: DigestRenderer = field(default_factory=TelegramDigestRenderer)
+    min_brief_relevance_score: float = 0.55
 
     async def run_nightly_collection(self) -> None:
         started_at = time.monotonic()
@@ -105,6 +123,8 @@ class JobRunner:
             "deliveries_sent": 0,
             "deliveries_failed": 0,
             "smart_resends": 0,
+            "placeholder_briefs_sent": 0,
+            "subjects_below_relevance_threshold": [],
             "renderers_used": {},
             "skipped_missing_dependencies": False,
         }
@@ -287,6 +307,26 @@ class JobRunner:
                     ]
                 else:
                     ordered_candidates = await self.item_score_repo.top_unsent_candidates(subject_id=subject.id, limit=5)
+                relevance_footer = None
+                below_relevance_threshold = False
+                threshold = _subject_relevance_threshold(subject, self.min_brief_relevance_score)
+                if ordered_candidates and threshold > 0:
+                    top_score = max(float(candidate.final_score or 0.0) for candidate in ordered_candidates)
+                    if top_score < threshold:
+                        below_relevance_threshold = True
+                        ordered_candidates = []
+                        stats["subjects_below_relevance_threshold"].append(subject.id)
+                        relevance_footer = _format_relevance_floor_footer(
+                            top_score=top_score,
+                            threshold=threshold,
+                        )
+                        logger.warning(
+                            "Morning digest subject below relevance threshold run_id=%s subject=%s top_score=%.3f threshold=%.3f",
+                            run_id,
+                            subject.name,
+                            top_score,
+                            threshold,
+                        )
                 stats["items_selected"] += len(ordered_candidates)
                 logger.info(
                     "Morning digest subject selected run_id=%s subject=%s routes=%d items=%d existing=%s",
@@ -347,9 +387,12 @@ class JobRunner:
                             first_message_id = await self.telegram_service.send_no_briefs_message(
                                 chat_id=route.chat_id,
                                 subject_name=subject.name,
-                                footer=_combine_footer(no_new_footer, circuit_footer),
+                                footer=_combine_footer(no_new_footer, relevance_footer, circuit_footer),
                                 thread_id=thread_id_int,
                             )
+                            if below_relevance_threshold:
+                                stats["briefs_sent"] += 1
+                                stats["placeholder_briefs_sent"] += 1
                         for index, brief in enumerate(payload.briefs, start=1):
                             footer = _combine_footer(no_new_footer, circuit_footer) if index == len(payload.briefs) else None
                             message_id = await self.telegram_service.send_brief_message(

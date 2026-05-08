@@ -25,14 +25,15 @@ class SubjectRepository:
         description_text: str | None = None,
         brief_full_text_chars: int = 1800,
         telegram_hashtag: str | None = None,
+        min_relevance_threshold: float | None = None,
     ) -> Subject:
         hashtag = telegram_hashtag or self._to_camel_hashtag(name)
         cursor = await self.conn.execute(
             """
-            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars, description_text, telegram_hashtag)
-            VALUES (?, ?, 'active', ?, ?, ?)
+            INSERT INTO subjects(name, telegram_thread_id, status, brief_full_text_chars, description_text, telegram_hashtag, min_relevance_threshold)
+            VALUES (?, ?, 'active', ?, ?, ?, ?)
             """,
-            (name, telegram_thread_id, brief_full_text_chars, description_text, hashtag),
+            (name, telegram_thread_id, brief_full_text_chars, description_text, hashtag, min_relevance_threshold),
         )
         await self.conn.commit()
         created_id = cursor.lastrowid
@@ -155,7 +156,7 @@ class SubjectRepository:
         rows = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag, min_relevance_threshold
                 FROM subjects
                 ORDER BY created_at ASC
                 """
@@ -170,6 +171,7 @@ class SubjectRepository:
                 created_at=row["created_at"],
                 brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
                 telegram_hashtag=row["telegram_hashtag"],
+                min_relevance_threshold=_float_or_none(row["min_relevance_threshold"]),
             )
             for row in rows
         ]
@@ -178,7 +180,7 @@ class SubjectRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag, min_relevance_threshold
                 FROM subjects
                 WHERE id = ?
                 """,
@@ -195,13 +197,14 @@ class SubjectRepository:
             created_at=row["created_at"],
             brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
             telegram_hashtag=row["telegram_hashtag"],
+            min_relevance_threshold=_float_or_none(row["min_relevance_threshold"]),
         )
 
     async def get_by_name(self, name: str) -> Subject | None:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag
+                SELECT id, name, telegram_thread_id, status, created_at, brief_full_text_chars, telegram_hashtag, min_relevance_threshold
                 FROM subjects
                 WHERE LOWER(name) = LOWER(?)
                 """,
@@ -218,6 +221,7 @@ class SubjectRepository:
             created_at=row["created_at"],
             brief_full_text_chars=int(row["brief_full_text_chars"] or 1800),
             telegram_hashtag=row["telegram_hashtag"],
+            min_relevance_threshold=_float_or_none(row["min_relevance_threshold"]),
         )
 
     @staticmethod
@@ -238,3 +242,12 @@ class SubjectRepository:
         if not words:
             return "#Brief"
         return "#" + "".join(word[:1].upper() + word[1:] for word in words)
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None

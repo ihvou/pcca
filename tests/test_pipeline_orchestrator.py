@@ -227,8 +227,8 @@ class FakeModelRouter:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
-        _ = text, heuristic_score
+    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
+        _ = text, heuristic_score, item_id
         self.calls.append(subject_name)
         return None
 
@@ -312,7 +312,8 @@ class FakeBatchModelRouter:
             for candidate in candidates[:limit]
         }
 
-    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
+    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
+        _ = item_id
         raise AssertionError("embedding path should use batch rerank")
 
 
@@ -322,16 +323,26 @@ class EmptyBatchModelRouter:
     def __init__(self) -> None:
         self.batch_calls = 0
         self.single_calls = 0
+        self.single_item_ids: list[int | None] = []
 
     async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
         _ = subject_name, subject_description, candidates
         self.batch_calls += 1
         return {}
 
-    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float):
+    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
         _ = subject_name, text, heuristic_score
         self.single_calls += 1
-        raise AssertionError("single-item rerank should not run after an attempted batch rerank")
+        self.single_item_ids.append(item_id)
+        return type(
+            "Rerank",
+            (),
+            {
+                "score_delta": 0.02,
+                "rationale": "per-item fallback",
+                "key_message": f"Per-item key message for item {item_id}.",
+            },
+        )()
 
 
 class ChallengedCollector:
@@ -1401,7 +1412,7 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
 
 
 @pytest.mark.asyncio
-async def test_pipeline_does_not_fall_back_to_serial_rerank_after_empty_batch(tmp_path: Path) -> None:
+async def test_pipeline_falls_back_to_per_item_rerank_after_empty_batch(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
     await db.initialize()
@@ -1438,7 +1449,7 @@ async def test_pipeline_does_not_fall_back_to_serial_rerank_after_empty_batch(tm
                     published_at=None,
                     metadata={},
                 )
-                for idx in range(2)
+                for idx in range(20)
             ]
 
     model_router = EmptyBatchModelRouter()
@@ -1458,8 +1469,16 @@ async def test_pipeline_does_not_fall_back_to_serial_rerank_after_empty_batch(tm
 
     assert stats["model_batch_rerank_calls"] == 1
     assert stats["items_model_reranked"] == 0
+    assert stats["items_model_reranked_per_item"] == 20
+    assert stats["batch_truncation_recovered"] == 20
     assert model_router.batch_calls == 1
-    assert model_router.single_calls == 0
+    assert model_router.single_calls == 20
+    assert len(model_router.single_item_ids) == 20
+    rows = await (
+        await db.conn.execute("SELECT rationale_json FROM item_scores ORDER BY item_id")
+    ).fetchall()
+    assert len(rows) == 20
+    assert all(json.loads(row["rationale_json"])["key_message"].startswith("Per-item key message") for row in rows)
 
     await db.close()
 

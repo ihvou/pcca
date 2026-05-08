@@ -192,6 +192,7 @@ class PCCAApp:
                 run_log_repo=run_log_repo,
                 pipeline_orchestrator=self.pipeline_orchestrator,
                 telegram_service=self.telegram_service,
+                min_brief_relevance_score=self.settings.min_brief_relevance_score,
             ),
         )
         if with_scheduler:

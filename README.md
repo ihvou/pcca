@@ -133,6 +133,7 @@ PCCA_TIMEZONE=UTC
 PCCA_NIGHTLY_CRON=0 1 * * *       # nightly content collection
 PCCA_MORNING_CRON=30 8 * * *      # only used when DIGEST_AUTO_SEND=true
 PCCA_DIGEST_AUTO_SEND=false       # default off — Briefs are on-demand via /briefs
+PCCA_MIN_BRIEF_RELEVANCE=0.55     # send no-Briefs notice below this top score
 
 # Browser
 PCCA_BROWSER_CHANNEL=chrome       # or 'bundled' for Playwright Chromium

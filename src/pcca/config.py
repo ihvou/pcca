@@ -67,6 +67,7 @@ class Settings:
     embedding_backfill_concurrency: int = 2
     auto_backfill_embeddings: bool = True
     youtube_transcript_backfill_concurrency: int = 2
+    min_brief_relevance_score: float = 0.55
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -142,6 +143,10 @@ class Settings:
             )
         except ValueError:
             youtube_transcript_backfill_concurrency = 2
+        try:
+            min_brief_relevance_score = float(_env("PCCA_MIN_BRIEF_RELEVANCE", "0.55") or "0.55")
+        except ValueError:
+            min_brief_relevance_score = 0.55
         return cls(
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
@@ -170,6 +175,7 @@ class Settings:
             embedding_backfill_concurrency=max(1, embedding_backfill_concurrency),
             auto_backfill_embeddings=auto_backfill_embeddings,
             youtube_transcript_backfill_concurrency=max(1, youtube_transcript_backfill_concurrency),
+            min_brief_relevance_score=max(0.0, min(1.0, min_brief_relevance_score)),
         )
 
     def ensure_dirs(self) -> None:

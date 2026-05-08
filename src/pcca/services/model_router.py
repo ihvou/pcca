@@ -54,11 +54,12 @@ REFINE_BATCH_RESPONSE_SCHEMA: dict = {
 SINGLE_RERANK_RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
+        "item_id": {"type": "integer"},
         "score_delta": {"type": "number"},
         "reason": {"type": "string"},
         "key_message": {"type": "string"},
     },
-    "required": ["score_delta", "reason", "key_message"],
+    "required": ["item_id", "score_delta", "reason", "key_message"],
 }
 
 
@@ -305,7 +306,14 @@ class ModelRouter:
             )
             return {}
 
-    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float) -> ModelRerankResult | None:
+    async def rerank(
+        self,
+        *,
+        subject_name: str,
+        text: str,
+        heuristic_score: float,
+        item_id: int | None = None,
+    ) -> ModelRerankResult | None:
         if not self.enabled:
             logger.debug("Model rerank skipped: disabled subject=%s", subject_name)
             return None
@@ -313,9 +321,10 @@ class ModelRouter:
         prompt = (
             "You are a strict curator.\n"
             f"Subject: {subject_name}\n"
+            f"Item ID: {item_id if item_id is not None else ''}\n"
             f"Heuristic score: {heuristic_score:.3f}\n"
             "Given this content snippet, return JSON with fields:\n"
-            '{"score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "1-2 useful sentences"}\n'
+            '{"item_id": integer, "score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "1-2 useful sentences"}\n'
             "key_message should rephrase the useful core idea for the user and avoid biography, hype, and scoring details.\n"
             "Only return JSON.\n\n"
             f"CONTENT:\n{text[:4000]}"

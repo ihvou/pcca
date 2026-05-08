@@ -248,6 +248,89 @@ async def test_digest_run_sends_one_message_per_brief_and_feedback_buttons_map_t
 
 
 @pytest.mark.asyncio
+async def test_digest_sends_no_briefs_notice_when_top_score_below_relevance_floor(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    await _seed_item_score(
+        db,
+        subject_id=subject.id,
+        external_id="weak-item",
+        text="Generic AI podcast chatter with no useful subject match",
+        url="https://example.com/weak",
+        score=0.3,
+        rationale="weak match",
+    )
+
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+        min_brief_relevance_score=0.55,
+    )
+
+    stats = await runner.run_morning_digest()
+    digest_item_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_items")).fetchone()
+
+    assert stats["subjects_below_relevance_threshold"] == [subject.id]
+    assert stats["placeholder_briefs_sent"] == 1
+    assert stats["briefs_sent"] == 1
+    assert int(digest_item_count["c"]) == 0
+    assert fake_telegram.sent_messages[-1]["brief"] is None
+    assert "Most-relevant candidates scored 0.30" in fake_telegram.sent_messages[-1]["footer"]
+    assert "below threshold 0.55" in fake_telegram.sent_messages[-1]["footer"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_digest_relevance_floor_does_not_filter_lower_ranked_items_when_top_score_passes(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, subject = await _seed_subject_with_route(db)
+    for idx, score in enumerate([0.9, 0.8, 0.7, 0.3, 0.2], start=1):
+        await _seed_item_score(
+            db,
+            subject_id=subject.id,
+            external_id=f"mixed-{idx}",
+            text=f"Claude Code workflow detail {idx}",
+            url=f"https://example.com/mixed-{idx}",
+            score=score,
+            rationale=f"score {score}",
+        )
+
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+        min_brief_relevance_score=0.55,
+    )
+
+    stats = await runner.run_morning_digest()
+
+    assert stats["subjects_below_relevance_threshold"] == []
+    assert stats["briefs_sent"] == 5
+    assert len(fake_telegram.sent_messages) == 5
+    assert all(message["brief"] is not None for message in fake_telegram.sent_messages)
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

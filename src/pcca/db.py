@@ -477,6 +477,12 @@ MIGRATIONS: list[tuple[int, str]] = [
           ON wizard_events(created_at);
         """,
     ),
+    (
+        17,
+        """
+        ALTER TABLE subjects ADD COLUMN min_relevance_threshold REAL;
+        """,
+    ),
 ]
 
 

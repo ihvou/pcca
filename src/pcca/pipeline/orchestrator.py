@@ -645,8 +645,10 @@ class PipelineOrchestrator:
         batch_results = {}
         batch_attempted = False
         batch_rerank = getattr(self.model_router, "rerank_batch", None) if self.model_router is not None else None
+        single_rerank = getattr(self.model_router, "rerank", None) if self.model_router is not None else None
+        model_enabled = bool(self.model_router is not None and getattr(self.model_router, "enabled", True))
         shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding, _segment in shortlist_rows)
-        if callable(batch_rerank) and shortlist_used_embedding and getattr(self.model_router, "enabled", True):
+        if callable(batch_rerank) and shortlist_used_embedding and model_enabled:
             batch_attempted = True
             candidates = [
                 ModelRerankCandidate(
@@ -666,44 +668,74 @@ class PipelineOrchestrator:
             )
             stats["model_batch_rerank_calls"] += 1
 
+        per_item_results: dict[int, Any] = {}
+        if callable(single_rerank) and model_enabled:
+            batch_ids = set(batch_results.keys()) if isinstance(batch_results, dict) else set()
+            fallback_rows = [
+                row
+                for row in shortlist_rows
+                if (row[0] not in batch_ids if batch_attempted else True)
+            ]
+            if fallback_rows:
+                if batch_attempted:
+                    logger.warning(
+                        "Model batch rerank partial run_id=%s subject=%s shortlist=%d batch_results=%d missing=%d; falling back per item.",
+                        run_id,
+                        subject.name,
+                        len(shortlist_rows),
+                        len(batch_ids),
+                        len(fallback_rows),
+                    )
+                semaphore = asyncio.Semaphore(2)
+
+                async def rerank_one(row) -> tuple[int, Any | None]:
+                    item_id, item, scored, _used_embedding, segment = row
+                    async with semaphore:
+                        rerank = await single_rerank(
+                            subject_name=subject.name,
+                            text=self._model_candidate_text(item=item, segment=segment),
+                            heuristic_score=scored.final_score,
+                            item_id=item_id,
+                        )
+                        return item_id, rerank
+
+                results = await asyncio.gather(*(rerank_one(row) for row in fallback_rows))
+                per_item_results = {
+                    item_id: rerank
+                    for item_id, rerank in results
+                    if rerank is not None
+                }
+                recovered = len(per_item_results)
+                stats["items_model_reranked_per_item"] = int(stats.get("items_model_reranked_per_item", 0)) + recovered
+                if batch_attempted:
+                    stats["batch_truncation_recovered"] = int(stats.get("batch_truncation_recovered", 0)) + recovered
+
         adjusted_segment_scores: dict[int, Any] = {}
         item_key_messages: dict[int, str] = {}
         item_refined_segments: dict[int, str] = {}
         for item_id, item, scored, _used_embedding, segment in scored_rows:
             rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
+            rerank_source = "model_batch"
+            if rerank is None and item_id in per_item_results:
+                rerank = per_item_results[item_id]
+                rerank_source = "model"
             if rerank is not None:
                 adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
                 scored.final_score = adjusted_final
-                scored.rationale = f"{scored.rationale}; model_batch={rerank.rationale}"
+                scored.rationale = f"{scored.rationale}; {rerank_source}={rerank.rationale}"
                 key_message = getattr(rerank, "key_message", None)
                 if key_message:
                     item_key_messages[item_id] = str(key_message)
                 refined_segment = getattr(rerank, "refined_segment", None)
                 if refined_segment:
                     item_refined_segments[item_id] = str(refined_segment)[:1500]
-                stats["items_model_reranked"] += 1
-            elif self.model_router is not None and item_id in shortlist_ids and not batch_attempted:
-                rerank = await self.model_router.rerank(
-                    subject_name=subject.name,
-                    text=self._model_candidate_text(item=item, segment=segment),
-                    heuristic_score=scored.final_score,
-                )
-                if rerank is not None:
-                    adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
-                    scored.final_score = adjusted_final
-                    scored.rationale = f"{scored.rationale}; model={rerank.rationale}"
-                    key_message = getattr(rerank, "key_message", None)
-                    if key_message:
-                        item_key_messages[item_id] = str(key_message)
-                    refined_segment = getattr(rerank, "refined_segment", None)
-                    if refined_segment:
-                        item_refined_segments[item_id] = str(refined_segment)[:1500]
+                if rerank_source == "model_batch":
                     stats["items_model_reranked"] += 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
 
         refine_batch = getattr(self.model_router, "refine_batch", None) if self.model_router is not None else None
-        if callable(refine_batch) and getattr(self.model_router, "enabled", True):
+        if callable(refine_batch) and model_enabled:
             top_refine_rows = sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[:5]
             if top_refine_rows:
                 refined = await refine_batch(
@@ -952,6 +984,8 @@ class PipelineOrchestrator:
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
+            "items_model_reranked_per_item": 0,
+            "batch_truncation_recovered": 0,
             "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
             "model_refinement_batch_calls": 0,
@@ -1110,6 +1144,8 @@ class PipelineOrchestrator:
             "items_score_candidates": 0,
             "model_shortlist_items": 0,
             "items_model_reranked": 0,
+            "items_model_reranked_per_item": 0,
+            "batch_truncation_recovered": 0,
             "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
             "model_refinement_batch_calls": 0,
