@@ -434,7 +434,7 @@ async def _youtube_rebackfill_transcripts(
     db = Database(path=settings.db_path)
     await db.connect()
     await db.initialize()
-    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0, "cleaned": 0}
+    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0, "cleaned": 0, "yt_dlp_unavailable": 0}
     cookiefile_path: Path | None = await _export_youtube_cookiefile_for_cli(settings)
     try:
         if db.conn is None:
@@ -466,15 +466,27 @@ async def _youtube_rebackfill_transcripts(
         service = YouTubeTranscriptService()
         yt_dlp_service = YtDlpService()
         effective_concurrency = max(1, int(concurrency or settings.youtube_transcript_backfill_concurrency))
+        yt_dlp_unavailable_warned = False
 
         async def fetch(row) -> tuple[Any, Any, bool]:
+            nonlocal yt_dlp_unavailable_warned
             video_id = str(row["external_id"] or "").strip() or extract_video_id(row["canonical_url"] or "")
             if not video_id:
                 return row, None, False
             try:
                 try:
                     transcript = await yt_dlp_service.get_transcript(video_id, cookiefile=cookiefile_path)
-                except YtDlpUnavailableError:
+                except YtDlpUnavailableError as exc:
+                    stats["yt_dlp_unavailable"] += 1
+                    if not yt_dlp_unavailable_warned:
+                        yt_dlp_unavailable_warned = True
+                        message = (
+                            "yt-dlp unavailable during YouTube transcript backfill; "
+                            "falling back to youtube-transcript-api. Run `pcca doctor` "
+                            f"and reinstall dependencies if needed. Error: {exc}"
+                        )
+                        print(message, flush=True)
+                        logging.getLogger(__name__).warning(message)
                     transcript = None
                 if transcript is None:
                     transcript = await service.get_transcript(video_id)

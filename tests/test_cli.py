@@ -276,6 +276,85 @@ def test_youtube_rebackfill_transcripts_updates_historical_items(
     assert embedding_json is None
 
 
+def test_youtube_rebackfill_warns_when_yt_dlp_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+    fetched: list[str] = []
+
+    class MissingYtDlpService:
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            raise cli.YtDlpUnavailableError("yt-dlp is not installed")
+
+    class FakeYouTubeTranscriptService:
+        async def get_transcript(self, video_id: str) -> TranscriptResult:
+            fetched.append(video_id)
+            return TranscriptResult(
+                text="Legacy transcript fallback still worked after yt-dlp dependency failure.",
+                rows=[{"text": "fallback", "start": 1.0, "duration": 2.0}],
+                language_code="en",
+                translated=False,
+            )
+
+    monkeypatch.setattr(cli, "YtDlpService", MissingYtDlpService)
+    monkeypatch.setattr(cli, "YouTubeTranscriptService", FakeYouTubeTranscriptService)
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            item_repo = ItemRepository(conn=db.conn)
+            stats = await item_repo.upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video-missing-ytdlp",
+                        author="OpenAI",
+                        url="https://www.youtube.com/watch?v=video-missing-ytdlp",
+                        text="Original title",
+                        transcript_text=None,
+                        published_at="2026-05-01T10:00:00",
+                        metadata={},
+                    )
+                ]
+            )
+            return stats["item_ids"][0]
+        finally:
+            await db.close()
+
+    item_id = asyncio.run(setup())
+
+    cli.main(["youtube-rebackfill-transcripts", "--limit", "10", "--concurrency", "1"])
+
+    out = capsys.readouterr().out
+    assert "yt-dlp unavailable during YouTube transcript backfill" in out
+    assert '"yt_dlp_unavailable": 1' in out
+    assert fetched == ["video-missing-ytdlp"]
+
+    async def inspect() -> str | None:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute("SELECT transcript_text FROM items WHERE id = ?", (item_id,))
+            ).fetchone()
+            return row["transcript_text"]
+        finally:
+            await db.close()
+
+    assert asyncio.run(inspect()) == "Legacy transcript fallback still worked after yt-dlp dependency failure."
+
+
 def test_youtube_rebackfill_passes_cookiefile_to_yt_dlp(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
