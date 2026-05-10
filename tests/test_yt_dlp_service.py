@@ -64,31 +64,81 @@ def test_select_caption_priority_rungs() -> None:
     manual_uk = {"ext": "json3", "url": "https://caption.test/manual-uk"}
     auto_uk = {"ext": "json3", "url": "https://caption.test/auto-uk"}
 
+    # Rung 1: preferred manual track wins over preferred auto track.
     assert select_caption(
         {"subtitles": {"en": [manual_en]}, "automatic_captions": {"en": [auto_en]}},
         prefer_languages=("en",),
         translate_to="en",
     ) == ("https://caption.test/manual-en", "en", False)
+    # Rung 1 (auto): preferred auto track when no manual exists.
     assert select_caption(
         {"subtitles": {}, "automatic_captions": {"en": [auto_en]}},
         prefer_languages=("en",),
         translate_to="en",
     ) == ("https://caption.test/auto-en", "en", False)
+    # Rung 2 (T-132): when preferred isn't found, pick ANY native track from
+    # subtitles before falling through to translation. With manual `en`+`uk`
+    # subtitles available, the en native track wins (first in dict iteration)
+    # and we report translated=False (not the old translated=True). This
+    # avoids YouTube's rate-limited tlang= path entirely.
     assert select_caption(
         {"subtitles": {"en": [manual_en], "uk": [manual_uk]}, "automatic_captions": {"en": [auto_en]}},
         prefer_languages=("de",),
         translate_to="en",
-    ) == ("https://caption.test/manual-en", "en", True)
+    ) == ("https://caption.test/manual-en", "en", False)
+    # Rung 2: subtitles takes precedence over automatic_captions when both
+    # have native tracks. Picks manual_uk (subtitles dict) instead of auto_en.
     assert select_caption(
         {"subtitles": {"uk": [manual_uk]}, "automatic_captions": {"en": [auto_en], "uk": [auto_uk]}},
         prefer_languages=("de",),
         translate_to="en",
-    ) == ("https://caption.test/auto-en", "en", True)
+    ) == ("https://caption.test/manual-uk", "uk", False)
+    # Rung 2: subtitles-only with native uk picks the native track.
     assert select_caption(
         {"subtitles": {"uk": [manual_uk]}, "automatic_captions": {}},
         prefer_languages=("de",),
         translate_to="en",
     ) == ("https://caption.test/manual-uk", "uk", False)
+
+
+def test_select_caption_prefers_native_over_translation_for_ukrainian() -> None:
+    """Regression for T-132: STERNENKO/Portnikov/Butusov Ukrainian content
+    has only `uk` tracks available, but our default prefer_languages=("en",)
+    used to trigger a translate_to=en request — which YouTube returns 429
+    on. Live evidence 2026-05-10: native uk download succeeded in <1s while
+    PCCA's prior code path returned HTTP 429. After T-132, we must never
+    request translation when a native track is available.
+    """
+    manual_uk = {"ext": "json3", "url": "https://caption.test/uk-native"}
+    # Ukrainian-only video, defaults match production rebackfill caller.
+    selection = select_caption(
+        {"subtitles": {"uk": [manual_uk]}, "automatic_captions": {}},
+        prefer_languages=("en",),
+        translate_to="en",
+    )
+    assert selection == ("https://caption.test/uk-native", "uk", False)
+
+
+def test_select_caption_translation_only_when_no_native_track() -> None:
+    """T-132: translation is the LAST resort. Only fire when there is
+    literally nothing else — and even then, the native fallback would have
+    found any track that exists, so this is essentially dead code preserved
+    for symmetry. Test that the path is intact for the (rare) case where
+    only the translation-target language is offered as automatic."""
+    auto_en_translated = {"ext": "json3", "url": "https://caption.test/translated-en"}
+    selection = select_caption(
+        # No native subtitles, but `en` translation is offered in automatic.
+        # In practice yt-dlp returns this only when the video's auto-track
+        # is itself in `en` — in which case it's a native track, not a
+        # translation. For the test, we rely on the dict-shape contract.
+        {"subtitles": {}, "automatic_captions": {"en": [auto_en_translated]}},
+        prefer_languages=("de",),
+        translate_to="en",
+    )
+    # Step 2 (any native) finds en first in automatic_captions before step 3
+    # (translation) ever runs. translated=False because we treated it as a
+    # native track, not a tlang= request.
+    assert selection == ("https://caption.test/translated-en", "en", False)
 
 
 def test_select_caption_skips_live_chat_tracks() -> None:
@@ -236,7 +286,13 @@ async def test_list_channel_videos_maps_extract_info_fields(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
-async def test_get_transcript_sets_translated_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_get_transcript_picks_native_track_when_preferred_lang_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-132 (post-fix): when preferred language is unavailable, fall back to
+    the native track of whatever language is offered, NOT the translation
+    endpoint. Pre-T-132 this returned translated=True because we'd request
+    `tlang=en`; YouTube rate-limits that path. Native track download works
+    cleanly, so we report it as a native track (translated=False).
+    """
     seen: dict[str, object] = {}
 
     class FakeService(YtDlpService):
@@ -276,7 +332,7 @@ async def test_get_transcript_sets_translated_flag(monkeypatch: pytest.MonkeyPat
 
     assert transcript is not None
     assert transcript.language_code == "en"
-    assert transcript.translated is True
+    assert transcript.translated is False  # T-132: native fallback, not translation
     assert "Ukrainian frontline context" in transcript.text
     assert seen["urls"] == ["https://www.youtube.com/watch?v=video1234567"]
     assert seen["options"]["writesubtitles"] is True

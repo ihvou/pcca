@@ -286,24 +286,40 @@ def _select_caption_track(
     subtitles = info.get("subtitles") if isinstance(info.get("subtitles"), dict) else {}
     automatic = info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {}
     preferred = [lang for lang in prefer_languages if lang]
-    lookup_order: list[tuple[dict, str, bool, str]] = []
+
+    # Step 1: preferred-language native tracks (e.g., user wants "en" and "en" exists).
     for lang in preferred:
-        lookup_order.append((subtitles, lang, False, "subtitles"))
-        lookup_order.append((automatic, lang, False, "automatic_captions"))
-    if translate_to and translate_to not in preferred:
-        lookup_order.append((subtitles, translate_to, True, "subtitles"))
-        lookup_order.append((automatic, translate_to, True, "automatic_captions"))
-    for caption_map, lang, translated, source in lookup_order:
-        entry = _caption_entry(caption_map.get(lang), lang=lang)
-        url = str(entry.get("url")) if entry and entry.get("url") else None
-        if url:
-            return CaptionSelection(url=url, language_code=lang, translated=translated, source=source)
-    for caption_map, translated, source in ((subtitles, False, "subtitles"), (automatic, False, "automatic_captions")):
+        for caption_map, source in ((subtitles, "subtitles"), (automatic, "automatic_captions")):
+            entry = _caption_entry(caption_map.get(lang), lang=lang)
+            url = str(entry.get("url")) if entry and entry.get("url") else None
+            if url:
+                return CaptionSelection(url=url, language_code=lang, translated=False, source=source)
+
+    # Step 2: ANY native track. Picks the source-language transcript verbatim.
+    # Critical: this MUST run before the translate_to fallback. YouTube heavily
+    # rate-limits the timedtext translation endpoint (`tlang=` URL parameter)
+    # and returns HTTP 429 for non-English source content. Native-language
+    # downloads are unaffected. Embedding model `nomic-embed-text:v1.5` is
+    # multilingual, so a native-Ukrainian track scores correctly without
+    # round-tripping through YouTube translation. See yt-dlp issues #13770,
+    # #13831, #14023, #12056. Live-verified 2026-05-10 against STERNENKO uk
+    # tracks: native download succeeds in <1s; tlang=en variant returns 429.
+    for caption_map, source in ((subtitles, "subtitles"), (automatic, "automatic_captions")):
         for lang, entries in caption_map.items():
             entry = _caption_entry(entries, lang=str(lang))
             url = str(entry.get("url")) if entry and entry.get("url") else None
             if url:
-                return CaptionSelection(url=url, language_code=str(lang), translated=translated, source=source)
+                return CaptionSelection(url=url, language_code=str(lang), translated=False, source=source)
+
+    # Step 3: translation last resort. Only fires when video genuinely has no
+    # native captions at all — in practice this is unreachable (a video with
+    # zero native tracks also has no source for translation).
+    if translate_to and translate_to not in preferred:
+        for caption_map, source in ((subtitles, "subtitles"), (automatic, "automatic_captions")):
+            entry = _caption_entry(caption_map.get(translate_to), lang=translate_to)
+            url = str(entry.get("url")) if entry and entry.get("url") else None
+            if url:
+                return CaptionSelection(url=url, language_code=translate_to, translated=True, source=source)
     return None
 
 
