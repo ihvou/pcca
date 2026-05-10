@@ -119,6 +119,50 @@ def test_select_caption_prefers_native_over_translation_for_ukrainian() -> None:
     assert selection == ("https://caption.test/uk-native", "uk", False)
 
 
+def test_select_caption_skips_translation_url_when_picking_native() -> None:
+    """T-132 part 2: YouTube's `automatic_captions["en"]` for a Ukrainian
+    video is an auto-translated track whose timedtext URL carries
+    `tlang=en`. The dict key alone is indistinguishable from a real native
+    English track. We must filter on URL `tlang=` to avoid HTTP 429.
+
+    Live evidence (2026-05-10): 52 of 60 stuck items hit 429 with
+    `language=en source=automatic_captions` because the original T-132
+    fix picked the auto-translated track from automatic_captions before
+    falling through to the native uk track.
+    """
+    # Auto-translated en track for a Ukrainian video — URL has tlang=en.
+    auto_en_translated = {
+        "ext": "json3",
+        "url": "https://www.youtube.com/api/timedtext?v=X&lang=uk&tlang=en&fmt=json3",
+        "name": "English (auto-translated)",
+    }
+    # Native Ukrainian auto-caption — URL has lang=uk only, no tlang=.
+    auto_uk_native = {
+        "ext": "json3",
+        "url": "https://www.youtube.com/api/timedtext?v=X&lang=uk&fmt=json3",
+        "name": "Ukrainian",
+    }
+    # Caller asks for English (default). With both tracks present, picking
+    # the en-keyed entry would return the translation URL → 429. Native uk
+    # MUST win.
+    selection = select_caption(
+        {
+            "subtitles": {},
+            "automatic_captions": {
+                "en": [auto_en_translated],
+                "uk": [auto_uk_native],
+            },
+        },
+        prefer_languages=("en",),
+        translate_to="en",
+    )
+    assert selection == (
+        "https://www.youtube.com/api/timedtext?v=X&lang=uk&fmt=json3",
+        "uk",
+        False,
+    )
+
+
 def test_select_caption_translation_only_when_no_native_track() -> None:
     """T-132: translation is the LAST resort. Only fire when there is
     literally nothing else — and even then, the native fallback would have

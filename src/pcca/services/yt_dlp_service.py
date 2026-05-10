@@ -287,12 +287,24 @@ def _select_caption_track(
     automatic = info.get("automatic_captions") if isinstance(info.get("automatic_captions"), dict) else {}
     preferred = [lang for lang in prefer_languages if lang]
 
-    # Step 1: preferred-language native tracks (e.g., user wants "en" and "en" exists).
+    # T-132 part 2: YouTube's `automatic_captions[<target>]` for a non-English
+    # video IS the auto-translated track — the underlying timedtext URL
+    # carries a `tlang=<target>` parameter and is heavily rate-limited (HTTP
+    # 429). The dict key alone (`"en"`) is indistinguishable from a real
+    # native English track. The reliable signal is the URL's `tlang=` param:
+    # native tracks do NOT have it, translations always do. Steps 1 and 2
+    # below skip any entry whose URL is a translation; step 3 (translation
+    # last-resort) accepts them only when explicitly invoked.
+    def _is_translation_url(url: str) -> bool:
+        return "tlang=" in url
+
+    # Step 1: preferred-language NATIVE tracks. Skip translations even when
+    # the dict key matches the preferred language code.
     for lang in preferred:
         for caption_map, source in ((subtitles, "subtitles"), (automatic, "automatic_captions")):
             entry = _caption_entry(caption_map.get(lang), lang=lang)
             url = str(entry.get("url")) if entry and entry.get("url") else None
-            if url:
+            if url and not _is_translation_url(url):
                 return CaptionSelection(url=url, language_code=lang, translated=False, source=source)
 
     # Step 2: ANY native track. Picks the source-language transcript verbatim.
@@ -308,12 +320,10 @@ def _select_caption_track(
         for lang, entries in caption_map.items():
             entry = _caption_entry(entries, lang=str(lang))
             url = str(entry.get("url")) if entry and entry.get("url") else None
-            if url:
+            if url and not _is_translation_url(url):
                 return CaptionSelection(url=url, language_code=str(lang), translated=False, source=source)
 
-    # Step 3: translation last resort. Only fires when video genuinely has no
-    # native captions at all — in practice this is unreachable (a video with
-    # zero native tracks also has no source for translation).
+    # Step 3: translation last resort. Accepts `tlang=` URLs explicitly.
     if translate_to and translate_to not in preferred:
         for caption_map, source in ((subtitles, "subtitles"), (automatic, "automatic_captions")):
             entry = _caption_entry(caption_map.get(translate_to), lang=translate_to)
