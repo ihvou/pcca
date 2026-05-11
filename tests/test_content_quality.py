@@ -68,6 +68,52 @@ def test_does_not_flag_legitimate_prose_starting_with_window() -> None:
     assert is_low_quality(karpathy_window_prose) is None
 
 
+def test_does_not_flag_prose_followed_by_see_also_links() -> None:
+    """Bug fix (2026-05-12): Anthropic item id=35 (`How Anthropic uses
+    Claude in Product Engineering`) has 100+ words of substantive prose
+    + a 3-bullet "see also" link block at the end. Previously flagged as
+    link_list because of the 3 consecutive bullet-with-URL lines. Real
+    content followed by links is NOT a link dump — flag only when
+    bullets DOMINATE the word count.
+    """
+    prose_then_links = (
+        "How Anthropic uses Claude in Product Engineering\n\n"
+        "Product engineers lose hours toggling between tools and tackling "
+        "subtasks one at a time. Software engineer Chuma Kabaghe shows how "
+        "she uses Claude Code to onboard onto unfamiliar codebases in "
+        "minutes, run autonomous testing loops, and manage parallel coding "
+        "sessions, reducing context switching and shipping faster.\n\n"
+        "Check out other stories in the \"How Anthropic uses Claude\" series, below:\n"
+        "- How Anthropic uses Claude in Legal: https://www.youtube.com/watch?v=abc\n"
+        "- How Anthropic uses Claude in Marketing: https://www.youtube.com/watch?v=def\n"
+        "- How Anthropic uses Claude in Product Management: https://www.youtube.com/watch?v=ghi\n"
+        "Get started with Claude Code: https://code.claude.com/docs/en/quickstart"
+    )
+    assert is_low_quality(prose_then_links) is None
+
+
+def test_does_not_flag_legitimate_podcast_episode_outline() -> None:
+    """Bug fix (2026-05-12): the bullet detector previously fired on ANY
+    3+ consecutive hyphen-bullets, false-positiving on legitimate podcast
+    episode outlines. Live example (item_id=673 "International Beit Din"):
+    legitimate content with 4 hyphen-bullets describing episode segments,
+    no URLs in bullets, was flagged as link_list. Real link-lists have
+    URLs in each bullet ('• Anthropic: https://...'); content outlines
+    have plain text. Detector now requires URLs in the bullets.
+    """
+    legit_outline = (
+        "What about the men?\n\n"
+        "They don't want their wives back. It's been years since they lived "
+        "together. Why stay married to someone you despise?\n\n"
+        "In This Episode\n"
+        "- Arguments from men who say refusing a gett is ok.\n"
+        "- Results from an International Beit Din study looking at clients.\n"
+        "- Rabbinical rulings on when husbands should give the gett.\n"
+        "- What we hear when we talk to gett-refusing husbands.\n"
+    )
+    assert is_low_quality(legit_outline) is None
+
+
 def test_does_not_flag_legitimate_prose_starting_with_function() -> None:
     function_prose = (
         "Function overloading in C++ allows multiple functions to share the "

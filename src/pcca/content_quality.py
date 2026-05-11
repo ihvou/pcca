@@ -98,20 +98,54 @@ def _looks_like_js_dump(text: str, lowered: str) -> bool:
 
 
 def _looks_like_link_list(text: str) -> bool:
+    """Detect link-dump items (subscribe/follow blocks, channel link bundles).
+
+    Two signals; either is sufficient:
+      A. URL-heavy text: ≥3 URLs AND >5% URL-to-word ratio.
+      B. ≥3 consecutive bullet lines **that each contain a URL** —
+         classic "subscribe to my channel" layout.
+
+    NOTE: A bare ≥3-consecutive-bullets rule false-positives on legitimate
+    podcast/article episode outlines (e.g., "- Arguments from men who say
+    refusing a gett is ok"). Require URL presence in the bullets so we
+    only catch link-dumps, not content outlines.
+    """
     urls = re.findall(r"https?://\S+", text)
     words = re.findall(r"\b[\w'-]+\b", text)
     if len(urls) >= 3 and len(urls) > max(1, len(words)) * 0.05:
         return True
+    # Count words in non-bullet prose vs bullet-link content. Substantive
+    # prose (e.g., a real article followed by 3 "see also" links) should
+    # NOT be flagged as a link-list. Only flag when the bullets DOMINATE.
+    bullet_link_words = 0
+    prose_words = 0
     consecutive = 0
+    bullet_link_streak_found = False
     for line in text.splitlines():
         stripped = line.strip()
-        if re.match(r"^(?:[•*\-]|\d+\.)\s+", stripped):
-            consecutive += 1
-            if consecutive >= 3:
-                return True
-        elif stripped:
+        if not stripped:
             consecutive = 0
-    return False
+            continue
+        line_words = re.findall(r"\b[\w'-]+\b", stripped)
+        is_bullet_link = bool(
+            re.match(r"^(?:[•*\-]|\d+\.)\s+", stripped)
+            and re.search(r"https?://", stripped)
+        )
+        if is_bullet_link:
+            consecutive += 1
+            bullet_link_words += len(line_words)
+            if consecutive >= 3:
+                bullet_link_streak_found = True
+        else:
+            consecutive = 0
+            prose_words += len(line_words)
+    if not bullet_link_streak_found:
+        return False
+    # Bullet-link streak exists. Flag only when prose is thin enough that
+    # the bullets ARE the content. ~50 words of prose is enough to make
+    # an item Brief-worthy (a real first paragraph) even if a "see also"
+    # link block follows.
+    return prose_words < 50 or bullet_link_words > prose_words
 
 
 def _looks_like_marketing(lowered: str) -> bool:
