@@ -55,18 +55,46 @@ def excluded_from_briefs_reason(metadata: dict[str, Any] | None, text: str | Non
 
 
 def _looks_like_js_dump(text: str, lowered: str) -> bool:
+    """Detect raw JS/JSON object dumps captured as transcript text.
+
+    Live target: YouTube music-video pages where the captured `raw_text` is
+    the page's `window.WIZ_global_data = {...}` JS config because the video
+    genuinely has no captions. **Do NOT trip on legitimate prose that
+    happens to mention JS** — Karpathy / programming tutorials frequently
+    start with words like "Window functions in SQL" or "Function overloading".
+
+    Decision logic combines two independent signals; either is sufficient:
+      A. **YouTube-specific token + JSON density**: very strong signal for
+         the actual MJ-style page-config dumps we observe in the wild.
+      B. **Generic high structural density**: real JS/JSON is 35-40%+
+         `{}[]":,` chars in the first 500. Real English prose is <5%.
+         Catches non-YouTube dumps without a token list update.
+
+    A bare `startswith("window.", "function ", ...)` is NOT sufficient by
+    itself; it produced false positives on Karpathy transcripts.
+    """
     stripped = text.lstrip()
-    if stripped.startswith(("window.", "function ", "var ytInitialData", "ytInitialData")):
-        return True
     first = stripped[:500]
     if not first:
         return False
     structural_chars = sum(1 for ch in first if ch in "{}[]\":,")
     density = structural_chars / max(1, len(first))
-    return density > 0.25 and structural_chars >= 40 and any(
+    has_jsdump_token = any(
         token in lowered[:800]
         for token in ("wiz_global_data", "ytinitialdata", "youtube_web", "web-front-end")
     )
+    # Signal A: known YouTube dump token + non-trivial structural shape.
+    # A mention of "youtube_web" in prose wouldn't have 10+ braces/quotes;
+    # a real config dump has many.
+    if has_jsdump_token and structural_chars >= 10:
+        return True
+    # Signal B: very high structural density on substantial content.
+    # English prose densities are <5%. Spoken-word transcripts spell out
+    # punctuation in words, so even code-heavy transcripts stay <0.20.
+    # `density >= 0.35` on 200+ chars is structurally JS/JSON.
+    if len(first) >= 200 and density >= 0.35 and structural_chars >= 80:
+        return True
+    return False
 
 
 def _looks_like_link_list(text: str) -> bool:

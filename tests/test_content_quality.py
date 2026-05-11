@@ -52,6 +52,44 @@ def test_detects_hashtag_spam() -> None:
     assert is_low_quality(text) == "marketing_prose"
 
 
+def test_does_not_flag_legitimate_prose_starting_with_window() -> None:
+    """Bug fix (2026-05-12): the old `_looks_like_js_dump` short-circuited
+    on `startswith("window.")` which false-positives on legitimate Karpathy /
+    SQL / JS-tutorial transcripts. Real prose has structural-char density
+    <5% and lacks YouTube tokens — should pass through.
+    """
+    karpathy_window_prose = (
+        "Window functions in SQL are powerful tools for aggregations over "
+        "groups of rows. In this video I will walk through PARTITION BY and "
+        "ORDER BY clauses, showing how the OVER keyword changes the result "
+        "set. We will compare LAG, LEAD, ROW_NUMBER, RANK, and DENSE_RANK "
+        "with concrete examples on a sales table."
+    )
+    assert is_low_quality(karpathy_window_prose) is None
+
+
+def test_does_not_flag_legitimate_prose_starting_with_function() -> None:
+    function_prose = (
+        "Function overloading in C++ allows multiple functions to share the "
+        "same name as long as their parameter lists differ. The compiler "
+        "selects the appropriate function based on argument types at compile "
+        "time. This contrasts with function overriding which relies on "
+        "virtual dispatch at runtime."
+    )
+    assert is_low_quality(function_prose) is None
+
+
+def test_detects_generic_dense_js_dump_without_youtube_tokens() -> None:
+    """Signal B fallback: real JS/JSON with >35% structural density should
+    be flagged even without the YouTube token list. Catches dumps from new
+    sites we haven't enumerated."""
+    generic_dump = (
+        '{"name":"x","items":[{"a":1,"b":2,"c":3},{"a":4,"b":5,"c":6},'
+        '{"a":7,"b":8,"c":9}],"meta":{"version":1,"tags":["a","b","c","d"]}}' * 4
+    )
+    assert is_low_quality(generic_dump) == "js_dump"
+
+
 def test_force_keep_bypasses_low_quality_flag() -> None:
     metadata = mark_low_quality_metadata(
         {FORCE_KEEP_KEY: True},

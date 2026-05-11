@@ -639,3 +639,11 @@ def test_audit_content_quality_clean_flags_and_clears_junk_text(
     assert metadata["excluded_from_briefs_reason"] == "js_dump"
     assert embedding_json is None
     assert segment_count == 0
+    # Bug fix (2026-05-12): --clean should preserve original raw_text in
+    # metadata so a false-positive detection is recoverable. Without this,
+    # the original content is irreversibly destroyed when the detector is
+    # wrong (e.g., legitimate transcripts about JS that happen to start
+    # with "window.").
+    assert metadata["_raw_text_archived"] == junk
+    assert metadata["_raw_text_archived_reason"] == "js_dump"
+    assert "_raw_text_archived_at" in metadata

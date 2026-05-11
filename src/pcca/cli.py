@@ -476,6 +476,23 @@ async def _audit_content_quality(
             if not isinstance(metadata, dict):
                 metadata = {}
             metadata[EXCLUDED_FROM_BRIEFS_KEY] = reason
+            # Archive original content before clearing so a false-positive
+            # detection is recoverable. Cap archive at 50KB per field to
+            # keep metadata_json from ballooning.
+            from datetime import datetime, timezone as _tz
+            _archive_cap = 50_000
+            if raw_reason and raw_text:
+                metadata["_raw_text_archived"] = raw_text[:_archive_cap]
+                metadata["_raw_text_archived_reason"] = raw_reason
+                metadata["_raw_text_archived_at"] = datetime.now(_tz.utc).isoformat()
+                if len(raw_text) > _archive_cap:
+                    metadata["_raw_text_archived_truncated"] = True
+            if transcript_reason and transcript_text:
+                metadata["_transcript_text_archived"] = transcript_text[:_archive_cap]
+                metadata["_transcript_text_archived_reason"] = transcript_reason
+                metadata["_transcript_text_archived_at"] = datetime.now(_tz.utc).isoformat()
+                if len(transcript_text) > _archive_cap:
+                    metadata["_transcript_text_archived_truncated"] = True
             next_raw_text = "" if raw_reason else raw_text
             next_transcript_text = None if transcript_reason else (transcript_text or None)
             content_hash = item_repo._content_hash_values(
