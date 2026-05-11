@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from pcca.digest_renderer import DigestRenderContext, TelegramDigestRenderer, _platform_icon
+from pcca.digest_renderer import DigestRenderContext, TelegramDigestRenderer, _platform_icon, is_low_content_key_message
 from pcca.models import Subject
 from pcca.repositories.item_scores import CandidateItem
 
@@ -28,6 +28,20 @@ async def _token_factory(candidate, action, *, label=None, kind="feedback") -> s
 )
 def test_platform_icon_mapping(platform: str, icon: str) -> None:
     assert _platform_icon(platform) == icon
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Those are the most common ones I hear.",
+        "is not just relying on the knowledge of the world",
+        "to number three I very often prototype these layers",
+        "but this is just a transition",
+        "(low-content segment)",
+    ],
+)
+def test_low_content_key_message_detector_rejects_throwaway_sentences(message: str) -> None:
+    assert is_low_content_key_message(message)
 
 
 @pytest.mark.asyncio
@@ -252,6 +266,42 @@ async def test_telegram_renderer_uses_refined_segment_for_more_text() -> None:
     assert "standardize team handoffs" in full_text
     assert "uh so you know" not in full_text
     assert "Why this matched:" in full_text
+
+
+@pytest.mark.asyncio
+async def test_telegram_renderer_falls_back_when_key_message_is_low_content() -> None:
+    subject = Subject(
+        id=1,
+        name="AI Tools",
+        telegram_thread_id=None,
+        status="active",
+        created_at="2026-04-29 00:00:00",
+    )
+    candidate = CandidateItem(
+        item_id=1,
+        title_or_text="Claude Code demo",
+        url=None,
+        author="Anthropic",
+        published_at="2026-04-29",
+        final_score=0.9,
+        rationale="matched",
+        platform="youtube",
+        segment_text="Anthropic shows a concrete workflow where Claude Code helps review implementation plans.",
+        key_message="Those are the most common ones I hear.",
+    )
+
+    payload = await TelegramDigestRenderer().render(
+        subject=subject,
+        ranked_items=[candidate],
+        context=DigestRenderContext(
+            digest_id=1,
+            run_date=__import__("datetime").date(2026, 5, 2),
+            create_button_token=_token_factory,
+        ),
+    )
+
+    assert "Those are the most common ones" not in payload.briefs[0].short_text
+    assert "Anthropic shows a concrete workflow" in payload.briefs[0].short_text
 
 
 @pytest.mark.asyncio

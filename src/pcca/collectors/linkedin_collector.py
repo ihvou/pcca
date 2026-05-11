@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import BotShapedError, SessionChallengedError
+from pcca.content_quality import mark_low_quality_metadata
 
 # Substring matches in pageerror events that indicate LinkedIn served a
 # bot-blocked page rather than a real feed. Most common today (2026-05-11
@@ -168,16 +169,11 @@ class LinkedInCollector:
         finally:
             await page.close()
 
-        return [
-            CollectedItem(
-                platform=self.platform,
-                external_id=item["external_id"],
-                author=item.get("author"),
-                url=item.get("url"),
-                text=item.get("text"),
-                transcript_text=None,
-                published_at=item.get("published_at"),
-                metadata={
+        out: list[CollectedItem] = []
+        for item in raw_items:
+            text = item.get("text")
+            metadata = mark_low_quality_metadata(
+                {
                     "source_id": source_id,
                     "resolved_source_id": source,
                     "reaction_count": item.get("reaction_count"),
@@ -185,9 +181,21 @@ class LinkedInCollector:
                     "repost_count": item.get("repost_count"),
                     "like_count": item.get("reaction_count"),
                 },
+                text,
             )
-            for item in raw_items
-        ]
+            out.append(
+                CollectedItem(
+                    platform=self.platform,
+                    external_id=item["external_id"],
+                    author=item.get("author"),
+                    url=item.get("url"),
+                    text=text,
+                    transcript_text=None,
+                    published_at=item.get("published_at"),
+                    metadata=metadata,
+                )
+            )
+        return out
 
     async def _resolve_source_identifier_with_page(self, page, source_id: str) -> str | None:
         normalized = normalize_linkedin_source_id(source_id)

@@ -35,6 +35,7 @@ from pcca.services.subject_service import SubjectService
 from pcca.services.voice_transcription_service import VoiceTranscriptionService
 
 logger = logging.getLogger(__name__)
+STALE_BRIEF_EXPAND_MESSAGE = "This Brief is from an earlier delivery. Tap 'Get Briefs' to refresh and try again."
 
 
 ManualAction = Callable[[], Awaitable[Any]]
@@ -755,17 +756,23 @@ class TelegramService:
         token = (update.callback_query.data or "more:").split(":", 1)[1]
         button = await self.feedback_service.get_digest_button(token)
         if button is None or button.kind != "expand" or button.action != EXPAND_BRIEF_ACTION:
-            await update.callback_query.answer("This Brief can no longer be expanded.")
+            await update.callback_query.answer(STALE_BRIEF_EXPAND_MESSAGE)
             return
         view = await self.feedback_service.get_digest_brief_view(
             digest_id=button.digest_id,
             item_id=button.item_id,
         )
+        latest_view = await self.feedback_service.get_latest_digest_brief_view_for_item(
+            subject_id=button.subject_id,
+            item_id=button.item_id,
+        )
+        if latest_view is not None and latest_view.digest_id != button.digest_id:
+            view = latest_view
         if view is None:
-            await update.callback_query.answer("This Brief can no longer be expanded.")
+            await update.callback_query.answer(STALE_BRIEF_EXPAND_MESSAGE)
             return
         buttons = await self.feedback_service.list_digest_buttons_for_item(
-            digest_id=button.digest_id,
+            digest_id=view.digest_id,
             item_id=button.item_id,
         )
         await update.callback_query.edit_message_text(
@@ -1062,7 +1069,6 @@ class TelegramService:
                     )
                 ]
             )
-        rows.extend(self._quick_action_rows())
         return InlineKeyboardMarkup(rows)
 
     def _brief_inline_keyboard_from_button_rows(self, buttons) -> InlineKeyboardMarkup:
@@ -1074,7 +1080,6 @@ class TelegramService:
                     for button in buttons[:4]
                 ]
             )
-        rows.extend(self._quick_action_rows())
         return InlineKeyboardMarkup(rows)
 
     def _quick_actions_inline_keyboard(self) -> InlineKeyboardMarkup:

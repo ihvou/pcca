@@ -6,6 +6,7 @@ from datetime import datetime
 from dataclasses import dataclass
 
 from pcca.collectors.base import CollectedItem
+from pcca.content_quality import mark_low_quality_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class RSSCollector:
             summary = getattr(entry, "summary", "") or ""
             title = getattr(entry, "title", "") or ""
             text = (title + "\n\n" + summary).strip()[:4000]
+            metadata = mark_low_quality_metadata({"feed_url": source_id}, text)
             items.append(
                 CollectedItem(
                     platform=self.platform,
@@ -44,7 +46,7 @@ class RSSCollector:
                     text=text,
                     transcript_text=None,
                     published_at=published_at,
-                    metadata={"feed_url": source_id},
+                    metadata=metadata,
                 )
             )
         return items

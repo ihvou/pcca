@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 from pcca.collectors.base import CollectedItem, Collector
 from pcca.collectors.errors import BotShapedError, SessionChallengedError, SourceNotFoundError
+from pcca.content_quality import excluded_from_briefs_reason
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.item_segments import ItemSegment, ItemSegmentRepository
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -517,6 +518,20 @@ class PipelineOrchestrator:
         segment_score_rows: list[tuple[int, int, ItemSegment, Any]] = []
         scored_segment_count = 0
         for item_id, item in item_rows:
+            low_quality_reason = excluded_from_briefs_reason(
+                item.metadata if isinstance(item.metadata, dict) else {},
+                item.transcript_text or item.text,
+            )
+            if low_quality_reason:
+                stats["items_skipped_low_quality"] = int(stats.get("items_skipped_low_quality", 0)) + 1
+                logger.info(
+                    "Skipping low-quality item for scoring run_id=%s subject=%s item_id=%s reason=%s",
+                    run_id,
+                    subject.name,
+                    item_id,
+                    low_quality_reason,
+                )
+                continue
             source_id = item.metadata.get("pcca_source_id") if isinstance(item.metadata, dict) else None
             if source_id is not None:
                 try:
@@ -997,6 +1012,7 @@ class PipelineOrchestrator:
             "embedding_not_warmed_subjects": [],
             "keyword_shadow_items_scored": 0,
             "items_skipped_subject_source_override": 0,
+            "items_skipped_low_quality": 0,
             "items_scored": 0,
             "segments_seen": 0,
             "segments_score_candidates": 0,

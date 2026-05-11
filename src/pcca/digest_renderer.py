@@ -16,6 +16,8 @@ DEFAULT_FULL_TEXT_CHARS = 1800
 MIN_FULL_TEXT_CHARS = 200
 MAX_FULL_TEXT_CHARS = 4000
 MAX_REFINED_CHARS = 1500
+LOW_CONTENT_KEY_MESSAGE = "(low-content segment)"
+LOW_CONTENT_START_WORDS = {"and", "to", "is", "those", "but", "so"}
 
 logger = logging.getLogger(__name__)
 
@@ -276,13 +278,49 @@ def _brief_full_text(
 
 
 def _key_message(candidate: CandidateItem) -> str:
-    if candidate.key_message and candidate.key_message.strip():
+    has_key_message = bool(candidate.key_message and candidate.key_message.strip())
+    if has_key_message and not is_low_content_key_message(candidate.key_message):
         return candidate.key_message.strip()
-    body = candidate.segment_text or candidate.title_or_text or ""
-    normalized = " ".join(body.split())
+    # If Pass-2 produced a throwaway key message, avoid promoting raw transcript
+    # filler into the Brief header. Prefer literal cleaned/segment text when it
+    # has enough substance; otherwise fall back to the source title.
+    fallbacks = (
+        [candidate.refined_segment, candidate.segment_text, candidate.title_or_text]
+        if has_key_message
+        else [candidate.segment_text, candidate.refined_segment, candidate.title_or_text]
+    )
+    for index, body in enumerate(fallbacks):
+        normalized = " ".join((body or "").split())
+        if not normalized:
+            continue
+        is_title_fallback = index == len(fallbacks) - 1
+        if is_title_fallback or _is_usable_fallback_body(normalized):
+            return normalized[:260].rstrip() + ("..." if len(normalized) > 260 else "")
+    return "Useful update detected for this subject."
+
+
+def is_low_content_key_message(message: str | None) -> bool:
+    normalized = " ".join(str(message or "").split()).strip()
     if not normalized:
-        return "Useful update detected for this subject."
-    return normalized[:260].rstrip() + ("..." if len(normalized) > 260 else "")
+        return True
+    if normalized.lower() == LOW_CONTENT_KEY_MESSAGE:
+        return True
+    words = re.findall(r"[A-Za-z0-9']+", normalized)
+    if len(words) <= 10:
+        return True
+    first = words[0].lower() if words else ""
+    return first in LOW_CONTENT_START_WORDS
+
+
+def _is_usable_fallback_body(message: str) -> bool:
+    normalized = " ".join(str(message or "").split()).strip()
+    if not normalized or normalized.lower() == LOW_CONTENT_KEY_MESSAGE:
+        return False
+    words = re.findall(r"[A-Za-z0-9']+", normalized)
+    if len(words) < 6:
+        return False
+    first = words[0].lower() if words else ""
+    return first not in LOW_CONTENT_START_WORDS
 
 
 def _source_line(candidate: CandidateItem) -> str:

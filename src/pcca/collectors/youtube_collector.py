@@ -15,6 +15,7 @@ from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import SourceNotFoundError
 from pcca.collectors.youtube_utils import extract_video_id
+from pcca.content_quality import mark_low_quality_metadata
 from pcca.services.youtube_transcript_service import YouTubeTranscriptService
 from pcca.services.yt_dlp_service import YtDlpService, YtDlpUnavailableError
 
@@ -439,6 +440,7 @@ class YouTubeCollector:
                 metadata["transcript_rows"] = transcript.rows
                 metadata["transcript_language"] = transcript.language_code
                 metadata["transcript_translated"] = transcript.translated
+            metadata = mark_low_quality_metadata(metadata, text)
             results.append(
                 CollectedItem(
                     platform=self.platform,
@@ -501,6 +503,7 @@ class YouTubeCollector:
                 metadata["transcript_rows"] = transcript.rows
                 metadata["transcript_language"] = transcript.language_code
                 metadata["transcript_translated"] = transcript.translated
+            metadata = mark_low_quality_metadata(metadata, text)
             results.append(
                 CollectedItem(
                     platform=self.platform,

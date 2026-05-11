@@ -91,6 +91,16 @@ class FeedbackService:
             return None
         return await self.digest_repo.get_brief_view(digest_id=digest_id, item_id=item_id)
 
+    async def get_latest_digest_brief_view_for_item(
+        self,
+        *,
+        subject_id: int,
+        item_id: int,
+    ) -> DigestBriefViewRow | None:
+        if self.digest_repo is None:
+            return None
+        return await self.digest_repo.get_latest_brief_view_for_item(subject_id=subject_id, item_id=item_id)
+
     async def find_digest_item_by_message(self, *, chat_id: int, message_id: int) -> DigestItemDeliveryRow | None:
         if self.digest_repo is None:
             return None

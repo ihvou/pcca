@@ -558,3 +558,84 @@ def test_youtube_rebackfill_clean_livechat_junk_resets_corrupt_rows(
     assert "transcript_rows" not in metadata
     assert embedding_json is None
     assert segment_count == 0
+
+
+def test_audit_content_quality_clean_flags_and_clears_junk_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+    junk = 'window.WIZ_global_data = {"AfY8Hf":false,"MUE6Ne":"youtube_web","cfb2h":"youtube.web-front-end"};'
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            item_repo = ItemRepository(conn=db.conn)
+            stats = await item_repo.upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video-js-dump",
+                        author="YouTube",
+                        url="https://www.youtube.com/watch?v=video-js-dump",
+                        text=junk,
+                        transcript_text=None,
+                        published_at="2026-05-11T10:00:00",
+                        metadata={},
+                    )
+                ]
+            )
+            item_id = stats["item_ids"][0]
+            await item_repo.save_content_embedding(item_id, model="fake", embedding=[0.1], text_hash="old")
+            await db.conn.execute(
+                """
+                INSERT INTO item_segments(item_id, start_offset, end_offset, segment_text, segment_type)
+                VALUES (?, 0, 5, 'junk', 'body')
+                """,
+                (item_id,),
+            )
+            await db.conn.commit()
+            return item_id
+        finally:
+            await db.close()
+
+    item_id = asyncio.run(setup())
+
+    cli.main(["audit-content-quality", "--clean"])
+
+    out = capsys.readouterr().out
+    assert "video-js-dump" in out
+    assert '"cleaned": 1' in out
+
+    async def inspect() -> tuple[str | None, dict, str | None, int]:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute(
+                    "SELECT raw_text, metadata_json, content_embedding_json FROM items WHERE id = ?",
+                    (item_id,),
+                )
+            ).fetchone()
+            segment_row = await (
+                await db.conn.execute("SELECT COUNT(*) AS c FROM item_segments WHERE item_id = ?", (item_id,))
+            ).fetchone()
+            return row["raw_text"], json.loads(row["metadata_json"]), row["content_embedding_json"], int(segment_row["c"])
+        finally:
+            await db.close()
+
+    raw_text, metadata, embedding_json, segment_count = asyncio.run(inspect())
+    assert raw_text == ""
+    assert metadata["excluded_from_briefs_reason"] == "js_dump"
+    assert embedding_json is None
+    assert segment_count == 0

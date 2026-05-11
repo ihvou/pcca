@@ -116,15 +116,19 @@ class DigestRepository:
         placeholders = ",".join("?" for _ in digest_ids)
         digest_params = tuple(digest_ids)
         # Current schema does not use ON DELETE CASCADE, so dependency rows must
-        # be removed explicitly before deleting the digest root rows.
+        # be removed explicitly. Keep the digest root and button rows during a
+        # rebuild so old "More" tokens still resolve when the item survives the
+        # recomposition; stale buttons are pruned after new items are written.
         await self.conn.execute(
             f"DELETE FROM digest_item_deliveries WHERE digest_id IN ({placeholders})",
             digest_params,
         )
         await self.conn.execute(f"DELETE FROM digest_deliveries WHERE digest_id IN ({placeholders})", digest_params)
-        await self.conn.execute(f"DELETE FROM digest_buttons WHERE digest_id IN ({placeholders})", digest_params)
         await self.conn.execute(f"DELETE FROM digest_items WHERE digest_id IN ({placeholders})", digest_params)
-        await self.conn.execute(f"DELETE FROM digests WHERE id IN ({placeholders})", digest_params)
+        await self.conn.execute(
+            f"UPDATE digests SET status = 'pending', sent_at = NULL WHERE id IN ({placeholders})",
+            digest_params,
+        )
         await self.conn.commit()
         return len(digest_ids)
 
@@ -330,6 +334,23 @@ class DigestRepository:
             for row in rows
         ]
 
+    async def prune_stale_buttons(self, *, digest_id: int) -> int:
+        cursor = await self.conn.execute(
+            """
+            DELETE FROM digest_buttons
+            WHERE digest_id = ?
+              AND NOT EXISTS (
+                SELECT 1
+                FROM digest_items di
+                WHERE di.digest_id = digest_buttons.digest_id
+                  AND di.item_id = digest_buttons.item_id
+              )
+            """,
+            (digest_id,),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0)
+
     async def get_brief_view(self, *, digest_id: int, item_id: int) -> DigestBriefViewRow | None:
         row = await (
             await self.conn.execute(
@@ -339,6 +360,30 @@ class DigestRepository:
                 WHERE digest_id = ? AND item_id = ?
                 """,
                 (digest_id, item_id),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        return DigestBriefViewRow(
+            digest_id=row["digest_id"],
+            item_id=row["item_id"],
+            short_text=row["short_text"] or "",
+            full_text=row["full_text"] or row["short_text"] or "",
+        )
+
+    async def get_latest_brief_view_for_item(self, *, subject_id: int, item_id: int) -> DigestBriefViewRow | None:
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT di.digest_id, di.item_id, di.short_text, di.full_text
+                FROM digest_items di
+                JOIN digests d ON d.id = di.digest_id
+                WHERE d.subject_id = ?
+                  AND di.item_id = ?
+                ORDER BY d.run_date DESC, d.id DESC
+                LIMIT 1
+                """,
+                (subject_id, item_id),
             )
         ).fetchone()
         if row is None:

@@ -38,6 +38,24 @@ class DummyRSSCollector:
         ]
 
 
+class LowQualityCollector:
+    platform = "rss"
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        return [
+            CollectedItem(
+                platform="rss",
+                external_id=f"junk-{source_id}",
+                author="dummy",
+                url="https://example.com/junk",
+                text='window.WIZ_global_data = {"MUE6Ne":"youtube_web","cfb2h":"youtube.web-front-end"};',
+                transcript_text=None,
+                published_at=None,
+                metadata={"source_id": source_id},
+            )
+        ]
+
+
 class CountingCollector(DummyRSSCollector):
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -427,6 +445,47 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     assert second_stats["items_inserted"] == 0
     assert second_stats["items_updated"] == 0
     assert second_stats["items_scored"] == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_low_quality_items_when_scoring(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Video Artifacts", include_terms=["youtube"])
+    await source_service.add_source_to_subject(
+        subject_name="Video Artifacts",
+        platform="rss",
+        account_or_channel_id="feed://junk",
+        display_name="Junk",
+        priority=1,
+    )
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": LowQualityCollector()},
+    )
+    stats = await orchestrator.run_nightly_collection()
+
+    assert stats["items_collected"] == 1
+    assert stats["items_inserted"] == 1
+    assert stats["items_skipped_low_quality"] == 1
+    assert stats["items_scored"] == 0
+    score_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")).fetchone()
+    assert int(score_count["c"]) == 0
 
     await db.close()
 

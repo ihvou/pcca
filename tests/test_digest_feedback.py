@@ -723,7 +723,7 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
     assert db.conn is not None
 
     subject_service, routing_service, subject = await _seed_subject_with_route(db)
-    await _seed_item_score(
+    item_id = await _seed_item_score(
         db,
         subject_id=subject.id,
         external_id="item-1",
@@ -747,6 +747,13 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
     initial_stats = await runner.run_morning_digest()
     assert initial_stats["deliveries_sent"] == 1
     assert "Older Claude Code workflow detail" in fake_telegram.sent_messages[-1]["brief"].short_text
+    old_more_button = await (
+        await db.conn.execute(
+            "SELECT token, digest_id FROM digest_buttons WHERE item_id = ? AND kind = 'expand'",
+            (item_id,),
+        )
+    ).fetchone()
+    assert old_more_button is not None
 
     await _seed_item_score(
         db,
@@ -765,6 +772,14 @@ async def test_digest_rebuild_deletes_today_and_recomposes_from_current_scores(t
     assert len(fake_telegram.sent_messages) == 3
     rebuilt_texts = [message["brief"].short_text for message in fake_telegram.sent_messages[-2:]]
     assert any("Fresh Claude Code release" in text for text in rebuilt_texts)
+    preserved_button = await digest_repo.get_button(old_more_button["token"])
+    assert preserved_button is not None
+    preserved_view = await digest_repo.get_brief_view(
+        digest_id=preserved_button.digest_id,
+        item_id=preserved_button.item_id,
+    )
+    assert preserved_view is not None
+    assert preserved_view.item_id == item_id
 
     digest_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digests")).fetchone()
     delivery_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM digest_deliveries")).fetchone()

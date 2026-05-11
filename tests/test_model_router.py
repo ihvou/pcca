@@ -85,6 +85,9 @@ async def test_model_router_batch_rerank_uses_configured_timeout_and_key_message
     assert seen["path"] == "/api/generate"
     assert seen["payload"]["format"] == RERANK_BATCH_RESPONSE_SCHEMA
     assert "refined_segment" not in seen["payload"]["prompt"]
+    assert "Use only content present in the candidate text" in seen["payload"]["prompt"]
+    assert "Do not introduce names, claims, products, companies, or context" in seen["payload"]["prompt"]
+    assert "15-30 words" in seen["payload"]["prompt"]
     assert results[1].score_delta == pytest.approx(0.1)
     assert results[1].key_message == "The useful point is clear."
     assert results[1].refined_segment is None
@@ -130,6 +133,8 @@ async def test_model_router_refinement_batch_is_separate_top_n_call() -> None:
         )
 
     assert "refined_segment" in seen["payload"]["prompt"]
+    assert "paraphrasing only literal claims present in the candidate text" in seen["payload"]["prompt"]
+    assert "Do not introduce names, claims, products, companies, or context" in seen["payload"]["prompt"]
     assert seen["payload"]["format"] == REFINE_BATCH_RESPONSE_SCHEMA
     assert "not selected" not in seen["payload"]["prompt"]
     assert results == {2: "Cleaned up practical explanation."}

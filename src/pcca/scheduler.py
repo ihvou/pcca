@@ -378,6 +378,7 @@ class JobRunner:
                         short_text=rendered_item.short_text,
                         full_text=rendered_item.full_text,
                     )
+                await self.digest_repo.prune_stale_buttons(digest_id=digest.id)
 
                 for route in routes:
                     thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None

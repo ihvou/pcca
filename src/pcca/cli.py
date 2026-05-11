@@ -11,6 +11,7 @@ from typing import Any, Sequence
 from pcca.app import PCCAApp
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.config import Settings
+from pcca.content_quality import EXCLUDED_FROM_BRIEFS_KEY, is_low_quality
 from pcca.db import Database
 from pcca.dependency_doctor import check_runtime_dependencies, format_dependency_report
 from pcca.logging_utils import configure_logging
@@ -421,6 +422,95 @@ async def _clean_youtube_livechat_junk(
         cleaned += 1
         print(f"Cleaned live-chat transcript junk item_id={row['id']}", flush=True)
     return cleaned
+
+
+async def _audit_content_quality(
+    settings: Settings,
+    *,
+    clean: bool = False,
+    limit: int | None = None,
+) -> dict[str, int]:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    stats = {"scanned": 0, "flagged": 0, "cleaned": 0}
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        item_repo = ItemRepository(conn=db.conn)
+        segment_repo = ItemSegmentRepository(conn=db.conn)
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: tuple[int, ...] = (int(limit),) if limit_clause else ()
+        rows = await (
+            await db.conn.execute(
+                f"""
+                SELECT id, platform, external_id, canonical_url, raw_text, transcript_text, metadata_json
+                FROM items
+                ORDER BY COALESCE(updated_at, ingested_at, '') DESC, id DESC
+                {limit_clause}
+                """,
+                params,
+            )
+        ).fetchall()
+        stats["scanned"] = len(rows)
+        for row in rows:
+            raw_text = str(row["raw_text"] or "")
+            transcript_text = str(row["transcript_text"] or "")
+            raw_reason = is_low_quality(raw_text)
+            transcript_reason = is_low_quality(transcript_text)
+            reason = raw_reason or transcript_reason
+            if reason is None:
+                continue
+            stats["flagged"] += 1
+            print(
+                f"{row['id']}\t{row['platform']}\t{row['external_id']}\t{reason}\t{row['canonical_url'] or ''}",
+                flush=True,
+            )
+            if not clean:
+                continue
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata[EXCLUDED_FROM_BRIEFS_KEY] = reason
+            next_raw_text = "" if raw_reason else raw_text
+            next_transcript_text = None if transcript_reason else (transcript_text or None)
+            content_hash = item_repo._content_hash_values(
+                url=row["canonical_url"],
+                text=next_raw_text,
+                transcript_text=next_transcript_text,
+            )
+            await db.conn.execute(
+                """
+                UPDATE items
+                SET raw_text = ?,
+                    transcript_text = ?,
+                    metadata_json = ?,
+                    content_hash = ?,
+                    updated_at = CURRENT_TIMESTAMP,
+                    content_embedding_json = NULL,
+                    content_embedding_model = NULL,
+                    content_embedding_text_hash = NULL,
+                    content_embedding_updated_at = NULL
+                WHERE id = ?
+                """,
+                (
+                    next_raw_text,
+                    next_transcript_text,
+                    json.dumps(metadata),
+                    content_hash,
+                    int(row["id"]),
+                ),
+            )
+            await segment_repo.delete_segments_for_item(item_id=int(row["id"]))
+            await db.conn.commit()
+            stats["cleaned"] += 1
+    finally:
+        await db.close()
+    return stats
 
 
 async def _youtube_rebackfill_transcripts(
@@ -982,6 +1072,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reset existing YouTube transcript rows that contain live-chat/rechat junk before rebackfilling.",
     )
+    audit_quality_parser = sub.add_parser(
+        "audit-content-quality",
+        help="List or clean items whose text looks like JS dumps, link lists, or marketing spam",
+    )
+    audit_quality_parser.add_argument("--clean", action="store_true", help="Flag matching items and clear junk text")
+    audit_quality_parser.add_argument("--limit", type=int, required=False, help="Maximum items to scan")
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -1229,6 +1325,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 limit=args.limit,
                 concurrency=args.concurrency,
                 clean_livechat_junk=args.clean_livechat_junk,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
+    if args.command == "audit-content-quality":
+        stats = asyncio.run(
+            _audit_content_quality(
+                settings,
+                clean=args.clean,
+                limit=args.limit,
             )
         )
         print(json.dumps(stats, indent=2, sort_keys=True))
