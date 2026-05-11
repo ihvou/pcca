@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from pcca.collectors.base import CollectedItem, Collector
-from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
+from pcca.collectors.errors import BotShapedError, SessionChallengedError, SourceNotFoundError
 from pcca.repositories.items import ItemRepository
 from pcca.repositories.item_segments import ItemSegment, ItemSegmentRepository
 from pcca.repositories.item_scores import ItemScoreRepository
@@ -1430,6 +1430,28 @@ class PipelineOrchestrator:
                         source.source_id,
                         exc.platform,
                         exc.challenge_kind,
+                        exc.current_url,
+                        int((time.monotonic() - source_started_at) * 1000),
+                    )
+                except BotShapedError as exc:
+                    # T-138: collector detected anti-bot signal (e.g. React
+                    # hydration error, captcha redirect). Classify as
+                    # bot_shaped (fast circuit-breaker trip, threshold ~5)
+                    # and mark source for re-auth so the user sees the gap
+                    # in the wizard instead of "0 items, no failures".
+                    self._drain_collector_observability(collector, stats, metadata)
+                    await self.source_service.mark_source_needs_reauth(source.source_id)
+                    stats["sources_needing_reauth"] += 1
+                    stats["bot_shaped_total"] = stats.get("bot_shaped_total", 0) + 1
+                    bot_shaped_by_platform = stats.setdefault("bot_shaped_by_platform", {})
+                    bot_shaped_by_platform[exc.platform] = bot_shaped_by_platform.get(exc.platform, 0) + 1
+                    record_platform_failure(source.platform, reason=f"bot_shaped:{exc.signal}")
+                    logger.warning(
+                        "Bot-shaped collection detected run_id=%s source_id=%s platform=%s signal=%s url=%s duration_ms=%d",
+                        run_id,
+                        source.source_id,
+                        exc.platform,
+                        exc.signal,
                         exc.current_url,
                         int((time.monotonic() - source_started_at) * 1000),
                     )

@@ -5,7 +5,46 @@ from dataclasses import dataclass
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
-from pcca.collectors.errors import SessionChallengedError
+from pcca.collectors.errors import BotShapedError, SessionChallengedError
+
+# Substring matches in pageerror events that indicate LinkedIn served a
+# bot-blocked page rather than a real feed. Most common today (2026-05-11
+# observation): React error #418 = hydration mismatch typically caused by
+# anti-bot fingerprint detection. Captcha/checkpoint redirects produce
+# different signatures but should also trip this guard.
+_BOT_SHAPED_PAGEERROR_SIGNATURES: tuple[str, ...] = (
+    "React error #418",  # hydration mismatch — LinkedIn anti-bot
+    "minified react error #418",
+)
+_BOT_SHAPED_URL_SIGNATURES: tuple[str, ...] = (
+    "/checkpoint/",
+    "/uas/captcha",
+)
+
+
+def _detect_bot_shaped_signal(page) -> str | None:
+    """Inspect page debug events for bot-detection signatures. Returns the
+    matching signature string when found, else None.
+
+    Reads from BrowserSessionManager's `_pcca_debug_events` attached to the
+    page object (populated by `pageerror` and `response` listeners). Only
+    looks at events on THIS page, not the whole session — avoids false
+    positives from earlier collection passes.
+    """
+    events = getattr(page, "_pcca_debug_events", None) or []
+    for event in events:
+        kind = event.get("event") if isinstance(event, dict) else None
+        if kind != "pageerror":
+            continue
+        error_text = str(event.get("error", "")).lower()
+        for signature in _BOT_SHAPED_PAGEERROR_SIGNATURES:
+            if signature.lower() in error_text:
+                return signature
+    current_url = (getattr(page, "url", None) or "").lower()
+    for signature in _BOT_SHAPED_URL_SIGNATURES:
+        if signature in current_url:
+            return signature
+    return None
 from pcca.collectors.linkedin_utils import (
     build_linkedin_activity_url,
     is_opaque_linkedin_member_id,
@@ -105,6 +144,23 @@ class LinkedInCollector:
                     platform=self.platform,
                     source_id=source_id,
                 )
+                # T-138: when raw_items is empty AND the page emitted an
+                # anti-bot signal (React #418 hydration error, captcha
+                # redirect), surface as BotShapedError instead of silently
+                # returning []. Orchestrator classifies this as bot_shaped
+                # (threshold ~5, fast circuit trip) rather than
+                # empty_legitimate (threshold ~25). Without this signal,
+                # 33 silent-empty LinkedIn sources never trip the breaker
+                # and the user sees no LinkedIn content for days while
+                # the system reports "no failures."
+                signal = _detect_bot_shaped_signal(page)
+                if signal is not None:
+                    raise BotShapedError(
+                        platform=self.platform,
+                        source_id=source_id,
+                        signal=signal,
+                        current_url=getattr(page, "url", None),
+                    )
         except Exception as exc:
             await self.session_manager.capture_debug_snapshot(page, "linkedin_collect_failed", error=exc)
             logger.exception("LinkedIn collection failed for source=%s", source_id)

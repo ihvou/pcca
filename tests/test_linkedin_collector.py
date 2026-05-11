@@ -1,0 +1,201 @@
+"""Tests for LinkedIn collector — focused on T-138 bot-shaped detection.
+
+These tests exercise the empty-result code path and verify that anti-bot
+page signals (React error #418 hydration crash, captcha/checkpoint
+redirects) escalate into `BotShapedError` so the orchestrator can apply
+the fast-trip circuit breaker AND mark the source for re-auth instead of
+silently accumulating empty_legitimate signals."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from pcca.collectors.errors import BotShapedError
+from pcca.collectors.linkedin_collector import (
+    LinkedInCollector,
+    _detect_bot_shaped_signal,
+)
+
+
+class _FakePage:
+    """Minimal stand-in for Playwright Page exposing the attributes
+    `_detect_bot_shaped_signal` reads. Real Page has many more methods;
+    we only model what the function under test touches."""
+
+    def __init__(self, *, url: str = "", debug_events: list[dict] | None = None) -> None:
+        self.url = url
+        self._pcca_debug_events = debug_events or []
+
+
+def test_detect_bot_shaped_signal_returns_none_for_clean_page() -> None:
+    page = _FakePage(
+        url="https://www.linkedin.com/in/melissacote1/recent-activity/all/",
+        debug_events=[],
+    )
+    assert _detect_bot_shaped_signal(page) is None
+
+
+def test_detect_bot_shaped_signal_picks_react_418_hydration_error() -> None:
+    """T-138: this is the exact signature LinkedIn served during run_id=80.
+    Live log: `error=Minified React error #418; visit https://react.dev/...`.
+    """
+    page = _FakePage(
+        url="https://www.linkedin.com/in/melissacote1/recent-activity/all/",
+        debug_events=[
+            {
+                "event": "pageerror",
+                "platform": "linkedin",
+                "error": (
+                    "Minified React error #418; visit https://react.dev/"
+                    "errors/418?args[]= for the full message or use the "
+                    "non-minified dev environment for full errors and "
+                    "additional helpful warnings."
+                ),
+            }
+        ],
+    )
+    signal = _detect_bot_shaped_signal(page)
+    assert signal is not None
+    assert "418" in signal
+
+
+def test_detect_bot_shaped_signal_picks_checkpoint_redirect() -> None:
+    page = _FakePage(
+        url="https://www.linkedin.com/checkpoint/challenge/AgFFFqXX",
+        debug_events=[],
+    )
+    assert _detect_bot_shaped_signal(page) == "/checkpoint/"
+
+
+def test_detect_bot_shaped_signal_ignores_non_pageerror_events() -> None:
+    """Console warnings and requestfailed events are not bot signals
+    (LinkedIn pages emit dozens of those during normal operation)."""
+    page = _FakePage(
+        url="https://www.linkedin.com/in/test/recent-activity/all/",
+        debug_events=[
+            {"event": "console", "type": "warning", "text": "React error #418 mention from a third-party script"},
+            {"event": "requestfailed", "url": "chrome-extension://invalid/"},
+            {"event": "response", "url": "https://www.linkedin.com/...", "status": 502},
+        ],
+    )
+    assert _detect_bot_shaped_signal(page) is None
+
+
+@pytest.mark.asyncio
+async def test_linkedin_collector_raises_bot_shaped_on_react_418(monkeypatch: pytest.MonkeyPatch) -> None:
+    """End-to-end shape of T-138: when the page renders no feed AND the
+    pageerror event log contains React #418, the collector raises
+    BotShapedError instead of returning [].
+
+    Replaces orchestrator-side classification of "empty_legitimate"
+    (threshold 25, slow trip) with "bot_shaped" (threshold 5, fast trip).
+    Without this, 33 silent-empty LinkedIn sources accumulate without
+    surfacing the failure to the user.
+    """
+
+    class _SessionManagerSpy:
+        async def new_page(self, _platform: str) -> Any:
+            return _FakePage(
+                url="https://www.linkedin.com/in/melissacote1/recent-activity/all/",
+                debug_events=[
+                    {
+                        "event": "pageerror",
+                        "platform": "linkedin",
+                        "error": "Minified React error #418; visit https://react.dev/errors/418?args[]=",
+                    }
+                ],
+            )
+
+        async def capture_empty_result_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def capture_debug_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    async def _fake_goto(_url: str, **_kwargs: Any) -> None:
+        return None
+
+    async def _fake_wait_for_timeout(_ms: int) -> None:
+        return None
+
+    async def _fake_evaluate(_js: str, _max_items: int) -> list:
+        return []  # LinkedIn returned no feed items (page was the React-#418 error shell)
+
+    async def _fake_close() -> None:
+        return None
+
+    # Build the page returned by session_manager.new_page and patch the
+    # methods the collector calls on it.
+    spy = _SessionManagerSpy()
+    page = await spy.new_page("linkedin")
+    page.goto = _fake_goto  # type: ignore[attr-defined]
+    page.wait_for_timeout = _fake_wait_for_timeout  # type: ignore[attr-defined]
+    page.evaluate = _fake_evaluate  # type: ignore[attr-defined]
+    page.close = _fake_close  # type: ignore[attr-defined]
+
+    async def _new_page_returning_spy(_platform: str) -> Any:
+        return page
+
+    spy.new_page = _new_page_returning_spy  # type: ignore[method-assign]
+
+    collector = LinkedInCollector(session_manager=spy)  # type: ignore[arg-type]
+
+    with pytest.raises(BotShapedError) as excinfo:
+        await collector.collect_from_source("in/melissacote1")
+
+    assert excinfo.value.platform == "linkedin"
+    assert excinfo.value.source_id == "in/melissacote1"
+    assert "418" in excinfo.value.signal
+
+
+@pytest.mark.asyncio
+async def test_linkedin_collector_returns_empty_when_no_bot_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a legitimately empty profile (no posts, no errors) must
+    NOT raise BotShapedError. It returns [] and the orchestrator classifies
+    as empty_legitimate (slow threshold). T-138 narrows the bot-shaped
+    signal to actual anti-bot signatures; absence of items alone is not a
+    bot signal."""
+
+    class _SessionManagerSpy:
+        async def new_page(self, _platform: str) -> Any:
+            return _FakePage(
+                url="https://www.linkedin.com/in/quietprofile/recent-activity/all/",
+                debug_events=[],  # Clean page, no errors
+            )
+
+        async def capture_empty_result_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+        async def capture_debug_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    async def _fake_goto(_url: str, **_kwargs: Any) -> None:
+        return None
+
+    async def _fake_wait_for_timeout(_ms: int) -> None:
+        return None
+
+    async def _fake_evaluate(_js: str, _max_items: int) -> list:
+        return []
+
+    async def _fake_close() -> None:
+        return None
+
+    spy = _SessionManagerSpy()
+    page = await spy.new_page("linkedin")
+    page.goto = _fake_goto  # type: ignore[attr-defined]
+    page.wait_for_timeout = _fake_wait_for_timeout  # type: ignore[attr-defined]
+    page.evaluate = _fake_evaluate  # type: ignore[attr-defined]
+    page.close = _fake_close  # type: ignore[attr-defined]
+
+    async def _new_page_returning_spy(_platform: str) -> Any:
+        return page
+
+    spy.new_page = _new_page_returning_spy  # type: ignore[method-assign]
+
+    collector = LinkedInCollector(session_manager=spy)  # type: ignore[arg-type]
+
+    items = await collector.collect_from_source("in/quietprofile")
+    assert items == []

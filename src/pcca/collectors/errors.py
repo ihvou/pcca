@@ -13,6 +13,36 @@ class SessionChallengedError(RuntimeError):
         )
 
 
+class BotShapedError(RuntimeError):
+    """Collector detected a bot-detection signal (e.g. anti-scrape React
+    hydration error, captcha redirect) and produced zero usable items.
+
+    Distinct from `SessionChallengedError` (which is a recoverable
+    re-authentication prompt) and from a legitimately-empty result (silent
+    return of `[]`). The orchestrator should treat this as bot_shaped for
+    circuit-breaker classification — threshold ~5 (fast trip) vs
+    empty_legitimate threshold ~25.
+    """
+
+    def __init__(
+        self,
+        *,
+        platform: str,
+        source_id: str,
+        signal: str,
+        current_url: str | None = None,
+    ) -> None:
+        self.platform = platform
+        self.source_id = source_id
+        self.signal = signal
+        self.current_url = current_url
+        url_part = f" at {current_url}" if current_url else ""
+        super().__init__(
+            f"{platform} bot-detection signal for source={source_id}: "
+            f"{signal}{url_part}"
+        )
+
+
 class SourceNotFoundError(RuntimeError):
     def __init__(
         self,

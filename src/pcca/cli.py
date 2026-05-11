@@ -930,9 +930,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip automatic embedding warm-up after collection.",
     )
     nightly_parser.add_argument(
-        "--score",
-        action="store_true",
-        help="Also run the legacy per-subject scoring phase after collection.",
+        "--no-score",
+        dest="score",
+        action="store_false",
+        default=True,
+        help=(
+            "Skip the per-subject scoring phase after collection. By default "
+            "nightly runs score newly-collected items so they become Brief "
+            "candidates; pass --no-score for read-content-only runs."
+        ),
     )
     embed_backfill_parser = sub.add_parser(
         "embed-backfill",

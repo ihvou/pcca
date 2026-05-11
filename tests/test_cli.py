@@ -24,7 +24,11 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
             monkeypatch.delenv(key, raising=False)
 
 
-def test_run_nightly_once_no_backfill_defaults_to_no_score(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+def test_run_nightly_once_defaults_to_scoring_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+    """T-137: nightly should score by default. Previously --score had to be
+    explicitly passed (footgun: user runs nightly, expects Briefs to update,
+    but new items stay unscored). Default flipped to score=True; users opt
+    out with --no-score for read-only runs."""
     _isolate_env(monkeypatch, tmp_path)
     calls: list[dict] = []
 
@@ -40,11 +44,12 @@ def test_run_nightly_once_no_backfill_defaults_to_no_score(monkeypatch: pytest.M
 
     cli.main(["run-nightly-once", "--no-backfill"])
 
-    assert calls == [{"auto_backfill": False, "score": False}]
+    assert calls == [{"auto_backfill": False, "score": True}]
     assert "Nightly run completed" in capsys.readouterr().out
 
 
-def test_run_nightly_once_score_flag_restores_legacy_scoring(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+def test_run_nightly_once_no_score_flag_skips_scoring(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """T-137: --no-score opt-out for read-content-only runs."""
     _isolate_env(monkeypatch, tmp_path)
     calls: list[dict] = []
 
@@ -58,9 +63,9 @@ def test_run_nightly_once_score_flag_restores_legacy_scoring(monkeypatch: pytest
 
     monkeypatch.setattr(cli, "PCCAApp", FakePCCAApp)
 
-    cli.main(["run-nightly-once", "--score"])
+    cli.main(["run-nightly-once", "--no-score"])
 
-    assert calls == [{"auto_backfill": True, "score": True}]
+    assert calls == [{"auto_backfill": True, "score": False}]
 
 
 def test_doctor_command_reports_dependency_health(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
