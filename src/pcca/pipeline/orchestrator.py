@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from pcca.collectors.base import CollectedItem, Collector
@@ -464,6 +465,35 @@ class PipelineOrchestrator:
         if isinstance(yt_dlp_failures, dict):
             self._merge_count_map(stats.setdefault("yt_dlp_failures_by_class", {}), yt_dlp_failures)
             self._merge_count_map(metadata.setdefault("yt_dlp_failures_by_class", {}), yt_dlp_failures)
+
+    async def _record_source_collection_result(self, source, *, item_count: int) -> None:
+        source_metadata = source.metadata if isinstance(getattr(source, "metadata", None), dict) else {}
+        now = datetime.now(timezone.utc).isoformat()
+        empty_streak = 0
+        if item_count <= 0:
+            try:
+                empty_streak = int(source_metadata.get("empty_result_streak") or 0) + 1
+            except (TypeError, ValueError):
+                empty_streak = 1
+        values: dict[str, Any] = {
+            "last_crawl_item_count": int(item_count),
+            "last_crawl_empty": item_count <= 0,
+            "empty_result_streak": empty_streak,
+            "last_crawl_result_at": now,
+        }
+        if item_count > 0:
+            values["last_successful_item_at"] = now
+        try:
+            source.metadata = await self.source_service.merge_source_metadata(
+                source_id=source.source_id,
+                values=values,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to record source collection metadata source_id=%s platform=%s",
+                getattr(source, "source_id", None),
+                getattr(source, "platform", None),
+            )
 
     @staticmethod
     def _model_candidate_text(*, item: CollectedItem, segment=None) -> str:
@@ -1397,6 +1427,7 @@ class PipelineOrchestrator:
                             "pcca_source_platform": source.platform,
                             "pcca_source_account_or_channel_id": source.account_or_channel_id,
                         }
+                    await self._record_source_collection_result(source, item_count=len(items))
                     await self.source_service.mark_source_crawl_success(source.source_id)
                     stats["sources_crawled"] += 1
                     stats["items_collected"] += len(items)

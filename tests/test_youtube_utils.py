@@ -217,6 +217,45 @@ async def test_youtube_collector_prefers_yt_dlp_with_cookie_export() -> None:
     assert items[0].transcript_text == "The rollout adds a practical handoff workflow."
 
 
+@pytest.mark.asyncio
+async def test_youtube_collector_fills_missing_yt_dlp_published_at_from_rss() -> None:
+    class FakeYtDlpService:
+        async def list_channel_videos(self, source_id: str, *, max_items: int, cookiefile):
+            assert source_id == "@openai"
+            assert max_items == 5
+            return [
+                YtDlpVideo(
+                    external_id="abc123",
+                    url="https://www.youtube.com/watch?v=abc123",
+                    title="Claude Code practical release notes",
+                    description="Specific workflow details.",
+                    published_at=None,
+                    channel_name="OpenAI",
+                    channel_id=SAMPLE_CHANNEL_ID,
+                )
+            ]
+
+        async def get_transcript(self, video_id: str, *, cookiefile=None):
+            assert video_id == "abc123"
+            return None
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == youtube_rss_url(SAMPLE_CHANNEL_ID)
+        return httpx.Response(200, text=SAMPLE_RSS)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        collector = YouTubeCollector(
+            yt_dlp_service=FakeYtDlpService(),  # type: ignore[arg-type]
+            http_client=client,
+            max_items=5,
+        )
+        items = await collector.collect_from_source("@openai")
+
+    assert len(items) == 1
+    assert items[0].published_at == "2026-04-28T10:00:00+00:00"
+    assert items[0].metadata["published_at_source"] == "youtube_rss"
+
+
 def test_yt_dlp_caption_helpers_parse_json_and_select_caption() -> None:
     info = {
         "subtitles": {},

@@ -23,7 +23,8 @@ class ItemRepository:
             exists = await (
                 await self.conn.execute(
                     """
-                    SELECT id, canonical_url, raw_text, transcript_text, metadata_json, content_hash
+                    SELECT id, canonical_url, author, published_at, raw_text,
+                           transcript_text, metadata_json, content_hash
                     FROM items
                     WHERE platform = ? AND external_id = ?
                     """,
@@ -124,6 +125,28 @@ class ItemRepository:
                         WHERE platform = ? AND external_id = ?
                         """,
                         (
+                            metadata_json,
+                            item.platform,
+                            item.external_id,
+                        ),
+                    )
+                    updated += 1
+                    changed_item_ids.append(int(exists["id"]))
+                elif self._has_new_attribution(existing=exists, item=item):
+                    await self.conn.execute(
+                        """
+                        UPDATE items
+                        SET canonical_url = COALESCE(?, canonical_url),
+                            author = COALESCE(NULLIF(?, ''), author),
+                            published_at = COALESCE(NULLIF(?, ''), published_at),
+                            metadata_json = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE platform = ? AND external_id = ?
+                        """,
+                        (
+                            item.url,
+                            item.author or "",
+                            item.published_at or "",
                             metadata_json,
                             item.platform,
                             item.external_id,
@@ -446,3 +469,9 @@ class ItemRepository:
             existing_metadata = {}
         existing_rows = existing_metadata.get("transcript_rows") if isinstance(existing_metadata, dict) else None
         return existing_rows != incoming_rows
+
+    @staticmethod
+    def _has_new_attribution(*, existing, item: CollectedItem) -> bool:
+        has_author = bool(str(item.author or "").strip())
+        has_published_at = bool(str(item.published_at or "").strip())
+        return (has_author and not existing["author"]) or (has_published_at and not existing["published_at"])

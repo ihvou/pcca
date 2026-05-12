@@ -120,7 +120,9 @@ pcca rebuild-briefs-once      # force-recompute today's Briefs
 pcca capture-session --platform x [--browser auto|chrome|arc|brave|edge]
 pcca import-follows --subject "Subject Name" --platform x [--limit 150]
 pcca youtube-rebackfill-transcripts --clean-livechat-junk
+pcca youtube-rebackfill-published-at # fill missing YouTube dates from RSS
 pcca audit-content-quality [--clean] # find/flag JS dumps, link lists, marketing spam
+pcca audit-sources --platform linkedin # source crawl health and empty-result streaks
 pcca doctor                   # verify installed runtime dependencies
 pcca debug-bundle             # redacted local support bundle
 ```

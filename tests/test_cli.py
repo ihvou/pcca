@@ -13,6 +13,7 @@ from pcca.config import Settings
 from pcca.db import Database
 from pcca.dependency_doctor import DependencyCheck
 from pcca.repositories.items import ItemRepository
+from pcca.repositories.sources import SourceRepository
 from pcca.repositories.subjects import SubjectRepository
 from pcca.services.youtube_transcript_service import TranscriptResult
 
@@ -647,3 +648,132 @@ def test_audit_content_quality_clean_flags_and_clears_junk_text(
     assert metadata["_raw_text_archived"] == junk
     assert metadata["_raw_text_archived_reason"] == "js_dump"
     assert "_raw_text_archived_at" in metadata
+
+
+def test_audit_sources_reports_empty_streaks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    async def setup() -> None:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            source_repo = SourceRepository(conn=db.conn)
+            empty = await source_repo.create_or_get(
+                "linkedin",
+                "in/lennyrachitsky",
+                "Lenny Rachitsky",
+            )
+            await source_repo.merge_metadata(
+                empty.id,
+                {"last_crawl_item_count": 0, "empty_result_streak": 4},
+            )
+            active = await source_repo.create_or_get("linkedin", "in/working", "Working Source")
+            await source_repo.merge_metadata(
+                active.id,
+                {"last_crawl_item_count": 2, "empty_result_streak": 0},
+            )
+            await ItemRepository(conn=db.conn).upsert_many(
+                [
+                    CollectedItem(
+                        platform="linkedin",
+                        external_id="li-ok",
+                        author="Working Source",
+                        url="https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                        text="Useful working post",
+                        transcript_text=None,
+                        published_at="2026-05-12T00:00:00",
+                        metadata={"pcca_source_id": active.id},
+                    )
+                ]
+            )
+        finally:
+            await db.close()
+
+    asyncio.run(setup())
+
+    cli.main(["audit-sources", "--platform", "linkedin", "--min-empty-streak", "1"])
+
+    out = capsys.readouterr().out
+    assert "in/lennyrachitsky" in out
+    assert "Working Source" not in out
+    assert '"sources": 2' in out
+    assert '"reported": 1' in out
+    assert '"zero_item_sources": 1' in out
+
+
+def test_youtube_rebackfill_published_at_uses_rss_dates(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+
+    async def fake_fetch(_client, channel_id: str, *, max_items: int) -> dict[str, str]:
+        assert channel_id == "UC123"
+        assert max_items >= 50
+        return {"video123": "2026-05-12T09:00:00+00:00"}
+
+    monkeypatch.setattr(cli, "_fetch_youtube_rss_published_dates", fake_fetch)
+
+    async def setup() -> int:
+        settings = Settings.from_env()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            stats = await ItemRepository(conn=db.conn).upsert_many(
+                [
+                    CollectedItem(
+                        platform="youtube",
+                        external_id="video123",
+                        author="OpenAI",
+                        url="https://www.youtube.com/watch?v=video123",
+                        text="Video without published date",
+                        transcript_text=None,
+                        published_at=None,
+                        metadata={"channel_id": "UC123"},
+                    )
+                ]
+            )
+            return int(stats["item_ids"][0])
+        finally:
+            await db.close()
+
+    item_id = asyncio.run(setup())
+
+    cli.main(["youtube-rebackfill-published-at"])
+
+    out = capsys.readouterr().out
+    assert f"Updated published_at item_id={item_id}" in out
+    assert '"updated": 1' in out
+
+    async def inspect() -> tuple[str | None, dict]:
+        settings = Settings.from_env()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        assert db.conn is not None
+        try:
+            row = await (
+                await db.conn.execute(
+                    "SELECT published_at, metadata_json FROM items WHERE id = ?",
+                    (item_id,),
+                )
+            ).fetchone()
+            return row["published_at"], json.loads(row["metadata_json"])
+        finally:
+            await db.close()
+
+    published_at, metadata = asyncio.run(inspect())
+    assert published_at == "2026-05-12T09:00:00+00:00"
+    assert metadata["published_at_source"] == "youtube_rss_backfill"

@@ -167,3 +167,58 @@ async def test_item_upsert_marks_new_transcript_rows_as_changed(tmp_path: Path) 
     assert '"start": 42.0' in row["metadata_json"]
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_item_upsert_enriches_missing_author_and_published_at_without_text_change(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    repo = ItemRepository(conn=db.conn)
+    await repo.upsert_many(
+        [
+            CollectedItem(
+                platform="linkedin",
+                external_id="activity-1",
+                author=None,
+                url="https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                text="Same post text",
+                transcript_text=None,
+                published_at=None,
+                metadata={"source_id": "in/lennyrachitsky"},
+            )
+        ]
+    )
+
+    enriched = await repo.upsert_many(
+        [
+            CollectedItem(
+                platform="linkedin",
+                external_id="activity-1",
+                author="Lenny Rachitsky",
+                url="https://www.linkedin.com/feed/update/urn:li:activity:1/",
+                text="Same post text",
+                transcript_text=None,
+                published_at="2026-05-12T09:00:00.000Z",
+                metadata={"source_id": "in/lennyrachitsky", "published_at_source": "relative_time"},
+            )
+        ]
+    )
+
+    row = await (
+        await db.conn.execute(
+            "SELECT author, published_at, raw_text, metadata_json FROM items WHERE platform = 'linkedin' AND external_id = 'activity-1'"
+        )
+    ).fetchone()
+
+    assert enriched["inserted"] == 0
+    assert enriched["updated"] == 1
+    assert enriched["changed_item_ids"] == enriched["item_ids"]
+    assert row["author"] == "Lenny Rachitsky"
+    assert row["published_at"] == "2026-05-12T09:00:00.000Z"
+    assert row["raw_text"] == "Same post text"
+    assert "published_at_source" in row["metadata_json"]
+
+    await db.close()

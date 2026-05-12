@@ -465,6 +465,9 @@ class BrowserSessionManager:
         platform: str,
         source_id: str,
         sample_rate: float | None = None,
+        label: str = "empty",
+        html_file_chars: int = 0,
+        include_source_in_filename: bool = False,
     ) -> Path | None:
         """Persist breadcrumbs for "page loaded but selectors found nothing" cases."""
         if page is None or getattr(page, "is_closed", lambda: True)():
@@ -485,14 +488,21 @@ class BrowserSessionManager:
         debug_root.mkdir(parents=True, exist_ok=True)
         normalized_platform = slugify(platform or getattr(page, "_pcca_platform", "unknown"))
         source_hash = hashlib.sha256(source_id.encode("utf-8", errors="replace")).hexdigest()[:12]
+        source_slug = slugify(source_id)[:80] if include_source_in_filename else ""
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        stem = f"{normalized_platform}_empty_{timestamp}_{source_hash}"
+        label_slug = slugify(label or "empty")
+        if source_slug:
+            stem = f"{normalized_platform}_{label_slug}_{source_slug}_{timestamp}_{source_hash}"
+        else:
+            stem = f"{normalized_platform}_{label_slug}_{timestamp}_{source_hash}"
         screenshot_path = debug_root / f"{stem}.png"
         metadata_path = debug_root / f"{stem}.json"
+        html_path = debug_root / f"{stem}.html"
 
         title = None
         meta_title = None
         html_preview = ""
+        html_saved = False
         dom_summary: dict[str, Any] = {}
         try:
             title = await page.title()
@@ -505,7 +515,11 @@ class BrowserSessionManager:
         except Exception:
             logger.debug("Could not read page meta title for empty-result snapshot.", exc_info=True)
         try:
-            html_preview = (await page.content())[:4096]
+            html = await page.content()
+            html_preview = html[:4096]
+            if html_file_chars > 0:
+                html_path.write_text(html[:html_file_chars], encoding="utf-8")
+                html_saved = True
         except Exception:
             logger.debug("Could not read page HTML for empty-result snapshot.", exc_info=True)
         try:
@@ -543,6 +557,7 @@ class BrowserSessionManager:
             "title": safe_value(title),
             "meta_title": safe_value(meta_title),
             "html_preview": safe_value(html_preview, max_chars=4096),
+            "html": str(html_path) if html_saved else None,
             "screenshot": str(screenshot_path) if screenshot_saved else None,
             "dom_summary": safe_value(dom_summary),
             "recent_events": [

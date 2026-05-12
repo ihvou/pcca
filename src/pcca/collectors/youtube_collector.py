@@ -473,6 +473,7 @@ class YouTubeCollector:
             return []
         if not videos:
             return []
+        rss_published_at = await self._yt_dlp_published_at_fallback(source_id, videos)
         results: list[CollectedItem] = []
         for video in videos:
             transcript = None
@@ -503,6 +504,9 @@ class YouTubeCollector:
                 metadata["transcript_rows"] = transcript.rows
                 metadata["transcript_language"] = transcript.language_code
                 metadata["transcript_translated"] = transcript.translated
+            published_at = video.published_at or rss_published_at.get(video.external_id)
+            if not video.published_at and published_at:
+                metadata["published_at_source"] = "youtube_rss"
             metadata = mark_low_quality_metadata(metadata, text)
             results.append(
                 CollectedItem(
@@ -512,12 +516,43 @@ class YouTubeCollector:
                     url=video.url,
                     text=text,
                     transcript_text=transcript_text,
-                    published_at=video.published_at,
+                    published_at=published_at,
                     metadata=metadata,
                 )
             )
         logger.info("YouTube collection used yt-dlp source=%s items=%d", source_id, len(results))
         return results
+
+    async def _yt_dlp_published_at_fallback(self, source_id: str, videos: list[YtDlpVideo]) -> dict[str, str]:
+        if not any(not video.published_at for video in videos):
+            return {}
+        channel_id = next((video.channel_id for video in videos if video.channel_id), None)
+        if not channel_id and is_youtube_channel_id(source_id):
+            channel_id = source_id.strip()
+        if not channel_id:
+            try:
+                channel_id = await self.resolve_source_identifier(source_id)
+            except Exception:
+                logger.info("Could not resolve YouTube channel id for RSS published_at fallback source=%s", source_id, exc_info=True)
+                return {}
+        try:
+            feed_xml = await self._get_text(youtube_rss_url(channel_id))
+            _parsed_channel_id, _channel_name, rows = parse_youtube_rss(feed_xml, max_items=max(self.max_items, len(videos)))
+        except Exception:
+            logger.info("YouTube RSS published_at fallback failed source=%s channel_id=%s", source_id, channel_id, exc_info=True)
+            return {}
+        out = {
+            str(row.get("video_id")): str(row.get("published_at"))
+            for row in rows
+            if row.get("video_id") and row.get("published_at")
+        }
+        logger.info(
+            "YouTube RSS published_at fallback loaded source=%s channel_id=%s dates=%d",
+            source_id,
+            channel_id,
+            len(out),
+        )
+        return out
 
     async def _yt_dlp_cookiefile(self):
         if self.session_manager is None:

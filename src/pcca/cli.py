@@ -8,8 +8,11 @@ import os
 from pathlib import Path
 from typing import Any, Sequence
 
+import httpx
+
 from pcca.app import PCCAApp
 from pcca.browser.session_manager import BrowserSessionManager
+from pcca.collectors.youtube_collector import parse_youtube_rss, youtube_rss_url
 from pcca.config import Settings
 from pcca.content_quality import EXCLUDED_FROM_BRIEFS_KEY, is_low_quality
 from pcca.db import Database
@@ -525,6 +528,188 @@ async def _audit_content_quality(
             await segment_repo.delete_segments_for_item(item_id=int(row["id"]))
             await db.conn.commit()
             stats["cleaned"] += 1
+    finally:
+        await db.close()
+    return stats
+
+
+async def _audit_sources(
+    settings: Settings,
+    *,
+    platform: str | None = None,
+    min_empty_streak: int = 0,
+) -> dict[str, int]:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    stats = {"sources": 0, "reported": 0, "zero_item_sources": 0}
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        where = ""
+        params: tuple[Any, ...] = ()
+        if platform:
+            where = "WHERE s.platform = ?"
+            params = (platform.strip().lower(),)
+        rows = await (
+            await db.conn.execute(
+                f"""
+                SELECT
+                  s.id,
+                  s.platform,
+                  s.account_or_channel_id,
+                  s.display_name,
+                  s.follow_state,
+                  s.last_crawled_at,
+                  s.metadata_json,
+                  COUNT(i.id) AS total_items,
+                  MAX(i.ingested_at) AS last_item_at
+                FROM sources s
+                LEFT JOIN items i
+                  ON CAST(json_extract(i.metadata_json, '$.pcca_source_id') AS INTEGER) = s.id
+                {where}
+                GROUP BY s.id
+                ORDER BY s.platform ASC, CAST(json_extract(s.metadata_json, '$.empty_result_streak') AS INTEGER) DESC,
+                         total_items ASC, s.display_name ASC
+                """,
+                params,
+            )
+        ).fetchall()
+        stats["sources"] = len(rows)
+        print(
+            "id\tplatform\taccount_or_channel_id\tdisplay_name\tstate\tlast_items\tempty_streak\ttotal_items\tlast_item_at"
+        )
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            try:
+                empty_streak = int(metadata.get("empty_result_streak") or 0)
+            except (TypeError, ValueError):
+                empty_streak = 0
+            try:
+                last_items = int(metadata.get("last_crawl_item_count") or 0)
+            except (TypeError, ValueError):
+                last_items = 0
+            total_items = int(row["total_items"] or 0)
+            if total_items == 0:
+                stats["zero_item_sources"] += 1
+            if empty_streak < max(0, min_empty_streak):
+                continue
+            stats["reported"] += 1
+            print(
+                f"{row['id']}\t{row['platform']}\t{row['account_or_channel_id']}\t"
+                f"{row['display_name']}\t{row['follow_state']}\t{last_items}\t{empty_streak}\t"
+                f"{total_items}\t{row['last_item_at'] or ''}",
+                flush=True,
+            )
+    finally:
+        await db.close()
+    return stats
+
+
+async def _fetch_youtube_rss_published_dates(client: httpx.AsyncClient, channel_id: str, *, max_items: int) -> dict[str, str]:
+    response = await client.get(youtube_rss_url(channel_id))
+    response.raise_for_status()
+    _parsed_channel_id, _channel_name, rows = parse_youtube_rss(response.text, max_items=max_items)
+    return {
+        str(row.get("video_id")): str(row.get("published_at"))
+        for row in rows
+        if row.get("video_id") and row.get("published_at")
+    }
+
+
+async def _youtube_rebackfill_published_at(
+    settings: Settings,
+    *,
+    limit: int | None = None,
+) -> dict[str, int]:
+    settings.ensure_dirs()
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    stats = {"scanned": 0, "updated": 0, "skipped": 0, "failed": 0, "channels_fetched": 0}
+    try:
+        if db.conn is None:
+            raise RuntimeError("Database connection unavailable.")
+        limit_clause = "LIMIT ?" if limit is not None and limit > 0 else ""
+        params: tuple[int, ...] = (int(limit),) if limit_clause else ()
+        rows = await (
+            await db.conn.execute(
+                f"""
+                SELECT id, external_id, metadata_json
+                FROM items
+                WHERE platform = 'youtube'
+                  AND (published_at IS NULL OR LENGTH(TRIM(published_at)) = 0)
+                ORDER BY COALESCE(updated_at, ingested_at, '') DESC, id DESC
+                {limit_clause}
+                """,
+                params,
+            )
+        ).fetchall()
+        stats["scanned"] = len(rows)
+        by_channel: dict[str, list[Any]] = {}
+        metadata_by_item: dict[int, dict[str, Any]] = {}
+        for row in rows:
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata_by_item[int(row["id"])] = metadata
+            channel_id = str(metadata.get("channel_id") or "").strip()
+            if not channel_id:
+                source_id = str(metadata.get("source_id") or "").strip()
+                channel_id = source_id if source_id.startswith("UC") else ""
+            if not channel_id:
+                stats["skipped"] += 1
+                continue
+            by_channel.setdefault(channel_id, []).append(row)
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for channel_id, channel_rows in by_channel.items():
+                try:
+                    dates = await _fetch_youtube_rss_published_dates(
+                        client,
+                        channel_id,
+                        max_items=max(50, len(channel_rows)),
+                    )
+                    stats["channels_fetched"] += 1
+                except Exception as exc:
+                    stats["failed"] += len(channel_rows)
+                    print(f"Published-at RSS fetch failed channel_id={channel_id}: {exc}", flush=True)
+                    logging.getLogger(__name__).warning(
+                        "YouTube published_at backfill RSS fetch failed channel_id=%s",
+                        channel_id,
+                        exc_info=True,
+                    )
+                    continue
+                for row in channel_rows:
+                    video_id = str(row["external_id"] or "").strip()
+                    published_at = dates.get(video_id)
+                    if not published_at:
+                        stats["skipped"] += 1
+                        continue
+                    metadata = dict(metadata_by_item[int(row["id"])])
+                    metadata["published_at_source"] = "youtube_rss_backfill"
+                    await db.conn.execute(
+                        """
+                        UPDATE items
+                        SET published_at = ?,
+                            metadata_json = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = ?
+                        """,
+                        (published_at, json.dumps(metadata, sort_keys=True), int(row["id"])),
+                    )
+                    await db.conn.commit()
+                    stats["updated"] += 1
+                    print(f"Updated published_at item_id={row['id']} video_id={video_id} published_at={published_at}", flush=True)
     finally:
         await db.close()
     return stats
@@ -1089,12 +1274,28 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reset existing YouTube transcript rows that contain live-chat/rechat junk before rebackfilling.",
     )
+    youtube_published_parser = sub.add_parser(
+        "youtube-rebackfill-published-at",
+        help="Backfill missing YouTube published_at values from channel RSS feeds",
+    )
+    youtube_published_parser.add_argument("--limit", required=False, type=int, help="Maximum YouTube items to inspect")
     audit_quality_parser = sub.add_parser(
         "audit-content-quality",
         help="List or clean items whose text looks like JS dumps, link lists, or marketing spam",
     )
     audit_quality_parser.add_argument("--clean", action="store_true", help="Flag matching items and clear junk text")
     audit_quality_parser.add_argument("--limit", type=int, required=False, help="Maximum items to scan")
+    audit_sources_parser = sub.add_parser(
+        "audit-sources",
+        help="Show source-level crawl health, including zero-item streaks",
+    )
+    audit_sources_parser.add_argument("--platform", required=False, help="Optional platform filter, e.g. linkedin")
+    audit_sources_parser.add_argument(
+        "--min-empty-streak",
+        type=int,
+        default=0,
+        help="Only print sources with at least this empty-result streak",
+    )
     sub.add_parser("run-briefs-once", help="Run smart Brief sending once")
     sub.add_parser("rebuild-briefs-once", help="Force rebuild today's Briefs and send them")
     sub.add_parser("run-digest-once", help="Deprecated alias for run-briefs-once")
@@ -1347,12 +1548,33 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(json.dumps(stats, indent=2, sort_keys=True))
         return
 
+    if args.command == "youtube-rebackfill-published-at":
+        stats = asyncio.run(
+            _youtube_rebackfill_published_at(
+                settings,
+                limit=args.limit,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
     if args.command == "audit-content-quality":
         stats = asyncio.run(
             _audit_content_quality(
                 settings,
                 clean=args.clean,
                 limit=args.limit,
+            )
+        )
+        print(json.dumps(stats, indent=2, sort_keys=True))
+        return
+
+    if args.command == "audit-sources":
+        stats = asyncio.run(
+            _audit_sources(
+                settings,
+                platform=args.platform,
+                min_empty_streak=args.min_empty_streak,
             )
         )
         print(json.dumps(stats, indent=2, sort_keys=True))

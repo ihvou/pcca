@@ -15,7 +15,9 @@ import pytest
 from pcca.collectors.errors import BotShapedError
 from pcca.collectors.linkedin_collector import (
     LinkedInCollector,
+    _detect_empty_page_reason,
     _detect_bot_shaped_signal,
+    _linkedin_collection_urls,
 )
 
 
@@ -81,6 +83,25 @@ def test_detect_bot_shaped_signal_ignores_non_pageerror_events() -> None:
         ],
     )
     assert _detect_bot_shaped_signal(page) is None
+
+
+@pytest.mark.asyncio
+async def test_detect_empty_page_reason_identifies_follow_interstitial() -> None:
+    class _FollowPage:
+        async def evaluate(self, _js: str) -> str:
+            return "Follow Lenny Rachitsky to see their posts and activity."
+
+    assert await _detect_empty_page_reason(_FollowPage()) == "follow_interstitial"
+
+
+def test_linkedin_collection_urls_include_creator_posts_fallbacks() -> None:
+    urls = _linkedin_collection_urls("in/lennyrachitsky")
+
+    assert urls == [
+        "https://www.linkedin.com/in/lennyrachitsky/recent-activity/all/",
+        "https://www.linkedin.com/in/lennyrachitsky/posts/",
+        "https://www.linkedin.com/in/lennyrachitsky/detail/recent-activity/shares/",
+    ]
 
 
 @pytest.mark.asyncio
@@ -199,3 +220,66 @@ async def test_linkedin_collector_returns_empty_when_no_bot_signal(monkeypatch: 
 
     items = await collector.collect_from_source("in/quietprofile")
     assert items == []
+
+
+@pytest.mark.asyncio
+async def test_linkedin_collector_tries_posts_route_after_empty_activity_route() -> None:
+    class _SessionManagerSpy:
+        async def new_page(self, _platform: str) -> Any:
+            return _FakePage(url="https://www.linkedin.com/in/lennyrachitsky/recent-activity/all/")
+
+        async def capture_empty_result_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("snapshot should not be captured after posts fallback succeeds")
+
+        async def capture_debug_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    visited: list[str] = []
+
+    async def _fake_goto(url: str, **_kwargs: Any) -> None:
+        visited.append(url)
+        page.url = url
+
+    async def _fake_wait_for_timeout(_ms: int) -> None:
+        return None
+
+    async def _fake_evaluate(_js: str, _max_items: int) -> list:
+        if visited[-1].endswith("/posts/"):
+            return [
+                {
+                    "external_id": "123456789",
+                    "author": "Lenny Rachitsky",
+                    "url": "https://www.linkedin.com/feed/update/urn:li:activity:123456789/",
+                    "text": "A useful product-growth post with practical hiring lessons.",
+                    "published_at": "2026-05-12T00:00:00.000Z",
+                    "reaction_count": 1200,
+                    "comment_count": 44,
+                    "repost_count": 8,
+                }
+            ]
+        return []
+
+    async def _fake_close() -> None:
+        return None
+
+    spy = _SessionManagerSpy()
+    page = await spy.new_page("linkedin")
+    page.goto = _fake_goto  # type: ignore[attr-defined]
+    page.wait_for_timeout = _fake_wait_for_timeout  # type: ignore[attr-defined]
+    page.evaluate = _fake_evaluate  # type: ignore[attr-defined]
+    page.close = _fake_close  # type: ignore[attr-defined]
+
+    async def _new_page_returning_spy(_platform: str) -> Any:
+        return page
+
+    spy.new_page = _new_page_returning_spy  # type: ignore[method-assign]
+
+    collector = LinkedInCollector(session_manager=spy)  # type: ignore[arg-type]
+
+    items = await collector.collect_from_source("in/lennyrachitsky")
+
+    assert [url.rsplit("/", 2)[-2] for url in visited[:2]] == ["all", "posts"]
+    assert len(items) == 1
+    assert items[0].author == "Lenny Rachitsky"
+    assert items[0].published_at == "2026-05-12T00:00:00.000Z"
+    assert items[0].metadata["reaction_count"] == 1200

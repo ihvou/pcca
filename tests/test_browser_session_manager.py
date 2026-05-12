@@ -90,6 +90,51 @@ async def test_empty_result_snapshot_writes_metadata_and_screenshot(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_linkedin_empty_result_snapshot_can_write_html_artifact(tmp_path: Path) -> None:
+    class FakePage:
+        url = "https://www.linkedin.com/in/lennyrachitsky/posts/"
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def title(self) -> str:
+            return "Lenny Rachitsky | Posts"
+
+        async def evaluate(self, script):
+            if "meta[name" in script:
+                return "Lenny Rachitsky | LinkedIn"
+            return {
+                "readyState": "complete",
+                "url": self.url,
+                "bodyTextLength": 42,
+            }
+
+        async def content(self) -> str:
+            return "<html><body><section>creator feed placeholder</section></body></html>"
+
+        async def screenshot(self, *, path: str, full_page: bool) -> None:
+            _ = full_page
+            Path(path).write_bytes(b"png")
+
+    manager = BrowserSessionManager(profiles_root=tmp_path / "profiles", debug_dir=tmp_path / "debug")
+
+    metadata_path = await manager.capture_empty_result_snapshot(
+        FakePage(),
+        platform="linkedin",
+        source_id="in/lennyrachitsky",
+        sample_rate=1.0,
+        html_file_chars=30000,
+        include_source_in_filename=True,
+    )
+
+    assert metadata_path is not None
+    assert metadata_path.name.startswith("linkedin_empty_in-lennyrachitsky_")
+    html_path = metadata_path.with_suffix(".html")
+    assert html_path.exists()
+    assert "creator feed placeholder" in html_path.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
 async def test_export_netscape_cookies_writes_yt_dlp_cookie_file(tmp_path: Path) -> None:
     class FakeContext:
         async def cookies(self):

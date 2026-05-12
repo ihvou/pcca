@@ -434,6 +434,8 @@ async def test_pipeline_collects_and_scores(tmp_path: Path) -> None:
     assert source is not None
     assert source.follow_state == "active"
     assert source.last_crawled_at is not None
+    assert source.metadata["last_crawl_item_count"] == 1
+    assert source.metadata["empty_result_streak"] == 0
 
     row = await (
         await db.conn.execute("SELECT COUNT(*) AS c FROM item_scores")
