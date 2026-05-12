@@ -322,7 +322,14 @@ def is_low_content_key_message(message: str | None) -> bool:
     if len(words) <= 10:
         return True
     first = words[0].lower() if words else ""
-    return first in LOW_CONTENT_START_WORDS
+    if first in LOW_CONTENT_START_WORDS:
+        return True
+    # Lowercase first character → near-certain mid-sentence fragment.
+    # See _is_usable_fallback_body for rationale.
+    first_char = normalized[:1]
+    if first_char and first_char.isalpha() and first_char.islower():
+        return True
+    return False
 
 
 def _is_usable_fallback_body(message: str) -> bool:
@@ -333,12 +340,46 @@ def _is_usable_fallback_body(message: str) -> bool:
     if len(words) < 6:
         return False
     first = words[0].lower() if words else ""
-    return first not in LOW_CONTENT_START_WORDS
+    if first in LOW_CONTENT_START_WORDS:
+        return False
+    # Reject text that begins with a lowercase letter. Real summaries
+    # and well-formed sentences start with a capital — proper noun,
+    # article, demonstrative, etc. A lowercase first character is a
+    # near-certain marker of a mid-sentence transcript fragment.
+    # Live evidence (2026-05-12): "ecosystem of llm apps like chat GPT
+    # chat GPT is the first and the incumbent..." reached the user as
+    # raw segment_text fallback because "ecosystem" passes the
+    # conjunction blocklist (it's a noun) but is clearly mid-thought.
+    first_char = normalized[:1]
+    if first_char and first_char.isalpha() and first_char.islower():
+        return False
+    return True
+
+
+_YOUTUBE_CHANNEL_ID_PATTERN = re.compile(r"^UC[A-Za-z0-9_-]{20,}$")
+
+
+def _display_author(candidate: CandidateItem) -> str:
+    """Return a user-friendly author label, hiding YouTube channel IDs.
+
+    For some YouTube items the collector captured the channel ID (e.g.
+    `UCXUPKJO5MZQN11PqgIvyuvQ`) instead of the display name. Showing the
+    raw ID in Briefs is ugly and unhelpful; suppress it so the title
+    carries the source information instead. The proper fix is to make
+    the YouTube collector extract `uploader`/`channel` from yt-dlp
+    (T-12) — this is a renderer-side guard against the legacy bad data.
+    """
+    raw = (candidate.author or "").strip()
+    if not raw:
+        return "YouTube" if candidate.platform == "youtube" else "Unknown source"
+    if candidate.platform == "youtube" and _YOUTUBE_CHANNEL_ID_PATTERN.match(raw):
+        return "YouTube"
+    return raw
 
 
 def _source_line(candidate: CandidateItem) -> str:
     icon = _platform_icon(candidate.platform)
-    author = escape_markdown_v2(candidate.author or "Unknown source")
+    author = escape_markdown_v2(_display_author(candidate))
     title = escape_markdown_v2(_first_line(candidate.title_or_text))
     return f"{icon} {author} — _{title}_"
 

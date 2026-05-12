@@ -38,10 +38,29 @@ def test_platform_icon_mapping(platform: str, icon: str) -> None:
         "to number three I very often prototype these layers",
         "but this is just a transition",
         "(low-content segment)",
+        # Added 2026-05-12 — mid-sentence transcript fragments that start
+        # with lowercase nouns/prepositions slipping past the conjunction
+        # blocklist. Live evidence:
+        "ecosystem of llm apps like chat GPT chat GPT is the first and the incumbent",
+        "like capabilities are possible because we've invested in managed agents",
+        "of remixes of the internet they dream internet pages so the base models",
     ],
 )
 def test_low_content_key_message_detector_rejects_throwaway_sentences(message: str) -> None:
     assert is_low_content_key_message(message)
+
+
+def test_low_content_detector_accepts_well_formed_summary() -> None:
+    """Real summaries start with a capital and don't trip the lowercase
+    fragment guard. Verifies the lowercase check doesn't false-positive
+    on legitimate content."""
+    assert not is_low_content_key_message(
+        "Agents can play a massive role in changing the way we work and "
+        "that's connected to how we think about those jobs to be done."
+    )
+    assert not is_low_content_key_message(
+        "Claude.md file gives persistent memory about your project and helps steer Claude."
+    )
 
 
 @pytest.mark.asyncio
