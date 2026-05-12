@@ -17,7 +17,20 @@ MIN_FULL_TEXT_CHARS = 200
 MAX_FULL_TEXT_CHARS = 4000
 MAX_REFINED_CHARS = 1500
 LOW_CONTENT_KEY_MESSAGE = "(low-content segment)"
-LOW_CONTENT_START_WORDS = {"and", "to", "is", "those", "but", "so"}
+# Words that, when a key_message or fallback snippet begins with them,
+# signal a mid-sentence fragment rather than a real summary. Expanded
+# from the original T-134 set after live audit on 2026-05-12 showed
+# Briefs starting with "of remixes...", "like capabilities...",
+# "ecosystem of llm apps..." — prepositions and connectors slipping
+# through. A real summary in English starts with a subject, not a
+# preposition or relative-clause connector.
+LOW_CONTENT_START_WORDS = {
+    # T-134 original (conjunctions / mid-sentence verbs)
+    "and", "to", "is", "those", "but", "so",
+    # Added 2026-05-12 — prepositions + connectors that begin fragments
+    "of", "like", "or", "that", "which", "where",
+    "as", "from", "with", "for", "in", "on", "at", "by",
+}
 
 logger = logging.getLogger(__name__)
 
