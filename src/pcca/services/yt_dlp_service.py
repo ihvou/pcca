@@ -78,7 +78,9 @@ class YtDlpService:
         for entry in entries[:max_items]:
             if not isinstance(entry, dict):
                 continue
-            video = self._video_from_info(entry)
+            # T-12: pass playlist-level info so channel_name/id fall back
+            # to it when the flat per-entry dict doesn't carry them.
+            video = self._video_from_info(entry, parent_info=info if isinstance(info, dict) else None)
             if video is not None:
                 out.append(video)
         logger.info("yt-dlp listed YouTube videos source=%s count=%d cookiefile=%s", source_id, len(out), bool(cookiefile))
@@ -241,7 +243,26 @@ class YtDlpService:
         return out
 
     @staticmethod
-    def _video_from_info(info: dict[str, Any]) -> YtDlpVideo | None:
+    def _video_from_info(
+        info: dict[str, Any],
+        parent_info: dict[str, Any] | None = None,
+    ) -> YtDlpVideo | None:
+        """Build a YtDlpVideo from yt-dlp's per-entry info dict.
+
+        `list_channel_videos` calls yt-dlp with `extract_flat="in_playlist"`,
+        which returns lightweight playlist entries that DO NOT carry
+        per-video `channel`/`uploader` fields. The channel name is only
+        on the TOP-LEVEL info (the playlist itself). Without
+        `parent_info`, per-entry `channel_name` would always be None, and
+        callers fell back to the channel ID — producing user-visible
+        Briefs like "📺 UCXUPKJO5MZQN11PqgIvyuvQ — _title_" instead of
+        "📺 Andrej Karpathy — _title_" (T-12 regression observed
+        2026-05-12).
+
+        Pass `parent_info` as the playlist-level dict when iterating
+        entries; this function falls back to its `channel`/`uploader`
+        fields so videos get the correct channel name.
+        """
         video_id = str(info.get("id") or "").strip()
         webpage_url = str(info.get("webpage_url") or info.get("url") or "").strip()
         if not video_id and webpage_url:
@@ -251,14 +272,39 @@ class YtDlpService:
         title = str(info.get("title") or "").strip()
         if not video_id or not title:
             return None
+        parent = parent_info or {}
+        # Channel name: per-entry first, then parent playlist-level.
+        # Skip `parent.title` — playlist titles look like "LennysPodcast
+        # - Videos" rather than the friendly "Lenny's Podcast".
+        channel_name = (
+            str(
+                info.get("channel")
+                or info.get("uploader")
+                or parent.get("channel")
+                or parent.get("uploader")
+                or ""
+            ).strip()
+            or None
+        )
+        channel_id = (
+            str(
+                info.get("channel_id")
+                or info.get("uploader_id")
+                or parent.get("channel_id")
+                or parent.get("uploader_id")
+                or parent.get("id")
+                or ""
+            ).strip()
+            or None
+        )
         return YtDlpVideo(
             external_id=video_id,
             url=webpage_url,
             title=title,
             description=str(info.get("description") or "").strip() or None,
             published_at=_format_yt_date(info.get("upload_date") or info.get("release_date") or info.get("timestamp")),
-            channel_name=str(info.get("channel") or info.get("uploader") or "").strip() or None,
-            channel_id=str(info.get("channel_id") or info.get("uploader_id") or "").strip() or None,
+            channel_name=channel_name,
+            channel_id=channel_id,
             view_count=_int_or_none(info.get("view_count")),
             like_count=_int_or_none(info.get("like_count")),
             duration_seconds=_int_or_none(info.get("duration")),

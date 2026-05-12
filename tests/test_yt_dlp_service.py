@@ -330,6 +330,65 @@ async def test_list_channel_videos_maps_extract_info_fields(monkeypatch: pytest.
 
 
 @pytest.mark.asyncio
+async def test_list_channel_videos_falls_back_to_parent_channel_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-12 fix (2026-05-12): yt-dlp's `extract_flat='in_playlist'` mode
+    returns lightweight entries that lack `channel`/`uploader` fields.
+    Without falling back to the playlist-level info, every entry's
+    channel_name was None → collector wrote the channel_id (`UC...`) as
+    `items.author` → Briefs showed "📺 UCXUPKJO5MZQN11PqgIvyuvQ — _title_"
+    instead of "📺 Andrej Karpathy — _title_". This test pins that the
+    parent-info fallback supplies channel_name for flat entries.
+    """
+    class FakeYoutubeDL:
+        def __init__(self, options):
+            self.options = options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def extract_info(self, url, *, download):
+            # Mirrors what yt-dlp returns for `extract_flat='in_playlist'`:
+            # playlist-level info carries channel/uploader; per-entry
+            # dicts are sparse (no `channel`, no `uploader`).
+            return {
+                "channel": "Andrej Karpathy",
+                "channel_id": "UCXUPKJO5MZQN11PqgIvyuvQ",
+                "uploader": "Andrej Karpathy",
+                "uploader_id": "@AndrejKarpathy",
+                "title": "Andrej Karpathy - Videos",  # noisy playlist title — should NOT win
+                "entries": [
+                    {
+                        "id": "video1111111",
+                        "title": "How I use LLMs",
+                        # NO channel/uploader/channel_id at entry level
+                    },
+                    {
+                        "id": "video2222222",
+                        "title": "Building makemore Part 5",
+                    },
+                ],
+            }
+
+    monkeypatch.setitem(sys.modules, "yt_dlp", types.SimpleNamespace(YoutubeDL=FakeYoutubeDL))
+
+    videos = await YtDlpService().list_channel_videos(
+        "UCXUPKJO5MZQN11PqgIvyuvQ", max_items=2
+    )
+
+    assert len(videos) == 2
+    for v in videos:
+        assert v.channel_name == "Andrej Karpathy", (
+            f"Expected channel_name='Andrej Karpathy' from parent info, "
+            f"got {v.channel_name!r}. Without parent-info fallback, this "
+            f"would be None and the collector would write 'UCXUPKJO...' as author."
+        )
+        assert v.channel_id == "UCXUPKJO5MZQN11PqgIvyuvQ"
+
+
+@pytest.mark.asyncio
 async def test_get_transcript_picks_native_track_when_preferred_lang_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     """T-132 (post-fix): when preferred language is unavailable, fall back to
     the native track of whatever language is offered, NOT the translation
