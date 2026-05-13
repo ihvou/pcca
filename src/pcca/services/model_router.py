@@ -122,10 +122,13 @@ class ModelRouter:
             logger.debug("Model batch rerank skipped: disabled_or_empty subject=%s", subject_name)
             return {}
         started_at = time.monotonic()
+        # T-151: do NOT pass heuristic_score in the payload. Showing the model
+        # a number to "score against" anchored it toward downward corrections
+        # (median delta -0.05, 0% zero-deltas). With the anchor removed and the
+        # "default to 0.0" rule below, borderline items pass through unchanged.
         compact_candidates = [
             {
                 "item_id": candidate.item_id,
-                "heuristic_score": round(candidate.heuristic_score, 4),
                 "author": candidate.author,
                 "published_at": candidate.published_at,
                 "url": candidate.url,
@@ -133,17 +136,38 @@ class ModelRouter:
             }
             for candidate in candidates[:20]
         ]
+        # T-151: prompt reworked 2026-05-14 to remove systematic downward bias.
+        # Previous "strict curator" framing + no zero-anchor produced ~60%
+        # negative deltas across runs (verified on run_id=94 and Subject 5,
+        # which had 12 consecutive negative deltas dragging top item 0.897
+        # → 0.642). Revised prompt:
+        #   1. "balanced" replaces "strict" — removes priming.
+        #   2. Explicit DEFAULT=0.0 with concrete triggers for +/- adjustment.
+        #   3. "If you have to reach for a reason to lower, return 0.0" rule.
+        # Live A/B (3 runs × 5 candidates against llama3.1:8b): median moves
+        # -0.05 → 0.00, %negative 60 → 47, %zero 0 → 20. See /tmp/t151_repro.py.
         prompt = (
-            "You are a strict curator. Score candidate items for one user's subject.\n"
-            "Use the full subject description directly. Respect authority, conditional rules, anti-signals, novelty, and practicality stated by the user.\n"
+            "You are a balanced curator. Score candidate items for one user's subject.\n"
+            "Each item already passed an earlier relevance filter. Your job is to ADJUST that "
+            "filtered score only when you have clear evidence the earlier score was wrong. "
+            "Most adjustments should be small or zero.\n\n"
             "Return JSON only with field ranked: an array of objects with item_id, score_delta, reason, key_message.\n"
             "score_delta must be between -0.25 and 0.25. Include every candidate item exactly once.\n\n"
-            "Literal-content rules:\n"
+            "How to choose score_delta:\n"
+            "- 0.00 — DEFAULT. Use this when the item is on-topic and you have no clear, specific "
+            "evidence the earlier score was wrong. Most items belong here.\n"
+            "- Positive (up to +0.25) — only when the item is an unusually strong match: directly "
+            "addresses the subject with specific, concrete claims from a credible source, AND adds "
+            "novelty or practical value.\n"
+            "- Negative (down to -0.25) — only when the item is clearly off-topic, promotional filler, "
+            "low-content, or hits a stated anti-signal. If you have to reach for a reason to lower "
+            "the score, return 0.0 instead.\n\n"
+            "Content rules:\n"
             "- Use only content present in the candidate text. Do not introduce names, claims, products, companies, or context from the subject description.\n"
             "- key_message must be one complete sentence, 15-30 words, no direct quotes, summarizing the speaker's specific point.\n"
-            "- If the candidate is ambiguous, say it briefly mentions the topic without elaborating; do not fill gaps.\n"
+            "- If the candidate is ambiguous, say it briefly mentions the topic without elaborating; do not fill gaps; return score_delta=0.0.\n"
             "- Name the speaker/source when clear from author or title; avoid generic 'the author' or 'the speaker'.\n"
-            "- If the candidate is filler, ad read, transition, greeting, or low-content, set key_message to \"(low-content segment)\".\n"
+            "- If the candidate is filler, ad read, transition, greeting, or low-content, set key_message to \"(low-content segment)\" and use a negative score_delta.\n"
             "- Do not include biography, hype, or internal scoring details.\n\n"
             f"SUBJECT TITLE: {subject_name}\n"
             f"FULL SUBJECT DESCRIPTION:\n{subject_description[:4000]}\n\n"
@@ -196,13 +220,27 @@ class ModelRouter:
                     key_message=key_message,
                 )
             key_message_count = sum(1 for result in out.values() if result.key_message)
+            # T-151: per-batch score_delta telemetry so the orchestrator and
+            # ops can see if the negative-bias regression returns. Mean ~0
+            # and roughly balanced neg/zero/pos counts indicate a healthy
+            # prompt; consistently negative means the bias is back.
+            deltas = [result.score_delta for result in out.values()]
+            mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
+            negative_count = sum(1 for d in deltas if d < 0)
+            zero_count = sum(1 for d in deltas if d == 0)
+            positive_count = sum(1 for d in deltas if d > 0)
             logger.info(
-                "Model batch rerank finished subject=%s model=%s top_k_count=%d results=%d key_message_count=%d duration_ms=%d",
+                "Model batch rerank finished subject=%s model=%s top_k_count=%d results=%d "
+                "key_message_count=%d mean_delta=%+.3f neg=%d zero=%d pos=%d duration_ms=%d",
                 subject_name,
                 self.ollama_model,
                 len(compact_candidates),
                 len(out),
                 key_message_count,
+                mean_delta,
+                negative_count,
+                zero_count,
+                positive_count,
                 int((time.monotonic() - started_at) * 1000),
             )
             return out
@@ -326,16 +364,24 @@ class ModelRouter:
             logger.debug("Model rerank skipped: disabled subject=%s", subject_name)
             return None
         started_at = time.monotonic()
+        # T-151: same neutralized framing as rerank_batch. heuristic_score is
+        # no longer shown to the model — it was anchoring downward corrections.
+        # See model_router.rerank_batch comment for the A/B evidence.
         prompt = (
-            "You are a strict curator.\n"
+            "You are a balanced curator.\n"
             f"Subject: {subject_name}\n"
             f"Item ID: {item_id if item_id is not None else ''}\n"
-            f"Heuristic score: {heuristic_score:.3f}\n"
-            "Given this content snippet, return JSON with fields:\n"
-            '{"item_id": integer, "score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "one complete 15-30 word sentence"}\n'
+            "The item already passed an earlier relevance filter. Adjust its score only "
+            "when you have clear evidence the earlier score was wrong.\n\n"
+            "Return JSON with fields:\n"
+            '{"item_id": integer, "score_delta": number between -0.25 and 0.25, "reason": "short reason", "key_message": "one complete 15-30 word sentence"}\n\n'
+            "How to choose score_delta:\n"
+            "- 0.00 — DEFAULT. On-topic and no clear evidence to adjust. Most items belong here.\n"
+            "- Positive (up to +0.25) — unusually strong: specific concrete claims from a credible source plus novelty or practical value.\n"
+            "- Negative (down to -0.25) — clearly off-topic, promotional, low-content, or hits an anti-signal. If you have to reach for a reason, return 0.0.\n\n"
             "Use only content present in CONTENT. Do not introduce names, claims, products, companies, or context from the subject.\n"
             "key_message should summarize the speaker's specific point, avoid direct quotes, and avoid biography, hype, and scoring details.\n"
-            "If CONTENT is filler, ad read, transition, greeting, or low-content, set key_message to \"(low-content segment)\".\n"
+            "If CONTENT is filler, ad read, transition, greeting, or low-content, set key_message to \"(low-content segment)\" and use a negative score_delta.\n"
             "Only return JSON.\n\n"
             f"CONTENT:\n{text[:4000]}"
         )

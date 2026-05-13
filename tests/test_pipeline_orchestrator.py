@@ -1517,6 +1517,15 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
     assert stats["model_refinement_batch_calls"] == 1
     assert stats["items_model_reranked"] == 3
     assert stats["items_model_refined"] == 3
+    # T-151 telemetry: score_delta distribution surfaced in stats so a
+    # returning negative-bias regression shows up in run_logs.stats_json
+    # without needing a DB audit. Each of the 3 items got delta=+0.01 from
+    # FakeBatchModelRouter, so the distribution is 3 positive / 0 zero / 0 negative.
+    assert stats["score_delta_count"] == 3
+    assert stats["score_delta_positive_count"] == 3
+    assert stats["score_delta_zero_count"] == 0
+    assert stats["score_delta_negative_count"] == 0
+    assert stats["score_delta_mean"] == pytest.approx(0.01)
     assert model_router.batch_calls[0]["subject_name"] == "AI Tools & Tips"
     assert "leading AI companies" in model_router.batch_calls[0]["subject_description"]
     assert "Include:" not in model_router.batch_calls[0]["subject_description"]
@@ -1595,6 +1604,13 @@ async def test_pipeline_falls_back_to_per_item_rerank_after_empty_batch(tmp_path
     assert stats["items_model_reranked"] == 0
     assert stats["items_model_reranked_per_item"] == 20
     assert stats["batch_truncation_recovered"] == 20
+    # T-151 telemetry: per-item fallback path also feeds the score_delta
+    # counters. Each of the 20 fallback items got delta=+0.02 from
+    # EmptyBatchModelRouter, so all 20 land in score_delta_positive_count.
+    assert stats["score_delta_count"] == 20
+    assert stats["score_delta_positive_count"] == 20
+    assert stats["score_delta_negative_count"] == 0
+    assert stats["score_delta_mean"] == pytest.approx(0.02)
     assert model_router.batch_calls == 1
     assert model_router.single_calls == 20
     assert len(model_router.single_item_ids) == 20

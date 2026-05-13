@@ -758,6 +758,16 @@ class PipelineOrchestrator:
         adjusted_segment_scores: dict[int, Any] = {}
         item_key_messages: dict[int, str] = {}
         item_refined_segments: dict[int, str] = {}
+        # T-151: accumulate score_delta distribution across all subjects in
+        # this run so a single field surfaces whether the negative-bias
+        # regression has returned. Counts are run-wide (not per-subject) so
+        # the cost is constant; per-subject breakdown lives in model_router's
+        # log line.
+        score_delta_count = int(stats.get("score_delta_count", 0))
+        score_delta_neg = int(stats.get("score_delta_negative_count", 0))
+        score_delta_zero = int(stats.get("score_delta_zero_count", 0))
+        score_delta_pos = int(stats.get("score_delta_positive_count", 0))
+        score_delta_sum = float(stats.get("score_delta_sum", 0.0))
         for item_id, item, scored, _used_embedding, segment in scored_rows:
             rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
             rerank_source = "model_batch"
@@ -765,9 +775,18 @@ class PipelineOrchestrator:
                 rerank = per_item_results[item_id]
                 rerank_source = "model"
             if rerank is not None:
-                adjusted_final = max(0.0, min(1.0, scored.final_score + rerank.score_delta))
+                delta = float(rerank.score_delta)
+                adjusted_final = max(0.0, min(1.0, scored.final_score + delta))
                 scored.final_score = adjusted_final
                 scored.rationale = f"{scored.rationale}; {rerank_source}={rerank.rationale}"
+                score_delta_count += 1
+                score_delta_sum += delta
+                if delta < 0:
+                    score_delta_neg += 1
+                elif delta > 0:
+                    score_delta_pos += 1
+                else:
+                    score_delta_zero += 1
                 key_message = getattr(rerank, "key_message", None)
                 if key_message:
                     item_key_messages[item_id] = str(key_message)
@@ -778,6 +797,13 @@ class PipelineOrchestrator:
                     stats["items_model_reranked"] += 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
+        stats["score_delta_count"] = score_delta_count
+        stats["score_delta_negative_count"] = score_delta_neg
+        stats["score_delta_zero_count"] = score_delta_zero
+        stats["score_delta_positive_count"] = score_delta_pos
+        stats["score_delta_sum"] = round(score_delta_sum, 4)
+        if score_delta_count > 0:
+            stats["score_delta_mean"] = round(score_delta_sum / score_delta_count, 4)
 
         refine_batch = getattr(self.model_router, "refine_batch", None) if self.model_router is not None else None
         if callable(refine_batch) and model_enabled:
