@@ -1428,18 +1428,31 @@ class TelegramService:
 
     @staticmethod
     def _quick_action_rows() -> list[list[InlineKeyboardButton]]:
+        # Two-row layout — fresh path on top, fast path next to it.
+        # See _quick_actions_reply_keyboard for the same pairing.
         return [
             [
                 InlineKeyboardButton("Update Briefs", callback_data="run:update"),
+                InlineKeyboardButton("Get Briefs", callback_data="run:briefs"),
+            ],
+            [
                 InlineKeyboardButton("Edit Subjects", callback_data="subject_manage:list"),
                 InlineKeyboardButton("Help", callback_data="run:help"),
-            ]
+            ],
         ]
 
     @staticmethod
     def _quick_actions_reply_keyboard() -> ReplyKeyboardMarkup:
+        # Two-row layout pairs the slow/fresh path (Update Briefs) with the
+        # fast/just-deliver path (Get Briefs). T-142 originally removed Get
+        # Briefs by mistake — restored 2026-05-13 because the user relies on
+        # it for the common case of pulling already-scored Briefs in <30s
+        # without re-running the 30-70min collection.
         return ReplyKeyboardMarkup(
-            [["Update Briefs", "Edit Subjects", "Help"]],
+            [
+                ["Update Briefs", "Get Briefs"],
+                ["Edit Subjects", "Help"],
+            ],
             resize_keyboard=True,
             one_time_keyboard=False,
         )

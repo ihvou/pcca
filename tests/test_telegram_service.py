@@ -32,17 +32,34 @@ def test_stale_brief_expand_message_is_actionable() -> None:
     assert "Update Briefs" in STALE_BRIEF_EXPAND_MESSAGE
 
 
-def test_t142_quick_actions_are_update_edit_help_only() -> None:
+def test_t142_quick_actions_include_update_and_get_briefs() -> None:
+    """Keyboard pairs the slow-path 'Update Briefs' (full collect+score+
+    deliver, ~30-70min) with the fast-path 'Get Briefs' (deliver existing
+    scored data in <30s). Get Briefs was removed by mistake in T-142's
+    initial implementation and restored 2026-05-13.
+
+    Layout: two rows so each pair is visually grouped.
+      Row 1: [Update Briefs] [Get Briefs]
+      Row 2: [Edit Subjects] [Help]
+    """
     service = TelegramService.__new__(TelegramService)
     inline = service._quick_actions_inline_keyboard()
     labels = [button.text for row in inline.inline_keyboard for button in row]
     callbacks = [button.callback_data for row in inline.inline_keyboard for button in row]
 
-    assert labels == ["Update Briefs", "Edit Subjects", "Help"]
-    assert callbacks == ["run:update", "subject_manage:list", "run:help"]
+    assert labels == ["Update Briefs", "Get Briefs", "Edit Subjects", "Help"]
+    assert callbacks == [
+        "run:update",
+        "run:briefs",
+        "subject_manage:list",
+        "run:help",
+    ]
 
     reply = service._quick_actions_reply_keyboard()
-    assert [[button.text for button in row] for row in reply.keyboard] == [["Update Briefs", "Edit Subjects", "Help"]]
+    assert [[button.text for button in row] for row in reply.keyboard] == [
+        ["Update Briefs", "Get Briefs"],
+        ["Edit Subjects", "Help"],
+    ]
 
 
 def test_t142_subject_detail_keyboard_has_safe_management_actions() -> None:
