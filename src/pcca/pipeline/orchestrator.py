@@ -1068,8 +1068,10 @@ class PipelineOrchestrator:
             subjects = await self.subject_service.list_subjects()
             if subject_ids is not None:
                 subjects = [subject for subject in subjects if subject.id in subject_ids]
+            subjects = [subject for subject in subjects if subject.status == "active"]
             item_rows = await self.item_repo.list_all_for_scoring(limit=limit)
             stats["subjects_seen"] = len(subjects)
+            stats["subjects_active"] = len(subjects)
             stats["items_seen"] = len(item_rows)
             logger.info(
                 "Embedding rescore started run_id=%s subjects=%d items=%d scorer=%s",

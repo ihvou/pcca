@@ -248,6 +248,67 @@ async def test_digest_run_sends_one_message_per_brief_and_feedback_buttons_map_t
 
 
 @pytest.mark.asyncio
+async def test_digest_run_skips_paused_subjects(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service, routing_service, active = await _seed_subject_with_route(db)
+    paused = await subject_service.create_subject("Paused AI", include_terms=["claude code"])
+    await subject_service.set_subject_status(paused.id, "paused")
+    await routing_service.link_subject(subject_name=paused.name, chat_id=123)
+    await _seed_item_score(
+        db,
+        subject_id=active.id,
+        external_id="active-item",
+        text="Claude Code release details for active subject",
+        url="https://example.com/active",
+        score=0.92,
+        rationale="active match",
+    )
+    await _seed_item_score(
+        db,
+        subject_id=paused.id,
+        external_id="paused-item",
+        text="Claude Code release details for paused subject",
+        url="https://example.com/paused",
+        score=0.95,
+        rationale="paused match",
+    )
+
+    fake_telegram = FakeTelegramService()
+    runner = JobRunner(
+        subject_service=subject_service,
+        routing_service=routing_service,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        digest_repo=DigestRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        telegram_service=fake_telegram,  # type: ignore[arg-type]
+    )
+
+    stats = await runner.run_morning_digest()
+    paused_digest_items = await (
+        await db.conn.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM digest_items di
+            JOIN digests d ON d.id = di.digest_id
+            WHERE d.subject_id = ?
+            """,
+            (paused.id,),
+        )
+    ).fetchone()
+
+    assert stats["subjects_seen"] == 1
+    assert stats["briefs_sent"] == 1
+    assert [message["subject_name"] for message in fake_telegram.sent_messages] == [active.name]
+    assert int(paused_digest_items["c"]) == 0
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_digest_sends_no_briefs_notice_when_top_score_below_relevance_floor(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

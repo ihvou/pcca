@@ -71,6 +71,7 @@ class TelegramService:
     _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending_subject_edits: dict[str, PendingSubjectEdit] = field(default_factory=dict, init=False)
     _progress_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
+    _edit_retry_delays_seconds: tuple[float, ...] = field(default=(1.0, 4.0, 16.0), init=False)
 
     def attach_manual_actions(
         self,
@@ -1052,13 +1053,13 @@ class TelegramService:
             async with self._manual_action_lock:
                 stats = await self.update_briefs_action(subject_ids=subject_ids, progress_callback=progress)
             if isinstance(stats, dict) and stats.get("cancelled"):
-                await self._edit_message_text(status_message, "Update Briefs cancelled. No partial Briefs were delivered.")
+                await self._edit_message_text(status_message, "Update Briefs cancelled. No partial Briefs were delivered.", final=True)
                 return
             if isinstance(stats, dict) and stats.get("skipped_already_running"):
-                await self._edit_message_text(status_message, "Another collection run is already in progress. Try again later.")
+                await self._edit_message_text(status_message, "Another collection run is already in progress. Try again later.", final=True)
                 return
             summary = self._format_update_summary(stats if isinstance(stats, dict) else {})
-            await self._edit_message_text(status_message, summary)
+            await self._edit_message_text(status_message, summary, final=True)
             logger.info(
                 "Telegram Update Briefs finished subject_ids=%s duration_ms=%d stats=%s",
                 sorted(subject_ids) if subject_ids is not None else None,
@@ -1071,7 +1072,9 @@ class TelegramService:
                 sorted(subject_ids) if subject_ids is not None else None,
                 int((time.monotonic() - started_at) * 1000),
             )
-            await self._edit_message_text(status_message, "`update briefs` failed. Check logs and try again.")
+            await self._edit_message_text(status_message, "`update briefs` failed. Check logs and try again.", final=True)
+        finally:
+            await self._drain_progress_tasks(context="update_briefs")
 
     async def _cancel_update_from_message(self, message) -> None:
         if self.cancel_update_action is None:
@@ -1086,17 +1089,76 @@ class TelegramService:
     def _track_task(self, coro) -> None:
         task = asyncio.create_task(coro)
         self._progress_tasks.add(task)
-        task.add_done_callback(self._progress_tasks.discard)
 
-    async def _edit_message_text(self, message, text: str) -> None:
-        try:
-            await message.edit_text(text)
-        except Exception:
-            logger.debug("Telegram progress edit failed; sending progress as reply fallback.", exc_info=True)
+        def done_callback(done: asyncio.Task) -> None:
+            self._progress_tasks.discard(done)
+            if done.cancelled():
+                return
+            exc = done.exception()
+            if exc is not None:
+                logger.warning(
+                    "Telegram progress task failed.",
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+
+        task.add_done_callback(done_callback)
+
+    async def _drain_progress_tasks(self, *, context: str) -> None:
+        pending = [task for task in self._progress_tasks if not task.done()]
+        if not pending:
+            return
+        _done, pending_set = await asyncio.wait(pending, timeout=2.0)
+        if pending_set:
+            logger.warning(
+                "Telegram progress tasks still running after %s count=%d",
+                context,
+                len(pending_set),
+            )
+
+    async def _edit_message_text(self, message, text: str, *, final: bool = False) -> bool:
+        last_exc: Exception | None = None
+        retry_delays = tuple(getattr(self, "_edit_retry_delays_seconds", (1.0, 4.0, 16.0)))
+        delays = (0.0, *retry_delays)
+        for attempt, delay in enumerate(delays, start=1):
+            if delay:
+                await asyncio.sleep(delay)
             try:
+                await message.edit_text(text)
+                return True
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Telegram progress edit failed attempt=%d final=%s error=%s",
+                    attempt,
+                    final,
+                    exc,
+                    exc_info=attempt == len(delays),
+                )
+        if not final:
+            return False
+        try:
+            chat_id = self._message_chat_id(message)
+            thread_id = self._message_thread_id(message)
+            thread_id_int = int(thread_id) if thread_id and thread_id.isdigit() else None
+            application = getattr(self, "application", None)
+            if application is not None and chat_id is not None:
+                await application.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    message_thread_id=thread_id_int,
+                    disable_web_page_preview=True,
+                )
+            else:
                 await message.reply_text(text)
-            except Exception:
-                logger.exception("Telegram progress reply fallback failed.")
+            return True
+        except Exception:
+            logger.exception("Telegram final progress fallback send failed after edit retries.")
+            if last_exc is not None:
+                logger.debug(
+                    "Original final edit failure before fallback.",
+                    exc_info=(type(last_exc), last_exc, last_exc.__traceback__),
+                )
+            return False
 
     @staticmethod
     def _format_update_progress(event: dict[str, Any]) -> str | None:

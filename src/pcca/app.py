@@ -327,6 +327,42 @@ class PCCAApp:
     async def run_digest_once(self) -> dict:
         return await self.run_briefs_once()
 
+    async def generate_briefs_once(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        started_at = time.monotonic()
+        await self.start(with_scheduler=False, with_telegram=False)
+        try:
+            stats = await self.scheduler.job_runner.generate_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
+            logger.info("PCCA one-shot Brief generation finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
+        finally:
+            await self.stop()
+
+    async def send_briefs_once(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        started_at = time.monotonic()
+        await self.start(with_scheduler=False, with_telegram=True)
+        try:
+            stats = await self.scheduler.job_runner.send_generated_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
+            logger.info("PCCA one-shot Brief send finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
+        finally:
+            await self.stop()
+
     async def rebuild_briefs_once(self, *, subject_ids: set[int] | None = None) -> dict:
         started_at = time.monotonic()
         await self.start(with_scheduler=False, with_telegram=True)

@@ -489,6 +489,12 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE runtime_locks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
         """,
     ),
+    (
+        19,
+        """
+        ALTER TABLE digests ADD COLUMN generated_at TEXT;
+        """,
+    ),
 ]
 
 

@@ -155,6 +155,7 @@ class JobRunner:
         smart: bool = False,
         subject_ids: set[int] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        deliver: bool = True,
     ) -> dict:
         started_at = time.monotonic()
         run_id = await self.run_log_repo.start_run(run_type) if self.run_log_repo is not None else None
@@ -169,6 +170,7 @@ class JobRunner:
             "deliveries_failed": 0,
             "smart_resends": 0,
             "placeholder_briefs_sent": 0,
+            "subjects_generated": 0,
             "subjects_below_relevance_threshold": [],
             "renderers_used": {},
             "skipped_missing_dependencies": False,
@@ -207,11 +209,10 @@ class JobRunner:
                     rescore_stats,
                 )
             if (
-                self.telegram_service is None
-                or self.telegram_service.application is None
-                or self.item_score_repo is None
+                self.item_score_repo is None
                 or self.digest_repo is None
-                or self.routing_service is None
+                or (deliver and self.routing_service is None)
+                or (deliver and (self.telegram_service is None or self.telegram_service.application is None))
             ):
                 stats["skipped_missing_dependencies"] = True
                 return stats
@@ -241,11 +242,16 @@ class JobRunner:
 
             for subject in subjects:
                 subject_started_at = time.monotonic()
-                routes = await self.routing_service.list_routes_for_subject(subject.id)
-                if not routes:
+                routes = (
+                    await self.routing_service.list_routes_for_subject(subject.id)
+                    if self.routing_service is not None
+                    else []
+                )
+                if deliver and not routes:
                     logger.info("Morning digest subject skipped no_routes run_id=%s subject=%s", run_id, subject.name)
                     continue
-                stats["subjects_with_routes"] += 1
+                if routes:
+                    stats["subjects_with_routes"] += 1
                 if await self.digest_repo.subject_preferences_are_empty(subject_id=subject.id):
                     stats["subjects_skipped_empty_preferences"] = int(stats.get("subjects_skipped_empty_preferences", 0)) + 1
                     footer = (
@@ -257,19 +263,20 @@ class JobRunner:
                         run_id,
                         subject.name,
                     )
-                    for route in routes:
-                        thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None
-                        try:
-                            await self.telegram_service.send_no_briefs_message(
-                                chat_id=route.chat_id,
-                                subject_name=subject.name,
-                                footer=footer,
-                                thread_id=thread_id_int,
-                            )
-                            stats["deliveries_sent"] += 1
-                        except Exception:
-                            logger.exception("Empty-preferences warning delivery failed for subject=%s", subject.name)
-                            stats["deliveries_failed"] += 1
+                    if deliver:
+                        for route in routes:
+                            thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None
+                            try:
+                                await self.telegram_service.send_no_briefs_message(
+                                    chat_id=route.chat_id,
+                                    subject_name=subject.name,
+                                    footer=footer,
+                                    thread_id=thread_id_int,
+                                )
+                                stats["deliveries_sent"] += 1
+                            except Exception:
+                                logger.exception("Empty-preferences warning delivery failed for subject=%s", subject.name)
+                                stats["deliveries_failed"] += 1
                     continue
 
                 digest = await self.digest_repo.get_or_create_digest(subject_id=subject.id, run_date=date.today())
@@ -425,61 +432,64 @@ class JobRunner:
                         full_text=rendered_item.full_text,
                     )
                 await self.digest_repo.prune_stale_buttons(digest_id=digest.id)
+                await self.digest_repo.mark_generated(digest_id=digest.id)
+                stats["subjects_generated"] += 1
 
-                for route in routes:
-                    thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None
-                    first_message_id: int | None = None
-                    try:
-                        if not payload.briefs:
-                            first_message_id = await self.telegram_service.send_no_briefs_message(
-                                chat_id=route.chat_id,
-                                subject_name=subject.name,
-                                footer=_combine_footer(no_new_footer, relevance_footer, circuit_footer),
-                                thread_id=thread_id_int,
-                            )
-                            if below_relevance_threshold:
+                if deliver:
+                    for route in routes:
+                        thread_id_int = int(route.thread_id) if route.thread_id and route.thread_id.isdigit() else None
+                        first_message_id: int | None = None
+                        try:
+                            if not payload.briefs:
+                                first_message_id = await self.telegram_service.send_no_briefs_message(
+                                    chat_id=route.chat_id,
+                                    subject_name=subject.name,
+                                    footer=_combine_footer(no_new_footer, relevance_footer, circuit_footer),
+                                    thread_id=thread_id_int,
+                                )
+                                if below_relevance_threshold:
+                                    stats["briefs_sent"] += 1
+                                    stats["placeholder_briefs_sent"] += 1
+                            for index, brief in enumerate(payload.briefs, start=1):
+                                footer = _combine_footer(no_new_footer, circuit_footer) if index == len(payload.briefs) else None
+                                message_id = await self.telegram_service.send_brief_message(
+                                    chat_id=route.chat_id,
+                                    subject_name=subject.name,
+                                    brief=brief,
+                                    footer=footer,
+                                    thread_id=thread_id_int,
+                                )
+                                first_message_id = first_message_id or message_id
+                                await self.digest_repo.record_item_delivery(
+                                    digest_id=digest.id,
+                                    item_id=brief.item_id,
+                                    chat_id=route.chat_id,
+                                    thread_id=route.thread_id,
+                                    status="sent",
+                                    message_id=message_id,
+                                )
                                 stats["briefs_sent"] += 1
-                                stats["placeholder_briefs_sent"] += 1
-                        for index, brief in enumerate(payload.briefs, start=1):
-                            footer = _combine_footer(no_new_footer, circuit_footer) if index == len(payload.briefs) else None
-                            message_id = await self.telegram_service.send_brief_message(
-                                chat_id=route.chat_id,
-                                subject_name=subject.name,
-                                brief=brief,
-                                footer=footer,
-                                thread_id=thread_id_int,
-                            )
-                            first_message_id = first_message_id or message_id
-                            await self.digest_repo.record_item_delivery(
+                                if index < len(payload.briefs):
+                                    await asyncio.sleep(0.3)
+                            await self.digest_repo.record_delivery(
                                 digest_id=digest.id,
-                                item_id=brief.item_id,
                                 chat_id=route.chat_id,
                                 thread_id=route.thread_id,
                                 status="sent",
-                                message_id=message_id,
+                                message_id=first_message_id,
                             )
-                            stats["briefs_sent"] += 1
-                            if index < len(payload.briefs):
-                                await asyncio.sleep(0.3)
-                        await self.digest_repo.record_delivery(
-                            digest_id=digest.id,
-                            chat_id=route.chat_id,
-                            thread_id=route.thread_id,
-                            status="sent",
-                            message_id=first_message_id,
-                        )
-                        stats["deliveries_sent"] += 1
-                    except Exception as exc:
-                        logger.exception("Brief delivery failed for subject=%s chat_id=%s", subject.name, route.chat_id)
-                        await self.digest_repo.record_delivery(
-                            digest_id=digest.id,
-                            chat_id=route.chat_id,
-                            thread_id=route.thread_id,
-                            status="failed",
-                            error_text=str(exc),
-                        )
-                        stats["deliveries_failed"] += 1
-                await self.digest_repo.mark_sent(digest_id=digest.id)
+                            stats["deliveries_sent"] += 1
+                        except Exception as exc:
+                            logger.exception("Brief delivery failed for subject=%s chat_id=%s", subject.name, route.chat_id)
+                            await self.digest_repo.record_delivery(
+                                digest_id=digest.id,
+                                chat_id=route.chat_id,
+                                thread_id=route.thread_id,
+                                status="failed",
+                                error_text=str(exc),
+                            )
+                            stats["deliveries_failed"] += 1
+                    await self.digest_repo.mark_sent(digest_id=digest.id)
                 logger.info(
                     "Morning digest subject finished run_id=%s subject=%s duration_ms=%d",
                     run_id,
@@ -520,6 +530,41 @@ class JobRunner:
             run_type="digest_rebuild",
             force_rebuild=True,
             subject_ids=subject_ids,
+        )
+
+    async def generate_briefs(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        rescore_stats = {}
+        if self.pipeline_orchestrator is not None:
+            rescore_stats = await self.pipeline_orchestrator.rescore_existing_items(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
+        digest_stats = await self.run_morning_digest(
+            run_type="brief_generate",
+            force_rebuild=True,
+            subject_ids=subject_ids,
+            progress_callback=progress_callback,
+            deliver=False,
+        )
+        return {"rescore": rescore_stats, "digests": digest_stats}
+
+    async def send_generated_briefs(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        return await self.run_morning_digest(
+            run_type="brief_send",
+            force_rebuild=True,
+            subject_ids=subject_ids,
+            progress_callback=progress_callback,
+            deliver=True,
         )
 
     async def run_smart_briefs(

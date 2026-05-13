@@ -131,6 +131,10 @@ INDEX_HTML = r"""
           <div class="card">
             <h2>Subjects</h2>
             <p id="subjectHint">Describe your first subject in plain language. The Wizard will draft rules first; it will not save an empty-preference subject.</p>
+            <div class="actions" style="margin:10px 0">
+              <button id="generateAllBriefsButton" class="primary" onclick="generateBriefs()">Generate Briefs (all)</button>
+              <button id="sendAllBriefsButton" class="secondary" onclick="sendBriefs()">Send Briefs (all)</button>
+            </div>
             <div class="list" id="subjectsBox"></div>
           </div>
           <div class="card">
@@ -515,6 +519,30 @@ async function getBrief(subjectId) {
     return null;
   }
 }
+async function generateBriefs(subjectId=null) {
+  const label = subjectId ? 'Generating Briefs for selected subject...' : 'Generating Briefs for all subjects...';
+  try {
+    const data = await longAction('/api/briefs/generate', subjectId ? {subject_id: subjectId} : {}, {actionKey:'generate_briefs', statusId:'useStatus', startedText:label});
+    if (data) notice('useStatus', data.message, data.ok === false ? '' : 'ok');
+    return data;
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('useStatus', err.message, 'bad');
+    return null;
+  }
+}
+async function sendBriefs(subjectId=null) {
+  const label = subjectId ? 'Sending Briefs for selected subject...' : 'Sending Briefs for all subjects...';
+  try {
+    const data = await longAction('/api/briefs/send', subjectId ? {subject_id: subjectId} : {}, {actionKey:'send_briefs', statusId:'useStatus', startedText:label});
+    if (data) notice('useStatus', data.message, data.ok === false ? '' : 'ok');
+    return data;
+  } catch (err) {
+    logLine(`ERROR: ${err.message}`);
+    notice('useStatus', err.message, 'bad');
+    return null;
+  }
+}
 async function draftSubject(subjectId=null, text=null) {
   const subjectTextEl = byId('subjectText');
   const raw = text !== null ? text : (subjectId ? '' : (subjectTextEl ? subjectTextEl.value : ''));
@@ -590,20 +618,45 @@ function renderDraft(draft, actionable) {
   box.textContent = [`Proposed title: ${draft.title}`, `Include: ${include}`, `Avoid: ${exclude}`, draft.quality_notes ? `Quality notes: ${draft.quality_notes}` : '', hasRules ? 'Ready to save.' : 'Needs more detail before saving.'].filter(Boolean).join('\n');
   save.disabled = !hasRules || busy;
 }
+function relativeTime(value) {
+  if (!value) return null;
+  const parsed = new Date(String(value).replace(' ', 'T') + (String(value).includes('Z') ? '' : 'Z'));
+  if (Number.isNaN(parsed.getTime())) return null;
+  const seconds = Math.max(0, Math.floor((Date.now() - parsed.getTime()) / 1000));
+  if (seconds < 60) return 'just now';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? '' : 's'} ago`;
+  const days = Math.floor(hours / 24);
+  return `${days} day${days === 1 ? '' : 's'} ago`;
+}
+function briefStatusLabel(status) {
+  if (!status || !status.digest_id) return '— not generated today';
+  const sent = relativeTime(status.last_delivery_sent_at || status.sent_at);
+  if (sent) return `sent ${sent} · ${status.item_count || 0} item(s)`;
+  const generated = relativeTime(status.generated_at);
+  if (generated) return `generated ${generated} · ${status.item_count || 0} item(s)`;
+  return `${status.status || 'pending'} · ${status.item_count || 0} item(s)`;
+}
 function renderSubjects(state) {
   const subjects = state.subjects || [];
   const prefs = state.subject_preferences || {};
+  const statuses = state.brief_status || {};
   subjectsBox.innerHTML = subjects.length ? '' : '<div class="notice">No subjects yet. Describe your first subject below.</div>';
-  subjectHint.textContent = subjects.length ? 'Each subject has its own preferences and its own Get Brief action.' : 'Describe your first subject in plain language. The Wizard will draft rules first; it will not save an empty-preference subject.';
+  subjectHint.textContent = subjects.length ? 'Generate scores per subject, then send Briefs when you are ready. Get Content remains a Sources-tab test action.' : 'Describe your first subject in plain language. The Wizard will draft rules first; it will not save an empty-preference subject.';
   for (const subject of subjects) {
     const pref = prefs[String(subject.id)] || {};
+    const status = statuses[String(subject.id)] || {};
     const include = (pref.include_terms || []).join(', ') || 'no include rules shown';
     const exclude = (pref.exclude_terms || []).join(', ') || 'no avoid rules shown';
     const div = document.createElement('div');
     div.className = `row clickable ${selectedSubjectId === subject.id ? 'selected' : ''}`;
-    div.innerHTML = `<div><strong>${subject.name}</strong><small>Include: ${include}</small><small>Avoid: ${exclude}</small><small>Full text cap: ${subject.brief_full_text_chars || 1800} chars</small></div><div class="actions"><button>Get Brief</button></div>`;
+    div.innerHTML = `<div><strong>${subject.name}</strong><small>Include: ${include}</small><small>Avoid: ${exclude}</small><small>Briefs: ${briefStatusLabel(status)}</small><small>Full text cap: ${subject.brief_full_text_chars || 1800} chars</small></div><div class="actions"><button class="primary">Generate</button><button class="secondary">Send</button></div>`;
     div.onclick = () => selectSubject(subject.id);
-    div.querySelector('button').onclick = (event) => { event.stopPropagation(); getBrief(subject.id); };
+    const buttons = div.querySelectorAll('button');
+    buttons[0].onclick = (event) => { event.stopPropagation(); generateBriefs(subject.id); };
+    buttons[1].onclick = (event) => { event.stopPropagation(); sendBriefs(subject.id); };
     subjectsBox.appendChild(div);
   }
   if (!selectedSubjectId && subjects.length) selectedSubjectId = subjects[0].id;
@@ -643,6 +696,7 @@ function renderSubjectDetail(state) {
   const subject = (state.subjects || []).find(item => item.id === selectedSubjectId);
   if (!subject) return;
   const pref = (state.subject_preferences || {})[String(subject.id)] || {};
+  const briefStatus = (state.brief_status || {})[String(subject.id)] || {};
   const routes = (state.routes || []).filter(route => route.subject_id === subject.id);
   const suspended = ((state.subject_source_overrides || {})[String(subject.id)] || []).filter(row => row.status !== 'active');
   const include = (pref.include_terms || []).join(', ') || '(none yet)';
@@ -661,11 +715,13 @@ function renderSubjectDetail(state) {
   subjectDetailBox.innerHTML = `
 <strong>${subject.name}</strong>
 <div class="fine">Preferences v${pref.version || 0} · updated ${pref.updated_at || 'unknown'}</div>
+<div style="margin-top:10px"><strong>Briefs</strong><div class="fine">${briefStatusLabel(briefStatus)}</div></div>
 <div style="margin-top:10px"><strong>Include</strong><div class="fine">${include}</div></div>
 <div style="margin-top:10px"><strong>Avoid</strong><div class="fine">${exclude}</div></div>
 <div style="margin-top:10px"><strong>Route</strong><pre>${routeText}</pre></div>
 <div style="margin-top:10px"><strong>Suspended sources</strong><pre>${suspendedText}</pre></div>
 <label style="margin-top:10px">Refine in free form<textarea id="refineText" placeholder="Example: less hype, more primary sources, exclude generic Skills tutorials"></textarea></label>
+<div class="actions" style="margin-top:8px"><button id="generateSubjectBriefsButton" class="primary">Generate Briefs</button><button id="sendSubjectBriefsButton" class="secondary">Send Briefs</button></div>
 <div class="actions" style="margin-top:8px"><button id="refineButton">Draft Refinement</button><button id="rebuildRulesButton" class="secondary">Rebuild Rules</button></div>
 <div class="fine">Rebuild Rules re-runs the current extractor on the stored subject description and replaces the preference version. Use it to repair subjects created before the improved extraction prompt.</div>
 <div id="refineStatus" class="notice" style="display:none; margin-top:8px"></div>
@@ -678,6 +734,8 @@ function renderSubjectDetail(state) {
   if (refineWasFocused) refineText.focus();
   byId('refineButton').onclick = () => draftSubject(subject.id, refineText.value);
   byId('rebuildRulesButton').onclick = () => rebuildSubjectRules(subject.id);
+  byId('generateSubjectBriefsButton').onclick = () => generateBriefs(subject.id);
+  byId('sendSubjectBriefsButton').onclick = () => sendBriefs(subject.id);
   byId('assignRouteButton').onclick = () => assignRoute(subject.id, byId('routeChat').value);
 }
 function renderSources(state) {
@@ -748,13 +806,28 @@ function updateActionControls(state) {
   const runAllButton = byId('runAllContentButton');
   const backfillButton = byId('backfillEmbeddingsButton');
   const rebuildAllRulesButton = byId('rebuildAllRulesButton');
+  const generateAllBriefsButton = byId('generateAllBriefsButton');
+  const sendAllBriefsButton = byId('sendAllBriefsButton');
   const readRunning = actionRunning(state, 'read_content');
   const stageRunning = actionRunning(state, 'stage_follows');
   const backfillRunning = actionRunning(state, 'embedding_backfill');
   const rebuildAllRulesRunning = actionRunning(state, 'rebuild_all_subject_rules');
   const briefsRunning = actionRunning(state, 'get_briefs');
-  if (briefsRunning) notice('useStatus', `Running: ${briefsRunning.label} (started ${String(briefsRunning.started_at || '').slice(11, 16) || 'now'}).`, '');
+  const generateRunning = actionRunning(state, 'generate_briefs');
+  const sendRunning = actionRunning(state, 'send_briefs');
+  if (briefsRunning || generateRunning || sendRunning) {
+    const running = briefsRunning || generateRunning || sendRunning;
+    notice('useStatus', `Running: ${running.label} (started ${String(running.started_at || '').slice(11, 16) || 'now'}).`, '');
+  }
   else notice('useStatus', '', '');
+  if (generateAllBriefsButton) {
+    generateAllBriefsButton.textContent = generateRunning ? `Running: ${generateRunning.label}` : 'Generate Briefs (all)';
+    generateAllBriefsButton.disabled = busy || Boolean(generateRunning);
+  }
+  if (sendAllBriefsButton) {
+    sendAllBriefsButton.textContent = sendRunning ? `Running: ${sendRunning.label}` : 'Send Briefs (all)';
+    sendAllBriefsButton.disabled = busy || Boolean(sendRunning);
+  }
   if (readButton) {
     readButton.textContent = readRunning ? `Running: ${readRunning.label}` : `Get Content (${platformLabel(selectedPlatform)})`;
     readButton.disabled = busy || Boolean(readRunning);
@@ -1165,6 +1238,30 @@ class DesktopWebServer:
                 pass_action_id=True,
             )
 
+        async def generate_briefs(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p, action_id: self.service.generate_briefs(
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None,
+                    async_response=True,
+                    action_id=action_id,
+                ),
+                request,
+                pass_action_id=True,
+            )
+
+        async def send_briefs(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p, action_id: self.service.send_briefs(
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None,
+                    async_response=True,
+                    action_id=action_id,
+                ),
+                request,
+                pass_action_id=True,
+            )
+
         async def rebuild_digest(request):
             assert self.service is not None
             return await run_result(lambda _p: self.service.rebuild_todays_digest(), request)
@@ -1240,6 +1337,8 @@ class DesktopWebServer:
             Route("/api/content/read", read_content, methods=["POST"]),
             Route("/api/embeddings/backfill", backfill_embeddings, methods=["POST"]),
             Route("/api/briefs", briefs, methods=["POST"]),
+            Route("/api/briefs/generate", generate_briefs, methods=["POST"]),
+            Route("/api/briefs/send", send_briefs, methods=["POST"]),
             Route("/api/digest/rebuild", rebuild_digest, methods=["POST"]),
             Route("/api/routes/unlink", unlink_route, methods=["POST"]),
             Route("/api/routes/move", move_route, methods=["POST"]),

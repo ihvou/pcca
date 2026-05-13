@@ -3,12 +3,16 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import date
 from pathlib import Path
 
 import pytest
 
+from pcca.collectors.base import CollectedItem
 from pcca.config import Settings
 from pcca.db import Database
+from pcca.repositories.digests import DigestRepository
+from pcca.repositories.items import ItemRepository
 from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.sources import SourceRepository
@@ -667,6 +671,115 @@ async def test_desktop_get_briefs_logs_cold_cache_progress_warning(tmp_path: Pat
 
     assert result.ok is True
     assert any("Briefs warning: embeddings not warmed for AI Tools" in line for line in service.logs)
+
+
+@pytest.mark.asyncio
+async def test_desktop_generate_and_send_briefs_scope_to_subject(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    class FakeRunner:
+        def __init__(self) -> None:
+            self.generated_subject_ids: set[int] | None = None
+            self.sent_subject_ids: set[int] | None = None
+            self.progress_events: list[dict] = []
+
+        async def generate_briefs(self, *, subject_ids=None, progress_callback=None):
+            self.generated_subject_ids = subject_ids
+            if progress_callback is not None:
+                event = {
+                    "kind": "scoring",
+                    "subject_id": 3,
+                    "subject_name": "AI Tools",
+                    "subject_index": 1,
+                    "subject_total": 1,
+                }
+                self.progress_events.append(event)
+                progress_callback(event)
+            return {"digests": {"subjects_generated": 1}}
+
+        async def send_generated_briefs(self, *, subject_ids=None, progress_callback=None):
+            self.sent_subject_ids = subject_ids
+            return {"deliveries_sent": 1}
+
+    runner = FakeRunner()
+    fake_scheduler = type("FakeScheduler", (), {"job_runner": runner})()
+    service._agent_app = type("FakeApp", (), {"scheduler": fake_scheduler})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        generated = await service.generate_briefs(subject_id=3)
+        sent = await service.send_briefs(subject_id=3)
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+    assert generated.ok is True
+    assert sent.ok is True
+    assert runner.generated_subject_ids == {3}
+    assert runner.sent_subject_ids == {3}
+    assert any("Generate Briefs phase: scoring AI Tools (1/1)" in line for line in service.logs)
+
+
+@pytest.mark.asyncio
+async def test_desktop_state_surfaces_brief_status(tmp_path: Path) -> None:
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+    await service.init_db()
+
+    db = Database(path=settings.db_path)
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+    try:
+        subject = await SubjectRepository(conn=db.conn).create("AI Tools", include_terms=["claude code"])
+        item_stats = await ItemRepository(conn=db.conn).upsert_many(
+            [
+                CollectedItem(
+                    platform="rss",
+                    external_id="brief-status-item",
+                    author="Author",
+                    url="https://example.com/brief-status-item",
+                    text="Claude Code practical release note.",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                )
+            ]
+        )
+        digest_repo = DigestRepository(conn=db.conn)
+        digest = await digest_repo.get_or_create_digest(subject_id=subject.id, run_date=date.today())
+        await digest_repo.add_digest_item(
+            digest_id=digest.id,
+            item_id=item_stats["item_ids"][0],
+            rank=1,
+            reason_selected="Relevant practical update.",
+            short_text="Claude Code practical release note.",
+            full_text="Claude Code practical release note.",
+        )
+        await digest_repo.mark_generated(digest_id=digest.id)
+        await digest_repo.record_delivery(
+            digest_id=digest.id,
+            chat_id=123,
+            thread_id=None,
+            status="sent",
+            message_id=456,
+        )
+        await digest_repo.mark_sent(digest_id=digest.id)
+    finally:
+        await db.close()
+
+    state = await service.get_state()
+    status = state["brief_status"][str(subject.id)]
+
+    assert status["digest_id"] == digest.id
+    assert status["status"] == "sent"
+    assert status["item_count"] == 1
+    assert status["generated_at"] is not None
+    assert status["sent_at"] is not None
+    assert status["last_delivery_sent_at"] is not None
 
 
 @pytest.mark.asyncio

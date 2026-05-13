@@ -1669,6 +1669,64 @@ async def test_rescore_existing_items_can_scope_to_subject_ids(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_paused_subject_is_skipped_by_rescore(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+    active = await subject_service.create_subject("Active AI", include_terms=["claude"])
+    paused = await subject_service.create_subject("Paused AI", include_terms=["claude"])
+    paused = await subject_service.set_subject_status(paused.id, "paused")
+
+    item_repo = ItemRepository(conn=db.conn)
+    stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="rss",
+                external_id="paused-skip-shared",
+                author="Author",
+                url="https://example.com/paused-skip-shared",
+                text="Claude Code workflow detail with a practical release note.",
+                transcript_text=None,
+                published_at=None,
+                metadata={},
+            )
+        ]
+    )
+    item_id = stats["item_ids"][0]
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=item_repo,
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={},
+    )
+
+    events: list[dict] = []
+    rescore_stats = await orchestrator.rescore_existing_items(progress_callback=events.append)
+    score_rows = await (
+        await db.conn.execute(
+            "SELECT subject_id FROM item_scores WHERE item_id = ? ORDER BY subject_id",
+            (item_id,),
+        )
+    ).fetchall()
+
+    assert paused.status == "paused"
+    assert rescore_stats["subjects_seen"] == 1
+    assert rescore_stats["subjects_active"] == 1
+    assert [event["subject_id"] for event in events if event.get("kind") == "scoring"] == [active.id]
+    assert [int(row["subject_id"]) for row in score_rows] == [active.id]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_rescore_existing_items_emits_cold_cache_progress_event(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

@@ -7,7 +7,7 @@ import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -522,6 +522,7 @@ class DesktopCommandService:
             preference_repo = SubjectPreferenceRepository(conn=db.conn)
             subject_preferences = {}
             subject_source_overrides = {}
+            brief_status = {}
             for subject in subjects:
                 pref = await preference_repo.get_latest(subject.id)
                 if pref is None:
@@ -544,6 +545,47 @@ class DesktopCommandService:
                     for row in await source_service.list_source_overrides_for_subject(subject.id)
                     if row.status != "active"
                 ]
+                status_row = await (
+                    await db.conn.execute(
+                        """
+                        SELECT
+                          d.id,
+                          d.status,
+                          d.generated_at,
+                          d.sent_at,
+                          COUNT(di.item_id) AS item_count,
+                          MAX(dd.sent_at) AS last_delivery_sent_at
+                        FROM digests d
+                        LEFT JOIN digest_items di ON di.digest_id = d.id
+                        LEFT JOIN digest_deliveries dd ON dd.digest_id = d.id AND dd.status = 'sent'
+                        WHERE d.subject_id = ?
+                          AND d.run_date = ?
+                        GROUP BY d.id
+                        ORDER BY d.id DESC
+                        LIMIT 1
+                        """,
+                        (subject.id, date.today().isoformat()),
+                    )
+                ).fetchone()
+                brief_status[str(subject.id)] = (
+                    {
+                        "digest_id": status_row["id"],
+                        "status": status_row["status"],
+                        "generated_at": status_row["generated_at"],
+                        "sent_at": status_row["sent_at"],
+                        "last_delivery_sent_at": status_row["last_delivery_sent_at"],
+                        "item_count": int(status_row["item_count"] or 0),
+                    }
+                    if status_row is not None
+                    else {
+                        "digest_id": None,
+                        "status": "not_generated",
+                        "generated_at": None,
+                        "sent_at": None,
+                        "last_delivery_sent_at": None,
+                        "item_count": 0,
+                    }
+                )
             draft_repo = SubjectDraftRepository(conn=db.conn)
             subject_draft = await draft_repo.get(DESKTOP_SUBJECT_DRAFT_CHAT_ID)
             subject_drafts = await draft_repo.list_all()
@@ -666,6 +708,7 @@ class DesktopCommandService:
                 "subjects": [asdict(subject) for subject in subjects],
                 "subject_preferences": subject_preferences,
                 "subject_source_overrides": subject_source_overrides,
+                "brief_status": brief_status,
                 "subject_draft": asdict(subject_draft) if subject_draft is not None else None,
                 "subject_draft_actionable": (
                     draft_has_actionable_rules(subject_draft) if subject_draft is not None else False
@@ -1709,6 +1752,85 @@ class DesktopCommandService:
             )
         return await self._run_guarded_action(key="get_briefs", label="Get Briefs", runner=runner)
 
+    async def generate_briefs(
+        self,
+        *,
+        subject_id: int | None = None,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
+        async def runner() -> CommandResult:
+            subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
+            self.log(f"Generating Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
+
+            def progress(event: dict[str, Any]) -> None:
+                if event.get("kind") == "embedding_not_warmed":
+                    self._set_inflight_label(
+                        key="generate_briefs",
+                        label=f"Generate Briefs: embeddings not warmed for {event.get('subject_name')}; using keyword fallback",
+                    )
+                    self.log(
+                        "Generate Briefs warning: embeddings not warmed "
+                        f"for {event.get('subject_name')} missing_rate={event.get('missing_rate')}"
+                    )
+                    return
+                if event.get("kind") != "scoring":
+                    return
+                self._set_inflight_label(
+                    key="generate_briefs",
+                    label=(
+                        f"Generate Briefs: scoring {event.get('subject_name')} "
+                        f"({event.get('subject_index')}/{event.get('subject_total')})"
+                    ),
+                )
+                self.log(
+                    "Generate Briefs phase: scoring "
+                    f"{event.get('subject_name')} ({event.get('subject_index')}/{event.get('subject_total')})"
+                )
+
+            stats = await self._generate_briefs_with_available_agent(
+                subject_ids=subject_ids,
+                progress_callback=progress,
+            )
+            self.log(f"Brief generation finished: {json.dumps(stats or {}, sort_keys=True)}")
+            return CommandResult(True, "Briefs generated.", {"digest_stats": stats or {}})
+
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="generate_briefs",
+                label="Generate Briefs",
+                action_id=action_id,
+                runner=runner,
+            )
+        return await self._run_guarded_action(key="generate_briefs", label="Generate Briefs", runner=runner)
+
+    async def send_briefs(
+        self,
+        *,
+        subject_id: int | None = None,
+        async_response: bool = False,
+        action_id: str | None = None,
+    ) -> CommandResult:
+        async def runner() -> CommandResult:
+            subject_ids = {subject_id} if subject_id is not None and subject_id > 0 else None
+            self.log(f"Sending Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
+            stats = await self._send_briefs_with_available_agent(subject_ids=subject_ids)
+            self.log(f"Brief send finished: {json.dumps(stats or {}, sort_keys=True)}")
+            return CommandResult(True, "Briefs sent.", {"digest_stats": stats or {}})
+
+        if async_response:
+            if action_id is None:
+                raise ValueError("action_id is required for async desktop actions.")
+            return await self._dispatch_guarded_action(
+                key="send_briefs",
+                label="Send Briefs",
+                action_id=action_id,
+                runner=runner,
+            )
+        return await self._run_guarded_action(key="send_briefs", label="Send Briefs", runner=runner)
+
     async def rebuild_todays_digest(self) -> CommandResult:
         self.log("Rebuilding today's Briefs.")
         stats = await self._rebuild_briefs_with_available_agent()
@@ -1734,6 +1856,38 @@ class DesktopCommandService:
         self.log("Local agent is unavailable; starting one-shot Brief delivery.")
         app = PCCAApp(settings=self.settings())
         return await app.run_briefs_once(subject_ids=subject_ids, progress_callback=progress_callback)
+
+    async def _generate_briefs_with_available_agent(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
+            self.log("Using running local agent for Brief generation.")
+            return await self._agent_app.scheduler.job_runner.generate_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
+        self.log("Local agent is unavailable; starting one-shot Brief generation.")
+        app = PCCAApp(settings=self.settings())
+        return await app.generate_briefs_once(subject_ids=subject_ids, progress_callback=progress_callback)
+
+    async def _send_briefs_with_available_agent(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):
+            self.log("Using running local agent for Brief send.")
+            return await self._agent_app.scheduler.job_runner.send_generated_briefs(
+                subject_ids=subject_ids,
+                progress_callback=progress_callback,
+            )
+        self.log("Local agent is unavailable; starting one-shot Brief send.")
+        app = PCCAApp(settings=self.settings())
+        return await app.send_briefs_once(subject_ids=subject_ids, progress_callback=progress_callback)
 
     async def _rebuild_briefs_with_available_agent(self) -> dict:
         if self._agent_app is not None and self.agent_running and hasattr(self._agent_app, "scheduler"):

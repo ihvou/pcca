@@ -15,6 +15,7 @@ class DigestRow:
     run_date: str
     sent_at: str | None
     status: str
+    generated_at: str | None = None
 
 
 @dataclass
@@ -74,7 +75,7 @@ class DigestRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT id, subject_id, run_date, sent_at, status
+                SELECT id, subject_id, run_date, sent_at, status, generated_at
                 FROM digests
                 WHERE subject_id = ? AND run_date = ?
                 """,
@@ -89,6 +90,7 @@ class DigestRepository:
             run_date=row["run_date"],
             sent_at=row["sent_at"],
             status=row["status"],
+            generated_at=row["generated_at"],
         )
 
     async def delete_digests_for_date(self, *, run_date: date, subject_ids: set[int] | None = None) -> int:
@@ -126,7 +128,7 @@ class DigestRepository:
         await self.conn.execute(f"DELETE FROM digest_deliveries WHERE digest_id IN ({placeholders})", digest_params)
         await self.conn.execute(f"DELETE FROM digest_items WHERE digest_id IN ({placeholders})", digest_params)
         await self.conn.execute(
-            f"UPDATE digests SET status = 'pending', sent_at = NULL WHERE id IN ({placeholders})",
+            f"UPDATE digests SET status = 'pending', sent_at = NULL, generated_at = NULL WHERE id IN ({placeholders})",
             digest_params,
         )
         await self.conn.commit()
@@ -399,7 +401,21 @@ class DigestRepository:
         await self.conn.execute(
             """
             UPDATE digests
-            SET status = 'sent', sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP)
+            SET status = 'sent',
+                sent_at = COALESCE(sent_at, CURRENT_TIMESTAMP),
+                generated_at = COALESCE(generated_at, CURRENT_TIMESTAMP)
+            WHERE id = ?
+            """,
+            (digest_id,),
+        )
+        await self.conn.commit()
+
+    async def mark_generated(self, *, digest_id: int) -> None:
+        await self.conn.execute(
+            """
+            UPDATE digests
+            SET status = 'generated',
+                generated_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """,
             (digest_id,),
