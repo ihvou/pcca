@@ -141,6 +141,15 @@ class ItemScoreRepository:
         await self.conn.commit()
 
     async def top_unsent_candidates(self, *, subject_id: int, limit: int = 5) -> list[CandidateItem]:
+        # T-152: prefer items with a Pass-2-generated key_message. Without
+        # this, items that scored above the relevance floor but were never
+        # reranked (Pass-2 shortlist miss) could leapfrog reranked items in
+        # the digest, producing briefs rendered as raw promotional text
+        # ("Hello community! ... 🔹 Real attack surfaces ... Guard..."). The
+        # widened shortlist (T-152 part 1) makes this rare; this ordering
+        # is defense-in-depth — if it ever happens, the user sees curated
+        # text from a slightly-lower-scoring item rather than raw text from
+        # a slightly-higher-scoring one.
         rows = await (
             await self.conn.execute(
                 """
@@ -180,7 +189,12 @@ class ItemScoreRepository:
                 ) sent ON sent.item_id = i.id
                 WHERE s.subject_id = ?
                   AND sent.item_id IS NULL
-                ORDER BY s.final_score DESC
+                ORDER BY
+                  CASE WHEN COALESCE(
+                    json_extract(iss_best.rationale_json, '$.key_message'),
+                    json_extract(s.rationale_json, '$.key_message')
+                  ) IS NOT NULL THEN 1 ELSE 0 END DESC,
+                  s.final_score DESC
                 LIMIT ?
                 """,
                 (subject_id, subject_id, limit),
@@ -189,6 +203,7 @@ class ItemScoreRepository:
         return [self._candidate_from_row(row) for row in rows]
 
     async def top_candidates(self, *, subject_id: int, limit: int = 5) -> list[CandidateItem]:
+        # T-152: same key_message-prefer ordering as top_unsent_candidates.
         rows = await (
             await self.conn.execute(
                 """
@@ -221,7 +236,12 @@ class ItemScoreRepository:
                   )
                 LEFT JOIN item_segments seg ON seg.id = iss_best.segment_id
                 WHERE s.subject_id = ?
-                ORDER BY s.final_score DESC
+                ORDER BY
+                  CASE WHEN COALESCE(
+                    json_extract(iss_best.rationale_json, '$.key_message'),
+                    json_extract(s.rationale_json, '$.key_message')
+                  ) IS NOT NULL THEN 1 ELSE 0 END DESC,
+                  s.final_score DESC
                 LIMIT ?
                 """,
                 (subject_id, limit),

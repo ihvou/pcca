@@ -124,3 +124,153 @@ async def test_candidate_preserves_key_message_and_metadata(tmp_path: Path) -> N
     assert candidate.metadata == {"duration_seconds": 1234}
 
     await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t152_top_candidates_prefers_items_with_key_message(tmp_path: Path) -> None:
+    """T-152: digest selector must prefer Pass-2-reranked items.
+
+    Live bug (2026-05-14): user reported Subject 5 brief at rank #3 showed
+    raw LinkedIn promotional text ("Hello community! I'd love to invite
+    you all to our upcoming webinar..."). Root cause: that item scored
+    above the relevance floor but was outside the Pass-2 shortlist of 20,
+    so `key_message` stayed NULL and the renderer fell back to raw
+    `segment_text`. The widened shortlist (orchestrator default 20 → 50)
+    makes this rare; this ordering ensures that even when a reranked item
+    has slightly lower final_score than an unreranked one, the user sees
+    curated text instead of raw promotional text.
+    """
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    subject = await subject_service.create_subject("AI Tools", include_terms=["ai"])
+
+    item_repo = ItemRepository(conn=db.conn)
+    item_stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="linkedin",
+                external_id="unreranked-promo",
+                author=None,
+                url="https://linkedin.com/feed/update/raw",
+                text="Hello community! I'd love to invite you all to our upcoming webinar...",
+                transcript_text=None,
+                published_at="2026-05-14T09:00:00",
+                metadata={},
+            ),
+            CollectedItem(
+                platform="youtube",
+                external_id="reranked-useful",
+                author="Karpathy",
+                url="https://youtube.com/watch?v=useful",
+                text="Practical Claude Code workflow notes",
+                transcript_text=None,
+                published_at="2026-05-14T09:00:00",
+                metadata={},
+            ),
+        ]
+    )
+    unreranked_id, reranked_id = item_stats["item_ids"]
+
+    score_repo = ItemScoreRepository(conn=db.conn)
+    # Unreranked item: higher final_score but no key_message — the exact
+    # shape that produced the "Hello community!" brief at rank #3.
+    await score_repo.upsert_score(
+        item_id=unreranked_id,
+        subject_id=subject.id,
+        pass1_score=0.7,
+        pass2_score=None,
+        practicality_score=0.5,
+        novelty_score=0.5,
+        trust_score=0.5,
+        noise_penalty=0.0,
+        final_score=0.70,
+        rationale="embedding only, no Pass-2",
+        key_message=None,
+        refined_segment=None,
+    )
+    # Reranked item: slightly lower final_score but has a clean key_message.
+    await score_repo.upsert_score(
+        item_id=reranked_id,
+        subject_id=subject.id,
+        pass1_score=0.65,
+        pass2_score=0.65,
+        practicality_score=0.7,
+        novelty_score=0.7,
+        trust_score=0.7,
+        noise_penalty=0.0,
+        final_score=0.65,
+        rationale="reranked by Pass-2",
+        key_message="Karpathy explains a concrete Claude Code workflow.",
+        refined_segment="Concise paraphrase of the segment.",
+    )
+
+    # T-152: reranked item must come FIRST even though its final_score is
+    # lower. Without the CASE-WHEN, the unreranked promo would win by
+    # 0.70 > 0.65 and render as raw text.
+    top = await score_repo.top_candidates(subject_id=subject.id, limit=5)
+    assert [c.item_id for c in top] == [reranked_id, unreranked_id]
+    assert top[0].key_message == "Karpathy explains a concrete Claude Code workflow."
+
+    unsent = await score_repo.top_unsent_candidates(subject_id=subject.id, limit=5)
+    assert [c.item_id for c in unsent] == [reranked_id, unreranked_id]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t152_top_candidates_ties_broken_by_final_score_within_reranked(
+    tmp_path: Path,
+) -> None:
+    """Among reranked items, ordering is still by final_score."""
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    subject = await subject_service.create_subject("AI Tools", include_terms=["ai"])
+
+    item_repo = ItemRepository(conn=db.conn)
+    item_stats = await item_repo.upsert_many(
+        [
+            CollectedItem(
+                platform="youtube",
+                external_id=f"reranked-{i}",
+                author="Author",
+                url=f"https://youtube.com/watch?v={i}",
+                text=f"Item {i}",
+                transcript_text=None,
+                published_at="2026-05-14T09:00:00",
+                metadata={},
+            )
+            for i in range(3)
+        ]
+    )
+    score_repo = ItemScoreRepository(conn=db.conn)
+    for item_id, score in zip(item_stats["item_ids"], [0.70, 0.85, 0.78]):
+        await score_repo.upsert_score(
+            item_id=item_id,
+            subject_id=subject.id,
+            pass1_score=score,
+            pass2_score=score,
+            practicality_score=0.7,
+            novelty_score=0.7,
+            trust_score=0.7,
+            noise_penalty=0.0,
+            final_score=score,
+            rationale="reranked by Pass-2",
+            key_message=f"Curated message {item_id}.",
+            refined_segment=None,
+        )
+
+    top = await score_repo.top_candidates(subject_id=subject.id, limit=5)
+    # All have key_message, so order is purely by final_score DESC.
+    scores = [c.final_score for c in top]
+    assert scores == sorted(scores, reverse=True)
+    assert scores == [0.85, 0.78, 0.70]
+
+    await db.close()

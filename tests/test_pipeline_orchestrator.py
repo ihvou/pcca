@@ -1348,6 +1348,10 @@ async def test_pipeline_model_rerank_only_runs_for_subject_shortlist(tmp_path: P
         display_name="Demo",
     )
 
+    # T-152: corpus expanded to 60 items so the shortlist cap still bites.
+    # The shortlist default rose from 20 → 50 so non-reranked items can no
+    # longer leapfrog reranked items into the digest. This test continues
+    # to verify the cap by ensuring items 51-60 don't enter the shortlist.
     class ManyItemCollector:
         platform = "rss"
 
@@ -1363,7 +1367,7 @@ async def test_pipeline_model_rerank_only_runs_for_subject_shortlist(tmp_path: P
                     published_at=None,
                     metadata={},
                 )
-                for idx in range(25)
+                for idx in range(60)
             ]
 
     model_router = FakeModelRouter()
@@ -1378,9 +1382,9 @@ async def test_pipeline_model_rerank_only_runs_for_subject_shortlist(tmp_path: P
     )
     stats = await orchestrator.run_nightly_collection()
 
-    assert stats["items_scored"] == 25
-    assert stats["model_shortlist_items"] == 20
-    assert len(model_router.calls) == 20
+    assert stats["items_scored"] == 60
+    assert stats["model_shortlist_items"] == 50
+    assert len(model_router.calls) == 50
 
     await db.close()
 

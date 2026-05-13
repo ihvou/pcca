@@ -80,7 +80,16 @@ class PipelineOrchestrator:
         include_terms: list[str] = []
         exclude_terms: list[str] = []
         min_practicality: float | None = None
-        shortlist_limit = 20
+        # T-152: widened from 20 to 50 to cover items that could land in
+        # a digest. Previously, an item at Pass-1 rank 21+ would never be
+        # reranked → key_message stayed NULL → renderer fell back to raw
+        # `segment_text`/`title_or_text` → user saw promotional/engagement
+        # content like "Hello community! I'd love to invite you all to our
+        # upcoming webinar..." rendered as the brief header. Cost: ~2.5x
+        # Pass-2 LLM calls per run (was ~100 items/run × 5 subjects, now
+        # ~250). At ~30s per batch of 20, adds ~4 min to nightly runs.
+        # Per-subject override via subject_preferences.quality_rules.model_shortlist_limit.
+        shortlist_limit = 50
         description_text = None
         quality_notes = None
         description_getter = getattr(self.subject_service.repository, "get_description_text", None)
