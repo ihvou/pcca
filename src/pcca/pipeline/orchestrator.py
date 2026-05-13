@@ -1206,6 +1206,8 @@ class PipelineOrchestrator:
             "items_scored": 0,
             "scoring_enabled": bool(score),
             "scoring_skipped": False,
+            "cancelled": False,
+            "cancelled_phase": None,
             "segments_seen": 0,
             "segments_score_candidates": 0,
             "segments_scored": 0,
@@ -1291,9 +1293,28 @@ class PipelineOrchestrator:
                     active_threshold,
                     reason,
                 )
+
+        async def collection_cancel_requested() -> bool:
+            if self.runtime_lock_repo is None:
+                return False
+            try:
+                return await self.runtime_lock_repo.cancel_requested(lock_name=lock_name)
+            except Exception:
+                logger.exception("Failed to inspect runtime cancel flag run_id=%s lock_name=%s", run_id, lock_name)
+                return False
+
+        def mark_cancelled(phase: str) -> None:
+            stats["cancelled"] = True
+            stats["cancelled_phase"] = phase
+            metadata["cancelled"] = True
+            metadata["cancelled_phase"] = phase
+            logger.warning("Nightly collection cancellation requested run_id=%s phase=%s", run_id, phase)
+
         try:
             subjects = await self.subject_service.list_subjects()
             stats["subjects_seen"] = len(subjects)
+            active_subjects = [subject for subject in subjects if subject.status == "active"]
+            stats["subjects_active"] = len(active_subjects)
             monitored_sources = await self.source_service.list_monitored_sources()
             if platform_filter:
                 monitored_sources = [source for source in monitored_sources if source.platform == platform_filter]
@@ -1307,8 +1328,25 @@ class PipelineOrchestrator:
             )
 
             changed_items: dict[int, CollectedItem] = {}
-            for source in monitored_sources:
+            for source_index, source in enumerate(monitored_sources, start=1):
                 source_started_at = time.monotonic()
+                if await collection_cancel_requested():
+                    mark_cancelled("collection")
+                    break
+                self._emit_progress(
+                    progress_callback,
+                    {
+                        "kind": "collection",
+                        "phase": "source",
+                        "run_id": run_id,
+                        "run_type": "nightly_collection",
+                        "source_index": source_index,
+                        "source_total": len(monitored_sources),
+                        "source_id": source.source_id,
+                        "platform": source.platform,
+                        "display_name": source.display_name,
+                    },
+                )
                 if source.platform in circuit_broken:
                     stats["sources_skipped_circuit_breaker"] += 1
                     circuit_skipped[source.platform] = circuit_skipped.get(source.platform, 0) + 1
@@ -1443,6 +1481,21 @@ class PipelineOrchestrator:
                         len(items),
                         int((time.monotonic() - source_started_at) * 1000),
                     )
+                    self._emit_progress(
+                        progress_callback,
+                        {
+                            "kind": "collection_done",
+                            "phase": "source",
+                            "run_id": run_id,
+                            "run_type": "nightly_collection",
+                            "source_index": source_index,
+                            "source_total": len(monitored_sources),
+                            "source_id": source.source_id,
+                            "platform": source.platform,
+                            "display_name": source.display_name,
+                            "item_count": len(items),
+                        },
+                    )
                     if items:
                         upsert_stats = await self.item_repo.upsert_many(items)
                         stats["items_inserted"] += upsert_stats["inserted"]
@@ -1514,7 +1567,14 @@ class PipelineOrchestrator:
                     stats["collector_errors"] += 1
                     record_platform_failure(source.platform, reason="exception")
 
-            if stats["auto_backfill_enabled"] and changed_items:
+            if stats["cancelled"]:
+                stats["scoring_skipped"] = True
+                logger.warning(
+                    "Nightly collection post-collection work skipped due cancellation run_id=%s changed_items=%d",
+                    run_id,
+                    len(changed_items),
+                )
+            elif stats["auto_backfill_enabled"] and changed_items:
                 try:
                     logger.info(
                         "Auto embedding backfill started run_id=%s changed_items=%d include_segments=True",
@@ -1567,17 +1627,20 @@ class PipelineOrchestrator:
                     len(changed_items),
                 )
 
-            if score:
+            if score and not stats["cancelled"]:
                 changed_rows = list(changed_items.items())
-                metadata["scoring_subjects"] = [subject.name for subject in subjects]
-                for subject_index, subject in enumerate(subjects, start=1):
+                metadata["scoring_subjects"] = [subject.name for subject in active_subjects]
+                for subject_index, subject in enumerate(active_subjects, start=1):
+                    if await collection_cancel_requested():
+                        mark_cancelled("scoring")
+                        break
                     event = {
                         "kind": "scoring",
                         "phase": "scoring",
                         "run_id": run_id,
                         "run_type": "nightly_collection",
                         "subject_index": subject_index,
-                        "subject_total": len(subjects),
+                        "subject_total": len(active_subjects),
                         "subject_id": subject.id,
                         "subject_name": subject.name,
                     }
@@ -1587,7 +1650,7 @@ class PipelineOrchestrator:
                         run_id,
                         subject.name,
                         subject_index,
-                        len(subjects),
+                        len(active_subjects),
                     )
                     self._emit_progress(progress_callback, event)
                     inactive_source_ids = await self.source_service.list_inactive_source_ids_for_subject(subject.id)
@@ -1626,10 +1689,12 @@ class PipelineOrchestrator:
             metadata["circuit_broken_reasons_by_platform"] = dict(sorted(circuit_broken_reasons.items()))
             metadata["circuit_skipped"] = dict(sorted(circuit_skipped.items()))
             self._copy_embedding_degradation_metadata(stats, metadata)
-            await self.run_log_repo.finish_run(run_id, status="success", stats=stats, metadata=metadata)
+            finish_status = "cancelled" if stats["cancelled"] else "success"
+            await self.run_log_repo.finish_run(run_id, status=finish_status, stats=stats, metadata=metadata)
             logger.info(
-                "Nightly collection succeeded run_id=%s duration_ms=%d stats=%s",
+                "Nightly collection finished run_id=%s status=%s duration_ms=%d stats=%s",
                 run_id,
+                finish_status,
                 int((time.monotonic() - run_started_at) * 1000),
                 stats,
             )

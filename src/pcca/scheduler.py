@@ -85,22 +85,67 @@ class JobRunner:
     digest_renderer: DigestRenderer = field(default_factory=TelegramDigestRenderer)
     min_brief_relevance_score: float = 0.55
 
-    async def run_nightly_collection(self) -> None:
+    async def run_nightly_collection(
+        self,
+        *,
+        score: bool = True,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
         started_at = time.monotonic()
         if self.pipeline_orchestrator is None:
             subjects = await self.subject_service.list_subjects()
             logger.info("Nightly collection placeholder: %d subjects.", len(subjects))
-            return
+            return {"subjects_seen": len(subjects), "items_collected": 0, "placeholder": True}
         try:
-            stats = await self.pipeline_orchestrator.run_nightly_collection()
+            stats = await self.pipeline_orchestrator.run_nightly_collection(
+                score=score,
+                progress_callback=progress_callback,
+            )
             logger.info(
                 "Nightly collection finished duration_ms=%d stats=%s",
                 int((time.monotonic() - started_at) * 1000),
                 stats,
             )
+            return stats
         except Exception:
             logger.exception("Nightly collection failed duration_ms=%d", int((time.monotonic() - started_at) * 1000))
             raise
+
+    async def update_briefs(
+        self,
+        *,
+        subject_ids: set[int] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> dict:
+        collection_stats = await self.run_nightly_collection(score=True, progress_callback=progress_callback)
+        if collection_stats.get("cancelled"):
+            return {"collection": collection_stats, "briefs": {}, "cancelled": True}
+        if collection_stats.get("skipped_already_running"):
+            return {
+                "collection": collection_stats,
+                "briefs": {},
+                "skipped_already_running": True,
+            }
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "kind": "delivery",
+                    "phase": "brief_delivery",
+                    "subject_ids": sorted(subject_ids) if subject_ids is not None else None,
+                }
+            )
+        brief_stats = await self.run_smart_briefs(
+            subject_ids=subject_ids,
+            progress_callback=progress_callback,
+        )
+        return {"collection": collection_stats, "briefs": brief_stats}
+
+    async def cancel_update_briefs(self) -> dict:
+        repo = getattr(self.pipeline_orchestrator, "runtime_lock_repo", None) if self.pipeline_orchestrator else None
+        if repo is None:
+            return {"cancel_requested": False, "reason": "collection_not_running"}
+        requested = await repo.request_cancel(lock_name="nightly_collection")
+        return {"cancel_requested": requested}
 
     async def run_morning_digest(
         self,
@@ -132,6 +177,7 @@ class JobRunner:
             subjects = await self.subject_service.list_subjects()
             if subject_ids is not None:
                 subjects = [subject for subject in subjects if subject.id in subject_ids]
+            subjects = [subject for subject in subjects if subject.status == "active"]
             stats["subjects_seen"] = len(subjects)
             logger.info(
                 "Morning digest run started run_id=%s run_type=%s subjects=%d force_rebuild=%s smart=%s subject_ids=%s",

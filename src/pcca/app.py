@@ -174,6 +174,7 @@ class PCCAApp:
                 subject_draft_repo=subject_draft_repo,
                 preference_extractor=PreferenceExtractionService(model_router=model_router),
                 voice_transcriber=VoiceTranscriptionService(),
+                item_score_repo=ItemScoreRepository(conn=self.db.conn),
             )
             await self.telegram_service.start()
         elif with_telegram:
@@ -203,6 +204,8 @@ class PCCAApp:
                 read_content_action=self.scheduler.job_runner.run_nightly_collection,
                 get_digest_action=self.scheduler.job_runner.run_smart_briefs,
                 rebuild_digest_action=self.scheduler.job_runner.rebuild_todays_digest,
+                update_briefs_action=self.scheduler.job_runner.update_briefs,
+                cancel_update_action=self.scheduler.job_runner.cancel_update_briefs,
             )
         logger.info("PCCA app started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 

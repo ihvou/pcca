@@ -729,6 +729,69 @@ async def test_pipeline_runtime_lock_rejects_overlapping_collection(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_pipeline_cancel_flag_stops_after_current_source(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject("Vibe Coding", include_terms=["vibe coding"])
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="rss",
+        account_or_channel_id="feed://one",
+        display_name="One",
+        priority=1,
+    )
+    await source_service.add_source_to_subject(
+        subject_name="Vibe Coding",
+        platform="rss",
+        account_or_channel_id="feed://two",
+        display_name="Two",
+        priority=1,
+    )
+
+    collector = BlockingCollector()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        collectors={"rss": collector},
+    )
+
+    first = asyncio.create_task(orchestrator.run_nightly_collection())
+    try:
+        await asyncio.wait_for(collector.entered.wait(), timeout=1)
+        assert orchestrator.runtime_lock_repo is not None
+        requested = await orchestrator.runtime_lock_repo.request_cancel(lock_name="nightly_collection")
+        assert requested is True
+        collector.release.set()
+        stats = await first
+    finally:
+        collector.release.set()
+        if not first.done():
+            first.cancel()
+            try:
+                await first
+            except asyncio.CancelledError:
+                pass
+
+    assert stats["cancelled"] is True
+    assert stats["cancelled_phase"] == "collection"
+    assert stats["sources_crawled"] == 1
+    assert stats["scoring_skipped"] is True
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_run_nightly_once_no_backfill_skips_embed(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()

@@ -79,6 +79,59 @@ class SubjectRepository:
         )
         await self.conn.commit()
 
+    async def update_status(self, subject_id: int, status: str) -> Subject:
+        normalized = status.strip().lower()
+        if normalized not in {"active", "paused"}:
+            raise ValueError("Subject status must be active or paused.")
+        cursor = await self.conn.execute(
+            """
+            UPDATE subjects
+            SET status = ?
+            WHERE id = ?
+            """,
+            (normalized, subject_id),
+        )
+        await self.conn.commit()
+        if int(cursor.rowcount or 0) == 0:
+            raise ValueError(f"Subject {subject_id} not found.")
+        return await self.get_by_id(subject_id)
+
+    async def rename(self, subject_id: int, name: str) -> Subject:
+        normalized_name = " ".join(name.split()).strip()
+        if not normalized_name:
+            raise ValueError("Subject name cannot be empty.")
+        existing = await self.get_by_name(normalized_name)
+        if existing is not None and existing.id != subject_id:
+            raise ValueError(f"Subject already exists: {normalized_name}")
+        cursor = await self.conn.execute(
+            """
+            UPDATE subjects
+            SET name = ?,
+                telegram_hashtag = ?
+            WHERE id = ?
+            """,
+            (normalized_name, self._to_camel_hashtag(normalized_name), subject_id),
+        )
+        await self.conn.commit()
+        if int(cursor.rowcount or 0) == 0:
+            raise ValueError(f"Subject {subject_id} not found.")
+        return await self.get_by_id(subject_id)
+
+    async def update_min_relevance_threshold(self, subject_id: int, threshold: float | None) -> Subject:
+        value = None if threshold is None else max(0.0, min(1.0, float(threshold)))
+        cursor = await self.conn.execute(
+            """
+            UPDATE subjects
+            SET min_relevance_threshold = ?
+            WHERE id = ?
+            """,
+            (value, subject_id),
+        )
+        await self.conn.commit()
+        if int(cursor.rowcount or 0) == 0:
+            raise ValueError(f"Subject {subject_id} not found.")
+        return await self.get_by_id(subject_id)
+
     async def get_description_text(self, subject_id: int) -> str | None:
         row = await (
             await self.conn.execute(

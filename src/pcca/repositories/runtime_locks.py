@@ -19,8 +19,8 @@ class RuntimeLockRepository:
         )
         cursor = await self.conn.execute(
             """
-            INSERT OR IGNORE INTO runtime_locks(lock_name, owner_id, expires_at)
-            VALUES (?, ?, datetime('now', ?))
+            INSERT OR IGNORE INTO runtime_locks(lock_name, owner_id, expires_at, cancel_requested)
+            VALUES (?, ?, datetime('now', ?), 0)
             """,
             (lock_name, owner_id, f"+{max(1, int(ttl_seconds))} seconds"),
         )
@@ -41,7 +41,7 @@ class RuntimeLockRepository:
         row = await (
             await self.conn.execute(
                 """
-                SELECT lock_name, owner_id, acquired_at, expires_at
+                SELECT lock_name, owner_id, acquired_at, expires_at, cancel_requested
                 FROM runtime_locks
                 WHERE lock_name = ?
                 """,
@@ -49,3 +49,20 @@ class RuntimeLockRepository:
             )
         ).fetchone()
         return dict(row) if row is not None else None
+
+    async def request_cancel(self, *, lock_name: str) -> bool:
+        cursor = await self.conn.execute(
+            """
+            UPDATE runtime_locks
+            SET cancel_requested = 1
+            WHERE lock_name = ?
+              AND expires_at > CURRENT_TIMESTAMP
+            """,
+            (lock_name,),
+        )
+        await self.conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
+    async def cancel_requested(self, *, lock_name: str) -> bool:
+        row = await self.get(lock_name=lock_name)
+        return bool(row and int(row.get("cancel_requested") or 0))

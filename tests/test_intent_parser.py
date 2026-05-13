@@ -19,6 +19,11 @@ def test_parse_list_subjects() -> None:
     assert parsed.action is IntentAction.LIST_SUBJECTS
 
 
+def test_parse_edit_subjects() -> None:
+    parsed = parse_intent("Edit subjects")
+    assert parsed.action is IntentAction.LIST_SUBJECTS
+
+
 def test_parse_add_source() -> None:
     parsed = parse_intent("Add source x:borischerny to Vibe Coding")
     assert parsed.action is IntentAction.ADD_SOURCE
@@ -81,6 +86,11 @@ def test_parse_run_get_digest() -> None:
 def test_parse_run_briefs() -> None:
     parsed = parse_intent("/briefs")
     assert parsed.action is IntentAction.RUN_GET_DIGEST
+
+
+def test_parse_update_briefs() -> None:
+    parsed = parse_intent("Update Briefs")
+    assert parsed.action is IntentAction.RUN_UPDATE_BRIEFS
 
 
 def test_parse_rebuild_briefs() -> None:

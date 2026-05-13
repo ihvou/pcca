@@ -16,6 +16,8 @@ CREATE_PATTERNS = (
 LIST_PATTERNS = (
     r"\blist\b.*\b(subjects|topics)\b",
     r"\bwhat\b.*\b(subjects|topics)\b",
+    r"\bedit\b.*\b(subjects|topics)\b",
+    r"^\s*edit subjects\s*$",
 )
 
 LIST_SOURCES_PATTERNS = (
@@ -169,6 +171,16 @@ def parse_intent(text: str) -> ParsedIntent:
         "run digest",
     }:
         return ParsedIntent(action=IntentAction.RUN_GET_DIGEST, raw_text=text)
+
+    if lowered in {
+        "/update_briefs",
+        "update briefs",
+        "update briefs now",
+        "run update briefs",
+        "refresh briefs",
+        "refresh briefs now",
+    }:
+        return ParsedIntent(action=IntentAction.RUN_UPDATE_BRIEFS, raw_text=text)
 
     if lowered in {
         "/rebuild_briefs",

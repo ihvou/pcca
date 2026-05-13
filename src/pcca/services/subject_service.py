@@ -51,6 +51,19 @@ class SubjectService:
     async def list_subjects(self) -> list[Subject]:
         return await self.repository.list_all()
 
+    async def set_subject_status(self, subject_id: int, status: str) -> Subject:
+        return await self.repository.update_status(subject_id, status)
+
+    async def rename_subject(self, subject_id: int, name: str) -> Subject:
+        return await self.repository.rename(subject_id, name)
+
+    async def update_subject_description(self, subject_id: int, description_text: str) -> Subject:
+        await self.repository.update_description(subject_id, description_text)
+        return await self.repository.get_by_id(subject_id)
+
+    async def set_subject_min_relevance_threshold(self, subject_id: int, threshold: float | None) -> Subject:
+        return await self.repository.update_min_relevance_threshold(subject_id, threshold)
+
     @staticmethod
     def _clean_terms(terms: list[str]) -> list[str]:
         out: list[str] = []

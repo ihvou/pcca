@@ -69,13 +69,15 @@ In Telegram, with the bot:
 
 | You want to… | Do |
 |---|---|
-| Get today's Briefs | `/briefs` |
+| Refresh sources and get Briefs | Tap **Update Briefs** or send `/update_briefs` |
+| Re-send already scored Briefs | `/briefs` |
 | React to a Brief | Tap 👍 / 👎 / 🔖 / 🚫 on the Brief message |
 | Expand a Brief | Tap 📖 More |
 | Give specific feedback | Reply to the Brief with text — *"less hype like this"*, *"no cursor content"*, etc. |
 | Create another subject | Describe it in free form: *"I want a separate stream for Ukrainian Sole Proprietor regulations."* |
+| Pause/rename/tune a subject | Tap **Edit Subjects** |
 | Refine a subject | *"Refine Vibe Coding: include release notes; exclude motivation"* |
-| List subjects/sources | *"List subjects"*, *"List sources for Vibe Coding"* |
+| List sources | *"List sources for Vibe Coding"* |
 | See setup checklist | `/setup` |
 
 If a session expires (you logged out somewhere), PCCA marks the source as
@@ -92,8 +94,9 @@ needed.
   it's empty, paste the token back and restart the agent. Logs at
   `.pcca/logs/pcca.log` will say `Telegram service will be disabled` if the
   token is missing.
-- **No items collected.** Run `/read_content`, then check the wizard's Logs
-  tab. Sources flagged `needs_reauth` need session repair from the Sources tab.
+- **No items collected.** Use the wizard's Sources → Get Content action, then
+  check the Debug → Logs tab. Sources flagged `needs_reauth` need session
+  repair from the Sources tab.
 - **Briefs feel stale after preference change.** Use `/briefs`; it now rebuilds
   automatically when preferences changed since the last delivered Brief.
 - **A feature says a package is missing or silently falls back.** Run

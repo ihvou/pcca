@@ -19,6 +19,7 @@ from telegram.ext import (
 
 from pcca.digest_renderer import BriefPayload, EXPAND_BRIEF_ACTION, escape_markdown_v2
 from pcca.models import IntentAction
+from pcca.repositories.item_scores import ItemScoreRepository
 from pcca.repositories.subject_drafts import DESKTOP_SUBJECT_DRAFT_CHAT_ID, SubjectDraft, SubjectDraftRepository
 from pcca.services.feedback_service import FeedbackService
 from pcca.services.intent_parser import parse_intent
@@ -35,11 +36,17 @@ from pcca.services.subject_service import SubjectService
 from pcca.services.voice_transcription_service import VoiceTranscriptionService
 
 logger = logging.getLogger(__name__)
-STALE_BRIEF_EXPAND_MESSAGE = "This Brief is from an earlier delivery. Tap 'Get Briefs' to refresh and try again."
+STALE_BRIEF_EXPAND_MESSAGE = "This Brief is from an earlier delivery. Tap 'Update Briefs' to refresh and try again."
 
 
 ManualAction = Callable[[], Awaitable[Any]]
 SubjectScopedAction = Callable[..., Awaitable[Any]]
+
+
+@dataclass(frozen=True)
+class PendingSubjectEdit:
+    subject_id: int
+    action: str
 
 
 @dataclass
@@ -54,11 +61,16 @@ class TelegramService:
     voice_transcriber: VoiceTranscriptionService
     subject_draft_repo: SubjectDraftRepository | None = None
     preference_extractor: PreferenceExtractionService | None = None
+    item_score_repo: ItemScoreRepository | None = None
     application: Application | None = None
     read_content_action: ManualAction | None = None
     get_digest_action: SubjectScopedAction | None = None
     rebuild_digest_action: SubjectScopedAction | None = None
+    update_briefs_action: SubjectScopedAction | None = None
+    cancel_update_action: ManualAction | None = None
     _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _pending_subject_edits: dict[str, PendingSubjectEdit] = field(default_factory=dict, init=False)
+    _progress_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
 
     def attach_manual_actions(
         self,
@@ -66,10 +78,14 @@ class TelegramService:
         read_content_action: ManualAction,
         get_digest_action: SubjectScopedAction,
         rebuild_digest_action: SubjectScopedAction | None = None,
+        update_briefs_action: SubjectScopedAction | None = None,
+        cancel_update_action: ManualAction | None = None,
     ) -> None:
         self.read_content_action = read_content_action
         self.get_digest_action = get_digest_action
         self.rebuild_digest_action = rebuild_digest_action
+        self.update_briefs_action = update_briefs_action
+        self.cancel_update_action = cancel_update_action
 
     async def start(self) -> None:
         started_at = time.monotonic()
@@ -82,13 +98,16 @@ class TelegramService:
         app.add_handler(CommandHandler("onboard", self._on_setup))
         app.add_handler(CommandHandler("read_content", self._on_read_content_command))
         app.add_handler(CommandHandler("briefs", self._on_briefs_command))
+        app.add_handler(CommandHandler("update_briefs", self._on_update_briefs_command))
         app.add_handler(CommandHandler("rebuild_briefs", self._on_rebuild_briefs_command))
         app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
         app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
+        app.add_handler(CommandHandler("cancel", self._on_cancel_command))
         app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
         app.add_handler(CallbackQueryHandler(self._on_more_callback, pattern=r"^more:"))
         app.add_handler(CallbackQueryHandler(self._on_route_subject_callback, pattern=r"^route:"))
         app.add_handler(CallbackQueryHandler(self._on_run_subject_callback, pattern=r"^run_subject:"))
+        app.add_handler(CallbackQueryHandler(self._on_subject_manage_callback, pattern=r"^subject_manage:"))
         app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
         app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
@@ -272,7 +291,7 @@ class TelegramService:
             "3. Start the local agent, then send `/start` here to verify Telegram.\n"
             "4. Log into platforms in your normal browser, then capture sessions in the desktop app.\n"
             "5. Stage follows/subscriptions, review them, and create your first subject.\n"
-            "6. Click Smoke Crawl + Test Briefs, or use `/read_content` then `/briefs` here.\n\n"
+            "6. Click Smoke Crawl + Test Briefs, or tap Update Briefs here.\n\n"
             "Connected-account onboarding is available for "
             "X/LinkedIn/YouTube/Substack/Medium/Spotify/Apple Podcasts."
             f"{reauth_note}",
@@ -282,17 +301,7 @@ class TelegramService:
         if update.message is None:
             return
         await update.message.reply_text(
-            "I can:\n"
-            "- show the Scenario 1 setup checklist (`/setup`)\n"
-            "- create/list subjects\n"
-            "- list/remove imported sources\n"
-            "- show/refine preferences per subject\n"
-            "- run collection now (`/read_content`)\n"
-            "- get Briefs now (`/briefs`)\n"
-            "- force rebuild today's Briefs (`/rebuild_briefs`)\n"
-            "- show delivery settings (`/settings`)\n"
-            "- collect per-Brief feedback (buttons or replies)\n"
-            "- accept voice notes (transcription backend pending)",
+            self._help_text(),
             reply_markup=self._quick_actions_reply_keyboard(),
         )
         await self._send_quick_actions(update.message)
@@ -319,10 +328,16 @@ class TelegramService:
             return
         await self._run_briefs_from_message(update.message)
 
+    async def _on_update_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._run_update_briefs_from_message(update.message)
+
     async def _on_rebuild_briefs_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
-        await self._run_rebuild_digest_from_message(update.message)
+        await update.message.reply_text("`/rebuild_briefs` is now `/update_briefs`. I will update Briefs now.", parse_mode="Markdown")
+        await self._run_update_briefs_from_message(update.message)
 
     async def _on_get_digest_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
@@ -334,10 +349,15 @@ class TelegramService:
         if update.message is None:
             return
         await update.message.reply_text(
-            "`/rebuild_digest` is now `/rebuild_briefs`. I will rebuild today's Briefs now.",
+            "`/rebuild_digest` is now `/update_briefs`. I will update Briefs now.",
             parse_mode="Markdown",
         )
-        await self._run_rebuild_digest_from_message(update.message)
+        await self._run_update_briefs_from_message(update.message)
+
+    async def _on_cancel_command(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.message is None:
+            return
+        await self._cancel_update_from_message(update.message)
 
     async def _on_text(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None or update.message.text is None:
@@ -354,6 +374,8 @@ class TelegramService:
                 title=update.effective_chat.title or update.effective_chat.full_name,
             )
         if await self._record_brief_reply_feedback(update, update.message.text):
+            return
+        if await self._handle_pending_subject_edit(update, update.message.text):
             return
         await self._handle_text_intent(update, update.message.text)
 
@@ -423,12 +445,7 @@ class TelegramService:
             return
 
         if intent.action is IntentAction.LIST_SUBJECTS:
-            subjects = await self.subject_service.list_subjects()
-            if not subjects:
-                await update.message.reply_text("No subjects yet. You can create one in free form.")
-                return
-            lines = [f"- {subject.name}" for subject in subjects]
-            await update.message.reply_text("Current subjects:\n" + "\n".join(lines))
+            await self._send_subject_management(update.message)
             return
 
         if intent.action is IntentAction.ADD_SOURCE:
@@ -598,8 +615,12 @@ class TelegramService:
             await self._run_briefs_from_message(update.message)
             return
 
+        if intent.action is IntentAction.RUN_UPDATE_BRIEFS:
+            await self._run_update_briefs_from_message(update.message)
+            return
+
         if intent.action is IntentAction.RUN_REBUILD_DIGEST:
-            await self._run_rebuild_digest_from_message(update.message)
+            await self._run_update_briefs_from_message(update.message)
             return
 
         if intent.action is IntentAction.HELP:
@@ -865,13 +886,70 @@ class TelegramService:
             thread_id,
             subject.id,
         )
+        if action_name == "update":
+            await self._run_update_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            return
         if action_name == "briefs":
             await self._run_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
             return
         if action_name == "rebuild":
-            await self._run_rebuild_digest_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            await self._run_update_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
             return
         await message.reply_text("That subject action is not supported yet.")
+
+    async def _on_subject_manage_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
+        if update.callback_query is None:
+            return
+        query = update.callback_query
+        message = query.message
+        if message is None:
+            await query.answer("This subject editor is no longer available.")
+            return
+        parts = (query.data or "").split(":")
+        action = parts[1] if len(parts) >= 2 else ""
+        if action == "list":
+            await query.answer()
+            await self._send_subject_management(message, edit_existing=True)
+            return
+        if len(parts) < 3:
+            await query.answer("This subject action is invalid.")
+            return
+        try:
+            subject_id = int(parts[2])
+        except ValueError:
+            await query.answer("This subject selection is invalid.")
+            return
+        try:
+            subject = await self.subject_service.repository.get_by_id(subject_id)
+        except ValueError:
+            await query.answer("That subject no longer exists.")
+            return
+
+        if action == "open":
+            await query.answer(subject.name)
+            await self._edit_subject_detail_message(message, subject_id)
+            return
+        if action == "toggle":
+            next_status = "active" if subject.status == "paused" else "paused"
+            subject = await self.subject_service.set_subject_status(subject_id, next_status)
+            await query.answer(f"{subject.name} is now {subject.status}.")
+            await self._edit_subject_detail_message(message, subject_id)
+            return
+        if action in {"rename", "description", "floor"}:
+            key = self._message_scope_key(message)
+            self._pending_subject_edits[key] = PendingSubjectEdit(subject_id=subject_id, action=action)
+            prompts = {
+                "rename": f"Send the new name for {subject.name}.",
+                "description": f"Send the new description for {subject.name}. This will invalidate the subject embedding.",
+                "floor": (
+                    f"Send a relevance floor for {subject.name}: a number from 0.0 to 1.0, "
+                    "or `default` to use the global setting."
+                ),
+            }
+            await query.answer("Waiting for your reply.")
+            await message.reply_text(prompts[action])
+            return
+        await query.answer("That subject action is not supported yet.")
 
     async def _on_run_callback(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.callback_query is None:
@@ -884,11 +962,17 @@ class TelegramService:
         if data == "run:read":
             await self._run_manual_action_from_message(message, action_name="read content", action=self.read_content_action)
             return
+        if data == "run:update":
+            await self._run_update_briefs_from_message(message)
+            return
         if data in {"run:briefs", "run:digest"}:
             await self._run_briefs_from_message(message)
             return
         if data in {"run:rebuild", "run:rebuild_briefs"}:
-            await self._run_rebuild_digest_from_message(message)
+            await self._run_update_briefs_from_message(message)
+            return
+        if data == "run:help":
+            await message.reply_text(self._help_text(), reply_markup=self._quick_actions_reply_keyboard())
             return
 
     async def _run_briefs_from_message(
@@ -918,6 +1002,148 @@ class TelegramService:
 
         action_name = f"get briefs for {subject_name}" if subject_name else "get briefs"
         await self._run_manual_action_from_message(message, action_name=action_name, action=action)
+
+    async def _run_update_briefs_from_message(
+        self,
+        message,
+        subject_ids: set[int] | None = None,
+        subject_name: str | None = None,
+    ) -> None:
+        if self.update_briefs_action is None:
+            await message.reply_text(
+                "`update briefs` action is not available yet in this runtime.",
+                parse_mode="Markdown",
+            )
+            return
+        if subject_ids is None:
+            resolved = await self._resolve_subject_ids_for_message(
+                message,
+                action_label="Update Briefs",
+                callback_action="update",
+            )
+            if resolved is None:
+                return
+            subject_ids, subject_name = resolved
+        if self._manual_action_lock.locked():
+            await message.reply_text("Another manual run is in progress. Please wait a bit and try again.")
+            return
+
+        status_message = await message.reply_text(
+            "Updating Briefs. This usually takes 30-70 min depending on content volume.\n"
+            "Send /cancel to stop after the current source finishes."
+        )
+        last_edit_at = 0.0
+
+        def progress(event: dict[str, Any]) -> None:
+            nonlocal last_edit_at
+            now = time.monotonic()
+            # Telegram edit limits are easy to hit during source loops; keep
+            # progress visible without trying to animate every single event.
+            if now - last_edit_at < 2.0 and event.get("kind") not in {"delivery", "finished"}:
+                return
+            last_edit_at = now
+            text = self._format_update_progress(event)
+            if not text:
+                return
+            self._track_task(self._edit_message_text(status_message, text))
+
+        started_at = time.monotonic()
+        try:
+            async with self._manual_action_lock:
+                stats = await self.update_briefs_action(subject_ids=subject_ids, progress_callback=progress)
+            if isinstance(stats, dict) and stats.get("cancelled"):
+                await self._edit_message_text(status_message, "Update Briefs cancelled. No partial Briefs were delivered.")
+                return
+            if isinstance(stats, dict) and stats.get("skipped_already_running"):
+                await self._edit_message_text(status_message, "Another collection run is already in progress. Try again later.")
+                return
+            summary = self._format_update_summary(stats if isinstance(stats, dict) else {})
+            await self._edit_message_text(status_message, summary)
+            logger.info(
+                "Telegram Update Briefs finished subject_ids=%s duration_ms=%d stats=%s",
+                sorted(subject_ids) if subject_ids is not None else None,
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
+        except Exception:
+            logger.exception(
+                "Telegram Update Briefs failed subject_ids=%s duration_ms=%d",
+                sorted(subject_ids) if subject_ids is not None else None,
+                int((time.monotonic() - started_at) * 1000),
+            )
+            await self._edit_message_text(status_message, "`update briefs` failed. Check logs and try again.")
+
+    async def _cancel_update_from_message(self, message) -> None:
+        if self.cancel_update_action is None:
+            await message.reply_text("No cancellable update action is available in this runtime.")
+            return
+        result = await self.cancel_update_action()
+        if isinstance(result, dict) and result.get("cancel_requested"):
+            await message.reply_text("Cancel requested. The current source will finish, then the update will stop.")
+            return
+        await message.reply_text("No Update Briefs run is active right now.")
+
+    def _track_task(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._progress_tasks.add(task)
+        task.add_done_callback(self._progress_tasks.discard)
+
+    async def _edit_message_text(self, message, text: str) -> None:
+        try:
+            await message.edit_text(text)
+        except Exception:
+            logger.debug("Telegram progress edit failed; sending progress as reply fallback.", exc_info=True)
+            try:
+                await message.reply_text(text)
+            except Exception:
+                logger.exception("Telegram progress reply fallback failed.")
+
+    @staticmethod
+    def _format_update_progress(event: dict[str, Any]) -> str | None:
+        kind = str(event.get("kind") or "")
+        if kind == "collection":
+            return (
+                f"Reading {event.get('platform')} "
+                f"({event.get('source_index')}/{event.get('source_total')})...\n"
+                f"{event.get('display_name') or event.get('source_id')}"
+            )
+        if kind == "collection_done":
+            return (
+                f"Read {event.get('platform')} "
+                f"({event.get('source_index')}/{event.get('source_total')}). "
+                f"New/raw items from source: {event.get('item_count', 0)}."
+            )
+        if kind == "auto_backfill":
+            return f"Preparing embeddings ({event.get('processed', 0)}/{event.get('total', 0)})..."
+        if kind == "embedding_item_backfill":
+            return f"Embedding items ({event.get('processed', 0)}/{event.get('total', 0)})..."
+        if kind == "embedding_segment_backfill":
+            return f"Embedding segments ({event.get('processed', 0)}/{event.get('total', 0)})..."
+        if kind == "embedding_not_warmed":
+            return f"Cold embedding cache for {event.get('subject_name')}; using keyword fallback while warming catches up."
+        if kind == "scoring":
+            return (
+                f"Scoring subject {event.get('subject_index')}/{event.get('subject_total')}: "
+                f"{event.get('subject_name')}..."
+            )
+        if kind == "delivery":
+            return "Delivering Briefs..."
+        return None
+
+    @staticmethod
+    def _format_update_summary(stats: dict[str, Any]) -> str:
+        collection = stats.get("collection") if isinstance(stats.get("collection"), dict) else {}
+        briefs = stats.get("briefs") if isinstance(stats.get("briefs"), dict) else {}
+        delivered = int(briefs.get("briefs_sent") or 0)
+        subjects = int(briefs.get("subjects_with_routes") or 0)
+        collected = int(collection.get("items_collected") or 0)
+        inserted = int(collection.get("items_inserted") or 0)
+        updated = int(collection.get("items_updated") or 0)
+        return (
+            f"Update Briefs completed.\n"
+            f"Collected {collected} item(s): {inserted} new, {updated} updated.\n"
+            f"Delivered {delivered} Brief(s) for {subjects} subject(s)."
+        )
 
     async def _run_rebuild_digest_from_message(
         self,
@@ -997,6 +1223,121 @@ class TelegramService:
             reply_markup=self._subject_action_keyboard(subjects, callback_action),
         )
         return None
+
+    async def _send_subject_management(self, message, *, edit_existing: bool = False) -> None:
+        subjects = await self.subject_service.list_subjects()
+        if not subjects:
+            text = "No subjects yet. You can create one in free form."
+            if edit_existing and hasattr(message, "edit_text"):
+                await message.edit_text(text)
+            else:
+                await message.reply_text(text)
+            return
+        rows = []
+        for subject in subjects:
+            rows.append(await self._format_subject_manage_row(subject))
+        text = "Edit Subjects:\n" + "\n".join(rows) + "\n\nTip: open the wizard to manage sources for a subject."
+        markup = self._subject_management_keyboard(subjects)
+        if edit_existing and hasattr(message, "edit_text"):
+            await message.edit_text(text, reply_markup=markup)
+        else:
+            await message.reply_text(text, reply_markup=markup)
+
+    async def _edit_subject_detail_message(self, message, subject_id: int) -> None:
+        subject = await self.subject_service.repository.get_by_id(subject_id)
+        text = await self._format_subject_detail(subject)
+        await message.edit_text(text, reply_markup=self._subject_detail_keyboard(subject))
+
+    async def _format_subject_manage_row(self, subject) -> str:
+        source_count = await self._source_count_for_subject(subject)
+        top_score = await self._top_score_for_subject(subject.id)
+        status = "paused" if subject.status == "paused" else "active"
+        floor = (
+            f", floor {subject.min_relevance_threshold:.2f}"
+            if subject.min_relevance_threshold is not None
+            else ""
+        )
+        score = f", top {top_score:.2f}" if top_score is not None else ""
+        return f"- {subject.name} ({status}) — {source_count} sources{score}{floor}"
+
+    async def _format_subject_detail(self, subject) -> str:
+        source_count = await self._source_count_for_subject(subject)
+        description = await self.subject_service.repository.get_description_text(subject.id)
+        top_score = await self._top_score_for_subject(subject.id)
+        floor = (
+            f"{subject.min_relevance_threshold:.2f}"
+            if subject.min_relevance_threshold is not None
+            else "global default"
+        )
+        score = f"{top_score:.2f}" if top_score is not None else "not scored yet"
+        return (
+            f"{subject.name}\n"
+            f"Status: {subject.status}\n"
+            f"Sources: {source_count}\n"
+            f"Top score: {score}\n"
+            f"Relevance floor: {floor}\n\n"
+            f"Description:\n{description or '(empty)'}\n\n"
+            "Tip: open the wizard to manage sources for this subject."
+        )
+
+    async def _source_count_for_subject(self, subject) -> int:
+        try:
+            return len(await self.source_service.list_sources_for_subject(subject.name))
+        except Exception:
+            logger.debug("Could not count sources for subject_id=%s", getattr(subject, "id", None), exc_info=True)
+            return 0
+
+    async def _top_score_for_subject(self, subject_id: int) -> float | None:
+        if self.item_score_repo is None:
+            return None
+        try:
+            candidates = await self.item_score_repo.top_candidates(subject_id=subject_id, limit=1)
+        except Exception:
+            logger.debug("Could not read top score for subject_id=%s", subject_id, exc_info=True)
+            return None
+        if not candidates:
+            return None
+        return float(candidates[0].final_score or 0.0)
+
+    async def _handle_pending_subject_edit(self, update: Update, text: str) -> bool:
+        if update.message is None:
+            return False
+        key = self._message_scope_key(update.message)
+        pending = self._pending_subject_edits.get(key)
+        if pending is None:
+            return False
+        lowered = text.strip().lower()
+        if lowered in {"cancel", "/cancel", "never mind", "stop"}:
+            self._pending_subject_edits.pop(key, None)
+            await update.message.reply_text("Subject edit cancelled.")
+            return True
+        try:
+            if pending.action == "rename":
+                subject = await self.subject_service.rename_subject(pending.subject_id, text)
+                await update.message.reply_text(f"Renamed subject to {subject.name}.")
+            elif pending.action == "description":
+                subject = await self.subject_service.update_subject_description(pending.subject_id, text)
+                await update.message.reply_text(
+                    f"Updated description for {subject.name}. The subject embedding will be rebuilt on the next score run."
+                )
+            elif pending.action == "floor":
+                threshold = None if lowered in {"default", "global", "none", "unset"} else float(text.strip())
+                if threshold is not None and not 0.0 <= threshold <= 1.0:
+                    await update.message.reply_text("Please send a number from 0.0 to 1.0, or `default`.")
+                    return True
+                subject = await self.subject_service.set_subject_min_relevance_threshold(
+                    pending.subject_id,
+                    threshold,
+                )
+                label = "global default" if subject.min_relevance_threshold is None else f"{subject.min_relevance_threshold:.2f}"
+                await update.message.reply_text(f"Set relevance floor for {subject.name} to {label}.")
+            else:
+                return False
+        except ValueError as exc:
+            await update.message.reply_text(str(exc))
+            return True
+        self._pending_subject_edits.pop(key, None)
+        return True
 
     async def _run_manual_action_from_message(
         self,
@@ -1089,16 +1430,16 @@ class TelegramService:
     def _quick_action_rows() -> list[list[InlineKeyboardButton]]:
         return [
             [
-                InlineKeyboardButton("Read Content Now", callback_data="run:read"),
-                InlineKeyboardButton("Get Briefs", callback_data="run:briefs"),
-                InlineKeyboardButton("Rebuild Briefs", callback_data="run:rebuild_briefs"),
+                InlineKeyboardButton("Update Briefs", callback_data="run:update"),
+                InlineKeyboardButton("Edit Subjects", callback_data="subject_manage:list"),
+                InlineKeyboardButton("Help", callback_data="run:help"),
             ]
         ]
 
     @staticmethod
     def _quick_actions_reply_keyboard() -> ReplyKeyboardMarkup:
         return ReplyKeyboardMarkup(
-            [["Read Content", "Get Briefs"], ["Rebuild Briefs", "List subjects"], ["Help"]],
+            [["Update Briefs", "Edit Subjects", "Help"]],
             resize_keyboard=True,
             one_time_keyboard=False,
         )
@@ -1128,6 +1469,41 @@ class TelegramService:
         )
 
     @staticmethod
+    def _subject_management_keyboard(subjects) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [[InlineKeyboardButton(subject.name, callback_data=f"subject_manage:open:{subject.id}")] for subject in subjects]
+        )
+
+    @staticmethod
+    def _subject_detail_keyboard(subject) -> InlineKeyboardMarkup:
+        pause_label = "Resume" if subject.status == "paused" else "Pause"
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(pause_label, callback_data=f"subject_manage:toggle:{subject.id}")],
+                [
+                    InlineKeyboardButton("Rename", callback_data=f"subject_manage:rename:{subject.id}"),
+                    InlineKeyboardButton("Edit description", callback_data=f"subject_manage:description:{subject.id}"),
+                ],
+                [InlineKeyboardButton("Adjust relevance floor", callback_data=f"subject_manage:floor:{subject.id}")],
+                [InlineKeyboardButton("Back to subjects", callback_data="subject_manage:list")],
+            ]
+        )
+
+    @staticmethod
+    def _help_text() -> str:
+        return (
+            "I can:\n"
+            "- show the Scenario 1 setup checklist (`/setup`)\n"
+            "- create/edit subjects\n"
+            "- list/remove imported sources\n"
+            "- show/refine preferences per subject\n"
+            "- update Briefs now (`/update_briefs`)\n"
+            "- show delivery settings (`/settings`)\n"
+            "- collect per-Brief feedback (buttons or replies)\n"
+            "- accept voice notes (transcription backend pending)"
+        )
+
+    @staticmethod
     def _parse_callback_subject_id(data: str, *, expected_parts: int) -> int | None:
         parts = data.split(":")
         if len(parts) != expected_parts:
@@ -1154,6 +1530,12 @@ class TelegramService:
     def _message_thread_id(message) -> str | None:
         thread_id = getattr(message, "message_thread_id", None)
         return str(thread_id) if thread_id else None
+
+    @classmethod
+    def _message_scope_key(cls, message) -> str:
+        chat_id = cls._message_chat_id(message)
+        thread_id = cls._message_thread_id(message) or ""
+        return f"{chat_id or 0}:{thread_id}"
 
     async def _link_source(self, *, subject_name: str, platform: str, source_value: str) -> list[str]:
         candidate = source_value.strip()

@@ -483,6 +483,12 @@ MIGRATIONS: list[tuple[int, str]] = [
         ALTER TABLE subjects ADD COLUMN min_relevance_threshold REAL;
         """,
     ),
+    (
+        18,
+        """
+        ALTER TABLE runtime_locks ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0;
+        """,
+    ),
 ]
 
 
