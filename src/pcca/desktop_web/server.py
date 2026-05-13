@@ -780,7 +780,11 @@ function renderRoutes(rows=[]) {
 function renderReauth(rows=[]) {
   if (!rows.length) { reauthBox.className = 'notice ok'; reauthBox.textContent = 'No sources currently need re-login.'; return; }
   reauthBox.className = 'notice bad';
-  reauthBox.textContent = ['Sources needing re-login:', ...rows.map(r => `${r.platform}: ${r.display_name}`)].join('\n');
+  // T-148: show account_or_channel_id (the human handle, e.g. in/hmkhitmane)
+  // instead of display_name (LinkedIn's opaque internal ID like ACoAA...).
+  // For YouTube/X this is the @handle or channel ID, which is also clearer
+  // than display_name in most cases.
+  reauthBox.textContent = ['Sources needing re-login:', ...rows.map(r => `${r.platform}: ${r.account_or_channel_id || r.display_name}`)].join('\n');
 }
 function fillPlatformSelects(platforms=[]) {
   const platformEl = byId('platform');
