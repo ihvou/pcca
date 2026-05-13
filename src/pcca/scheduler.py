@@ -559,13 +559,64 @@ class JobRunner:
         subject_ids: set[int] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
-        return await self.run_morning_digest(
+        # T-146: "Send Briefs" must NOT silently regenerate when no digest
+        # exists for today — that turns a "send" click into a 15-min
+        # scoring run AND destroys whatever prior digest existed. The
+        # wizard's UX contract is: Generate first, then Send. If the user
+        # clicks Send without a prior Generate, surface the gap clearly.
+        today = date.today()
+        target_ids: set[int] | None = subject_ids
+        missing_ids: set[int] = set()
+        if self.digest_repo is not None:
+            existing_ids = await self.digest_repo.list_subject_ids_with_digest_for_date(
+                run_date=today,
+                subject_ids=subject_ids,
+            )
+            if subject_ids is None:
+                # "All subjects" — only attempt to send for those that have
+                # a digest today. Nothing to do if zero generated.
+                target_ids = existing_ids if existing_ids else set()
+            else:
+                target_ids = subject_ids & existing_ids
+                missing_ids = subject_ids - existing_ids
+            if not target_ids:
+                logger.info(
+                    "Send Briefs skipped — no digests generated today subject_ids=%s",
+                    sorted(subject_ids) if subject_ids is not None else None,
+                )
+                return {
+                    "skipped_no_digest_for_today": True,
+                    "subjects_without_digest": (
+                        sorted(missing_ids)
+                        if subject_ids is not None
+                        else []
+                    ),
+                    "subjects_seen": 0,
+                    "subjects_with_routes": 0,
+                    "digests_created_or_reused": 0,
+                    "digests_rebuilt": 0,
+                    "items_selected": 0,
+                    "briefs_sent": 0,
+                    "deliveries_sent": 0,
+                    "deliveries_failed": 0,
+                    "placeholder_briefs_sent": 0,
+                    "renderers_used": {},
+                    "skipped_missing_dependencies": False,
+                }
+        # Force_rebuild=False so we deliver the EXISTING digest_items as
+        # generated, not a fresh re-render with potentially different
+        # top-5 picks from updated scores.
+        result = await self.run_morning_digest(
             run_type="brief_send",
-            force_rebuild=True,
-            subject_ids=subject_ids,
+            force_rebuild=False,
+            subject_ids=target_ids,
             progress_callback=progress_callback,
             deliver=True,
         )
+        if missing_ids:
+            result = dict(result)
+            result["subjects_without_digest"] = sorted(missing_ids)
+        return result
 
     async def run_smart_briefs(
         self,

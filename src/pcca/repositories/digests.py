@@ -93,6 +93,39 @@ class DigestRepository:
             generated_at=row["generated_at"],
         )
 
+    async def list_subject_ids_with_digest_for_date(
+        self,
+        *,
+        run_date: date,
+        subject_ids: set[int] | None = None,
+    ) -> set[int]:
+        """Return the set of subject_ids that have a digest row for the given
+        date AND have at least one digest_item attached.
+
+        Used by T-146 (Send Briefs guard): "Send Briefs" should require a
+        prior "Generate Briefs" click, not silently regenerate from scratch.
+        An empty digest row (created by `get_or_create_digest` but never
+        populated) doesn't count — only digests with items qualify.
+        """
+        params: list[object] = [run_date.isoformat()]
+        subject_filter = ""
+        if subject_ids:
+            placeholders = ",".join("?" for _ in subject_ids)
+            subject_filter = f" AND d.subject_id IN ({placeholders})"
+            params.extend(sorted(subject_ids))
+        rows = await (
+            await self.conn.execute(
+                f"""
+                SELECT DISTINCT d.subject_id
+                FROM digests d
+                JOIN digest_items di ON di.digest_id = d.id
+                WHERE d.run_date = ?{subject_filter}
+                """,
+                tuple(params),
+            )
+        ).fetchall()
+        return {int(row["subject_id"]) for row in rows}
+
     async def delete_digests_for_date(self, *, run_date: date, subject_ids: set[int] | None = None) -> int:
         params: list[object] = [run_date.isoformat()]
         subject_filter = ""

@@ -1818,6 +1818,20 @@ class DesktopCommandService:
             self.log(f"Sending Briefs subject_ids={sorted(subject_ids) if subject_ids else 'all'}.")
             stats = await self._send_briefs_with_available_agent(subject_ids=subject_ids)
             self.log(f"Brief send finished: {json.dumps(stats or {}, sort_keys=True)}")
+            # T-146: surface the "no digest generated today" gap clearly
+            # instead of silently completing as if Briefs were sent. The
+            # wizard's UX contract is Generate first, then Send.
+            if isinstance(stats, dict) and stats.get("skipped_no_digest_for_today"):
+                missing = stats.get("subjects_without_digest") or []
+                if missing:
+                    suffix = f" for subjects {missing}"
+                else:
+                    suffix = ""
+                message = (
+                    "No Briefs generated today" + suffix + ". "
+                    "Click Generate Briefs first, then Send Briefs."
+                )
+                return CommandResult(False, message, {"digest_stats": stats})
             return CommandResult(True, "Briefs sent.", {"digest_stats": stats or {}})
 
         if async_response:

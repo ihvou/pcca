@@ -131,7 +131,8 @@ async def test_t143_pause_resume_round_trip_preserves_subject_fields_and_sources
     source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
     subject = await service.create_subject(
         "AI Tools",
-        include_terms=["claude code"],
+        include_terms=["claude code", "practical workflow"],
+        exclude_terms=["engagement spam", "top ai tools listicle"],
         description_text="Track practical AI tooling.",
         min_relevance_threshold=0.73,
     )
@@ -146,6 +147,12 @@ async def test_t143_pause_resume_round_trip_preserves_subject_fields_and_sources
     resumed = await service.set_subject_status(subject.id, "active")
     sources = await source_service.list_sources_for_subject(subject.name)
     description_text = await subject_repo.get_description_text(subject.id)
+    # T-143 follow-up (2026-05-14): also assert exclude_terms survive
+    # the pause/resume cycle. Original T-143 test had only include_terms
+    # at creation time; this version covers both rule directions.
+    from pcca.repositories.preferences import SubjectPreferenceRepository
+    preferences = await SubjectPreferenceRepository(conn=db.conn).get_latest(subject.id)
+    assert preferences is not None
 
     assert resumed.status == "active"
     assert resumed.name == subject.name
@@ -154,6 +161,9 @@ async def test_t143_pause_resume_round_trip_preserves_subject_fields_and_sources
     assert [(source.platform, source.account_or_channel_id, source.status) for source in sources] == [
         ("youtube", "@openai", "active")
     ]
+    # T-143 follow-up: include_terms AND exclude_terms both survive.
+    assert set(preferences.include_rules.get("topics", [])) == {"claude code", "practical workflow"}
+    assert set(preferences.exclude_rules.get("topics", [])) == {"engagement spam", "top ai tools listicle"}
 
     await db.close()
 

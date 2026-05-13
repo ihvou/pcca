@@ -724,6 +724,51 @@ async def test_desktop_generate_and_send_briefs_scope_to_subject(tmp_path: Path)
 
 
 @pytest.mark.asyncio
+async def test_t146_send_briefs_returns_error_when_no_digest_generated(tmp_path: Path) -> None:
+    """T-146: clicking 'Send Briefs' when no digest exists for today must
+    NOT silently regenerate from scratch (the old behavior). It must
+    return a clear error so the user knows to click Generate Briefs first.
+
+    Live bug from 2026-05-13 review: scheduler.send_generated_briefs
+    called run_morning_digest(force_rebuild=True) unconditionally, which
+    deleted any existing digest AND triggered a 15+ min Pass-2 rescore
+    when the user expected a <5 sec delivery."""
+    settings = make_settings(tmp_path)
+    service = DesktopCommandService(settings_factory=lambda: settings)
+
+    class FakeRunner:
+        async def send_generated_briefs(self, *, subject_ids=None, progress_callback=None):
+            # Scheduler returns this shape when no digest exists today.
+            return {
+                "skipped_no_digest_for_today": True,
+                "subjects_without_digest": sorted(subject_ids) if subject_ids else [],
+                "subjects_seen": 0,
+                "briefs_sent": 0,
+            }
+
+    runner = FakeRunner()
+    fake_scheduler = type("FakeScheduler", (), {"job_runner": runner})()
+    service._agent_app = type("FakeApp", (), {"scheduler": fake_scheduler})()  # type: ignore[assignment]
+    service._agent_task = asyncio.create_task(asyncio.sleep(60))
+    try:
+        result = await service.send_briefs(subject_id=7)
+    finally:
+        service._agent_task.cancel()
+        try:
+            await service._agent_task
+        except asyncio.CancelledError:
+            pass
+
+    assert result.ok is False, "Send Briefs must fail when no digest exists for today."
+    assert "No Briefs generated today" in result.message
+    assert "Click Generate Briefs first" in result.message
+    # The result payload carries the raw scheduler stats so the wizard can
+    # render whatever surface it wants (toast, banner, status indicator).
+    assert result.data["digest_stats"]["skipped_no_digest_for_today"] is True
+    assert result.data["digest_stats"]["subjects_without_digest"] == [7]
+
+
+@pytest.mark.asyncio
 async def test_desktop_state_surfaces_brief_status(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)
