@@ -785,8 +785,33 @@ class PipelineOrchestrator:
                 rerank_source = "model"
             if rerank is not None:
                 delta = float(rerank.score_delta)
-                adjusted_final = max(0.0, min(1.0, scored.final_score + delta))
-                scored.final_score = adjusted_final
+                # T-151 escalation (2026-05-14, run_id=99 production audit):
+                # llama3.1:8b's score_delta is too unreliable to apply. Manual
+                # review of 39 freshly-collected items vs model output: top
+                # genuinely-on-topic items got -0.20 to -0.25 deltas with stock
+                # reason "mentions X but not directly related to the subject" —
+                # uniformly applied to obviously on-topic content. Examples:
+                #   - @ClaudeDevs "Claude Code limits +50%"  Pass-1 0.54 → 0.35
+                #   - @ClaudeDevs "Paid Claude plans API credit" Pass-1 0.60 → 0.38
+                #   - @bcherny "Anthropic Mythos cyber range"  Pass-1 0.58 → 0.32
+                #   - @soumithchintala "Interaction Models demos" Pass-1 0.59 → 0.32
+                # All four are direct AI-tools/Claude content for a subject
+                # whose description literally lists "Claude Code" and "leading
+                # AI companies." Pass-1 (embedding) was correct; Pass-2 destroyed
+                # the signal. T-151 prompt tuning (commit 77777c0) and T-152
+                # shortlist widening (commit ea365f8) did not help — the bias
+                # is in the model's judgment, not the prompt. Asymmetric clamp
+                # (-0.05) wouldn't save Pass-1=0.54 items either.
+                #
+                # Decision: stop applying score_delta. final_score = Pass-1
+                # score. Pass-2 still produces key_message and refined_segment
+                # (which it does well) so digest rendering is unaffected. The
+                # observed delta is still recorded in telemetry — if a future
+                # model (e.g., qwen2.5:14b, gpt-oss:20b) shows healthier deltas
+                # in stats_json, re-enable application with a feature flag.
+                #
+                # Rerank rationale is still appended so audits can see what
+                # the model thought; just not applied to the score.
                 scored.rationale = f"{scored.rationale}; {rerank_source}={rerank.rationale}"
                 score_delta_count += 1
                 score_delta_sum += delta

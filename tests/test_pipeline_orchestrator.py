@@ -1628,6 +1628,149 @@ async def test_pipeline_falls_back_to_per_item_rerank_after_empty_batch(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_t151_escalation_score_delta_recorded_but_not_applied(tmp_path: Path) -> None:
+    """T-151 escalation (2026-05-14): score_delta is observed but NOT applied.
+
+    Production audit of run_id=99 (2026-05-14 07:00 WITA cron) showed
+    llama3.1:8b's score_delta is uniformly wrong on genuinely-on-topic
+    items — stock reason "mentions X but not directly related to the
+    subject" applied to direct Claude Code product announcements and
+    Anthropic flagship-model demos, dragging Pass-1 scores from 0.54-0.60
+    down to 0.32-0.38. T-151 prompt tuning (commit 77777c0) and T-152
+    shortlist widening (commit ea365f8) did not help because the bias is
+    in the model's judgment, not in the prompt or selector.
+
+    Decision: stop applying score_delta. Pass-1 (embedding) alone drives
+    final_score. Pass-2 still produces key_message and refined_segment.
+    Telemetry still records the observed delta so a future model with
+    healthier bias can be detected and the application re-enabled.
+
+    This regression test pins the new behavior so re-enabling delta
+    application requires an intentional code change.
+    """
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "AI Tools & Tips",
+        include_terms=["claude"],
+        description_text="Track practical AI tools and tips including Claude Code.",
+    )
+    await source_service.monitor_source(
+        platform="rss",
+        account_or_channel_id="feed://demo",
+        display_name="Demo",
+    )
+
+    class HostileNegativeDeltaRouter:
+        """Returns -0.20 for every item — the production bias pattern."""
+
+        enabled = True
+
+        def __init__(self) -> None:
+            self.batch_calls = 0
+
+        async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+            _ = subject_name, subject_description
+            self.batch_calls += 1
+            return {
+                candidate.item_id: type(
+                    "Rerank",
+                    (),
+                    {
+                        "score_delta": -0.20,
+                        "rationale": "mentions Claude but not directly related to the subject",
+                        "key_message": f"Curated message {candidate.item_id}.",
+                    },
+                )()
+                for candidate in candidates
+            }
+
+        async def refine_batch(self, *, subject_name: str, subject_description: str, candidates: list, limit: int = 5):
+            _ = subject_name, subject_description, limit
+            return {candidate.item_id: f"Refined {candidate.item_id}." for candidate in candidates}
+
+        async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
+            _ = subject_name, text, heuristic_score, item_id
+            raise AssertionError("embedding path should use batch rerank only")
+
+    class AICollector:
+        platform = "rss"
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            return [
+                CollectedItem(
+                    platform="rss",
+                    external_id=f"claude-code-item-{idx}",
+                    author="ClaudeDevs",
+                    url=f"https://example.com/cc-{idx}",
+                    text=f"Claude Code weekly limits increasing 50% — practical AI tooling update {idx}",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={},
+                )
+                for idx in range(3)
+            ]
+
+    model_router = HostileNegativeDeltaRouter()
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        model_router=model_router,  # type: ignore[arg-type]
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"rss": AICollector()},
+        scorer="both",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+
+    # Telemetry still records the observed deltas so a healthier future
+    # model can be detected — but the score wasn't dragged down.
+    assert stats["score_delta_count"] == 3
+    assert stats["score_delta_negative_count"] == 3
+    assert stats["score_delta_zero_count"] == 0
+    assert stats["score_delta_positive_count"] == 0
+    assert stats["score_delta_mean"] == pytest.approx(-0.20)
+
+    # Most important assertion: final_score must NOT be diminished by -0.20.
+    # Before T-151 escalation: 3 items × -0.20 delta = Pass-1 - 0.20 each.
+    # After T-151 escalation: final_score == Pass-1 score (delta ignored).
+    rows = await (
+        await db.conn.execute(
+            "SELECT item_id, final_score, rationale_json FROM item_scores ORDER BY item_id"
+        )
+    ).fetchall()
+    assert len(rows) == 3
+    for row in rows:
+        # Without the delta application, final_score reflects Pass-1 only.
+        # Pass-1 from FakeEmbeddingService produces a healthy score (≥ 0.5
+        # for on-topic Claude content). If a future regression re-enables
+        # delta application, these scores would be 0.20 lower and likely
+        # below 0.5 — assert the floor.
+        assert row["final_score"] > 0.3, (
+            f"final_score={row['final_score']} suggests delta was applied — "
+            "T-151 escalation requires delta to be observed but not applied"
+        )
+        rationale = json.loads(row["rationale_json"])
+        # Pass-2 outputs (key_message, refined_segment) ARE still used.
+        assert rationale["key_message"].startswith("Curated message")
+        # Rerank reasoning still appended to rationale string for audits.
+        assert "model_batch=mentions Claude" in rationale["reason"]
+
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_rescore_existing_items_can_scope_to_subject_ids(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
