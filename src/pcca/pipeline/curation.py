@@ -145,8 +145,27 @@ class CurationEngine:
         final_score = (
             0.55 * relevance + 0.20 * practicality + 0.15 * novelty + 0.10 * trust - 0.20 * noise_penalty
         )
-        if min_practicality is not None and practicality < min_practicality:
-            # Preference guardrail: demote items that are likely too fluffy for this subject.
+        # T-153 (2026-05-14): the flat -0.20 practicality demote was originally
+        # designed to filter "fluffy" content (motivation talks, intro overviews)
+        # where BOTH relevance and practicality are weak. In practice it
+        # systematically cliff-edges news tweets that are highly relevant but
+        # short (and thus score practicality≈0.25 because the keyword-counted
+        # `practical_terms` list — "workflow", "code", "release" etc — rarely
+        # appears in a 280-char announcement). Live evidence (run_id=100,
+        # 2026-05-14): @ClaudeDevs "Claude Code limits +50%" (relevance=0.60,
+        # practicality=0.25) computed final=0.5805 then demoted to 0.38 —
+        # below the 0.55 floor — even though the tweet IS exactly what a
+        # subject titled "AI Tools & Tips" wants. Same pattern on @bcherny
+        # Anthropic Mythos and @soumithchintala. New behavior: the demote only
+        # fires when relevance is ALSO weak (< 0.55) — that's the actual
+        # "fluffy" signal we want to filter. Strong-relevance news content
+        # passes through at its formula score.
+        if (
+            min_practicality is not None
+            and practicality < min_practicality
+            and relevance < 0.55
+        ):
+            # Both signals weak → genuine low-value content. Demote.
             final_score -= 0.2
         final_score = max(0.0, min(1.0, final_score))
 
