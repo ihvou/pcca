@@ -195,6 +195,73 @@ class _FakeTelegramBot:
         self.sent_messages.append(kwargs)
 
 
+class _FakeActionMessage:
+    def __init__(self) -> None:
+        self.replies: list[dict] = []
+
+    async def reply_text(self, text: str, **kwargs):
+        self.replies.append({"text": text, **kwargs})
+        return _FlakyEditMessage()
+
+
+@pytest.mark.asyncio
+async def test_t154_update_briefs_global_no_picker() -> None:
+    service = TelegramService.__new__(TelegramService)
+    service._manual_action_lock = asyncio.Lock()
+    service._progress_tasks = set()
+    service._edit_retry_delays_seconds = (0.0, 0.0, 0.0)
+    calls: list[dict] = []
+
+    async def forbidden_picker(*args, **kwargs):
+        _ = args, kwargs
+        raise AssertionError("Update Briefs should not open the subject picker.")
+
+    async def update_briefs_action(*, subject_ids=None, progress_callback=None):
+        calls.append({"subject_ids": subject_ids})
+        if progress_callback is not None:
+            progress_callback({"kind": "delivery"})
+        return {
+            "collection": {"items_collected": 5, "items_inserted": 2, "items_updated": 3},
+            "briefs": {"briefs_sent": 4, "subjects_with_routes": 2},
+        }
+
+    service._resolve_subject_ids_for_message = forbidden_picker
+    service.update_briefs_action = update_briefs_action
+    message = _FakeActionMessage()
+
+    await service._run_update_briefs_from_message(message)
+
+    assert calls == [{"subject_ids": None}]
+    assert "This runs collection once for all active subjects." in message.replies[0]["text"]
+    assert message.replies[0]["text"].startswith("Updating Briefs.")
+
+
+@pytest.mark.asyncio
+async def test_t154_get_briefs_keeps_picker() -> None:
+    service = TelegramService.__new__(TelegramService)
+    service._manual_action_lock = asyncio.Lock()
+    calls: list[set[int] | None] = []
+    picker_calls: list[str] = []
+
+    async def picker(_message, *, action_label: str, callback_action: str):
+        picker_calls.append(callback_action)
+        assert action_label == "Briefs"
+        return {42}, "AI Tools"
+
+    async def get_digest_action(*, subject_ids=None):
+        calls.append(subject_ids)
+
+    service._resolve_subject_ids_for_message = picker
+    service.get_digest_action = get_digest_action
+    message = _FakeActionMessage()
+
+    await service._run_briefs_from_message(message)
+
+    assert picker_calls == ["briefs"]
+    assert calls == [{42}]
+    assert message.replies[0]["text"] == "Running `get briefs for AI Tools` now..."
+
+
 @pytest.mark.asyncio
 async def test_t144_edit_message_text_retries_then_succeeds() -> None:
     service = TelegramService.__new__(TelegramService)
@@ -244,3 +311,39 @@ async def test_t144_drain_progress_tasks_warns_for_leftover_tasks(caplog) -> Non
     for task in service._progress_tasks:
         task.cancel()
     await asyncio.gather(*service._progress_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_t155_nightly_completion_summary_sends_get_briefs_button() -> None:
+    service = TelegramService.__new__(TelegramService)
+    bot = _FakeTelegramBot()
+    service.application = type("FakeApplication", (), {"bot": bot})()
+    chat = type("Chat", (), {"chat_id": 123})()
+
+    class FakeRoutingService:
+        async def list_registered_chats(self):
+            return [chat]
+
+    service.routing_service = FakeRoutingService()
+
+    await service.send_nightly_completion_summary(
+        stats={
+            "items_collected": 1700,
+            "items_inserted": 87,
+            "items_updated": 1613,
+            "subjects_active": 5,
+            "items_scored": 42,
+            "sources_needing_reauth": 3,
+        },
+        status="success",
+    )
+
+    assert len(bot.sent_messages) == 1
+    sent = bot.sent_messages[0]
+    assert sent["chat_id"] == 123
+    assert "Nightly run finished." in sent["text"]
+    assert "87 new" in sent["text"]
+    assert "3 source(s) need re-login." in sent["text"]
+    buttons = sent["reply_markup"].inline_keyboard
+    assert buttons[0][0].text == "Get Briefs"
+    assert buttons[0][0].callback_data == "run:briefs"

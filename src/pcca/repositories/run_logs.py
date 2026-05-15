@@ -52,3 +52,39 @@ class RunLogRepository:
         except json.JSONDecodeError:
             return {}
         return payload if isinstance(payload, dict) else {}
+
+    async def latest_successful_run_started_within(self, *, run_type: str, seconds: int) -> dict | None:
+        modifier = f"-{max(1, int(seconds))} seconds"
+        row = await (
+            await self.conn.execute(
+                """
+                SELECT id, run_type, started_at, ended_at, status, stats_json, metadata_json
+                FROM run_logs
+                WHERE run_type = ?
+                  AND status = 'success'
+                  AND started_at >= datetime('now', ?)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_type, modifier),
+            )
+        ).fetchone()
+        if row is None:
+            return None
+        try:
+            stats = json.loads(row["stats_json"] or "{}")
+        except json.JSONDecodeError:
+            stats = {}
+        try:
+            metadata = json.loads(row["metadata_json"] or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        return {
+            "id": int(row["id"]),
+            "run_type": row["run_type"],
+            "started_at": row["started_at"],
+            "ended_at": row["ended_at"],
+            "status": row["status"],
+            "stats": stats if isinstance(stats, dict) else {},
+            "metadata": metadata if isinstance(metadata, dict) else {},
+        }

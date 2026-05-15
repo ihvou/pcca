@@ -21,6 +21,7 @@ from pcca.services.telegram_service import TelegramService
 from pcca.services.routing_service import RoutingService
 
 logger = logging.getLogger(__name__)
+RECENT_NIGHTLY_COLLECTION_SECONDS = 30 * 60
 
 
 def _format_sent_time(sent_at: str | None) -> str:
@@ -116,8 +117,35 @@ class JobRunner:
         *,
         subject_ids: set[int] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        skip_recent_collection: bool = True,
     ) -> dict:
-        collection_stats = await self.run_nightly_collection(score=True, progress_callback=progress_callback)
+        recent_run = None
+        if skip_recent_collection and subject_ids is None and self.run_log_repo is not None:
+            recent_run = await self.run_log_repo.latest_successful_run_started_within(
+                run_type="nightly_collection",
+                seconds=RECENT_NIGHTLY_COLLECTION_SECONDS,
+            )
+        if recent_run is not None:
+            collection_stats = {
+                "collection_skipped_recent": True,
+                "recent_nightly_collection": {
+                    "id": recent_run["id"],
+                    "started_at": recent_run["started_at"],
+                    "ended_at": recent_run["ended_at"],
+                },
+                "items_collected": 0,
+                "items_inserted": 0,
+                "items_updated": 0,
+                "sources_seen": 0,
+                "sources_crawled": 0,
+            }
+            logger.info(
+                "Update Briefs skipped collection because recent nightly run exists run_id=%s started_at=%s",
+                recent_run["id"],
+                recent_run["started_at"],
+            )
+        else:
+            collection_stats = await self.run_nightly_collection(score=True, progress_callback=progress_callback)
         if collection_stats.get("cancelled"):
             return {"collection": collection_stats, "briefs": {}, "cancelled": True}
         if collection_stats.get("skipped_already_running"):
@@ -190,7 +218,7 @@ class JobRunner:
                 smart,
                 sorted(subject_ids) if subject_ids is not None else None,
             )
-            if run_type in {"morning_digest", "briefs"} and self.pipeline_orchestrator is not None:
+            if run_type == "morning_digest" and self.pipeline_orchestrator is not None:
                 logger.info(
                     "Brief pre-send rescore started run_id=%s run_type=%s subject_ids=%s.",
                     run_id,
@@ -646,7 +674,7 @@ class AgentScheduler:
 
     def start(self) -> None:
         self.scheduler.add_job(
-            self.job_runner.run_nightly_collection,
+            self._run_scheduled_nightly_collection,
             trigger=CronTrigger.from_crontab(self.nightly_cron, timezone=self.timezone),
             id="nightly_collection",
             replace_existing=True,
@@ -676,3 +704,35 @@ class AgentScheduler:
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
             logger.info("Scheduler stopped.")
+
+    async def _run_scheduled_nightly_collection(self) -> dict:
+        try:
+            stats = await self.job_runner.run_nightly_collection(score=True)
+        except Exception as exc:
+            await self._send_nightly_completion_summary(
+                status="failed",
+                stats={},
+                error_text=str(exc),
+            )
+            raise
+        status = "cancelled" if stats.get("cancelled") else "success"
+        await self._send_nightly_completion_summary(status=status, stats=stats)
+        return stats
+
+    async def _send_nightly_completion_summary(
+        self,
+        *,
+        status: str,
+        stats: dict,
+        error_text: str | None = None,
+    ) -> None:
+        telegram_service = self.job_runner.telegram_service
+        if telegram_service is None:
+            return
+        send_summary = getattr(telegram_service, "send_nightly_completion_summary", None)
+        if not callable(send_summary):
+            return
+        try:
+            await send_summary(stats=stats, status=status, error_text=error_text)
+        except Exception:
+            logger.exception("Nightly completion Telegram summary failed status=%s", status)

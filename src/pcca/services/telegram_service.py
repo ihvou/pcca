@@ -207,6 +207,41 @@ class TelegramService:
         )
         return sent.message_id
 
+    async def send_nightly_completion_summary(
+        self,
+        *,
+        stats: dict[str, Any],
+        status: str = "success",
+        error_text: str | None = None,
+    ) -> int | None:
+        if self.application is None:
+            logger.warning("Telegram application not started, skipping nightly completion summary.")
+            return None
+        chats = await self.routing_service.list_registered_chats()
+        if not chats:
+            logger.info("Skipping nightly completion summary because no Telegram chats are registered.")
+            return None
+        chat = chats[0]
+        sent = await self.application.bot.send_message(
+            chat_id=chat.chat_id,
+            text=self._format_nightly_completion_summary(
+                stats=stats,
+                status=status,
+                error_text=error_text,
+            ),
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("Get Briefs", callback_data="run:briefs")]]
+            ),
+            disable_web_page_preview=True,
+        )
+        logger.info(
+            "Telegram nightly completion summary sent chat_id=%s status=%s message_id=%s",
+            chat.chat_id,
+            status,
+            getattr(sent, "message_id", None),
+        )
+        return getattr(sent, "message_id", None)
+
     async def _on_start(self, update: Update, _context: ContextTypes.DEFAULT_TYPE) -> None:
         if update.message is None:
             return
@@ -888,13 +923,13 @@ class TelegramService:
             subject.id,
         )
         if action_name == "update":
-            await self._run_update_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            await self._run_update_briefs_from_message(message)
             return
         if action_name == "briefs":
             await self._run_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
             return
         if action_name == "rebuild":
-            await self._run_update_briefs_from_message(message, subject_ids={subject.id}, subject_name=subject.name)
+            await self._run_update_briefs_from_message(message)
             return
         await message.reply_text("That subject action is not supported yet.")
 
@@ -1016,21 +1051,18 @@ class TelegramService:
                 parse_mode="Markdown",
             )
             return
-        if subject_ids is None:
-            resolved = await self._resolve_subject_ids_for_message(
-                message,
-                action_label="Update Briefs",
-                callback_action="update",
-            )
-            if resolved is None:
-                return
-            subject_ids, subject_name = resolved
         if self._manual_action_lock.locked():
             await message.reply_text("Another manual run is in progress. Please wait a bit and try again.")
             return
 
+        scope_line = (
+            f"Subject override: {subject_name}.\n"
+            if subject_ids is not None and subject_name
+            else "This runs collection once for all active subjects.\n"
+        )
         status_message = await message.reply_text(
             "Updating Briefs. This usually takes 30-70 min depending on content volume.\n"
+            f"{scope_line}"
             "Send /cancel to stop after the current source finishes."
         )
         last_edit_at = 0.0
@@ -1201,11 +1233,46 @@ class TelegramService:
         collected = int(collection.get("items_collected") or 0)
         inserted = int(collection.get("items_inserted") or 0)
         updated = int(collection.get("items_updated") or 0)
+        collection_line = (
+            "Skipped collection because a successful nightly run started recently."
+            if collection.get("collection_skipped_recent")
+            else f"Collected {collected} item(s): {inserted} new, {updated} updated."
+        )
         return (
             f"Update Briefs completed.\n"
-            f"Collected {collected} item(s): {inserted} new, {updated} updated.\n"
+            f"{collection_line}\n"
             f"Delivered {delivered} Brief(s) for {subjects} subject(s)."
         )
+
+    @staticmethod
+    def _format_nightly_completion_summary(
+        *,
+        stats: dict[str, Any],
+        status: str,
+        error_text: str | None = None,
+    ) -> str:
+        if status == "failed":
+            suffix = f"\n\nError: {error_text}" if error_text else ""
+            return f"Nightly run failed. Check the Wizard Debug tab or `pcca doctor` for details.{suffix}"
+        label = "Nightly run cancelled" if status == "cancelled" or stats.get("cancelled") else "Nightly run finished"
+        collected = int(stats.get("items_collected") or 0)
+        inserted = int(stats.get("items_inserted") or 0)
+        updated = int(stats.get("items_updated") or 0)
+        subjects = int(stats.get("subjects_active") or stats.get("subjects_seen") or 0)
+        scored = int(stats.get("items_scored") or 0)
+        reauth = int(stats.get("sources_needing_reauth") or 0)
+        errors = int(stats.get("collector_errors") or 0)
+        lines = [
+            f"{label}.",
+            f"Collected {collected} item(s): {inserted} new, {updated} updated.",
+            f"Scored {scored} item/subject match(es) across {subjects} active subject(s).",
+        ]
+        if reauth:
+            lines.append(f"{reauth} source(s) need re-login.")
+        if errors:
+            lines.append(f"{errors} collector error(s) were logged.")
+        lines.append("Tap Get Briefs when you are ready to read.")
+        return "\n".join(lines)
 
     async def _run_rebuild_digest_from_message(
         self,
@@ -1572,7 +1639,8 @@ class TelegramService:
             "- create/edit subjects\n"
             "- list/remove imported sources\n"
             "- show/refine preferences per subject\n"
-            "- update Briefs now (`/update_briefs`)\n"
+            "- update Briefs now across all active subjects (`/update_briefs`)\n"
+            "- get already-scored Briefs for one subject (`/briefs`)\n"
             "- show delivery settings (`/settings`)\n"
             "- collect per-Brief feedback (buttons or replies)\n"
             "- accept voice notes (transcription backend pending)"

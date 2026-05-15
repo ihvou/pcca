@@ -69,8 +69,8 @@ In Telegram, with the bot:
 
 | You want to… | Do |
 |---|---|
-| Refresh sources and get Briefs | Tap **Update Briefs** or send `/update_briefs` |
-| Re-send already scored Briefs | `/briefs` |
+| Refresh all sources and all subjects | Tap **Update Briefs** or send `/update_briefs` |
+| Get already-scored Briefs for one subject | Tap **Get Briefs** or send `/briefs` |
 | React to a Brief | Tap 👍 / 👎 / 🔖 / 🚫 on the Brief message |
 | Expand a Brief | Tap 📖 More |
 | Give specific feedback | Reply to the Brief with text — *"less hype like this"*, *"no cursor content"*, etc. |

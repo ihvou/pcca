@@ -15,7 +15,7 @@ from pcca.repositories.items import ItemRepository
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.run_logs import RunLogRepository
 from pcca.repositories.subjects import SubjectRepository
-from pcca.scheduler import JobRunner
+from pcca.scheduler import AgentScheduler, JobRunner
 from pcca.services.feedback_service import FeedbackService
 from pcca.services.routing_service import RoutingService
 from pcca.services.subject_service import SubjectService
@@ -110,6 +110,11 @@ class FakePipelineOrchestrator:
         return {"items_scored": 1}
 
 
+class FakeSubjectService:
+    async def list_subjects(self):
+        return []
+
+
 async def _seed_subject_with_route(db: Database) -> tuple[SubjectService, RoutingService, object]:
     assert db.conn is not None
     subject_repo = SubjectRepository(conn=db.conn)
@@ -161,6 +166,90 @@ async def _seed_item_score(
         rationale=rationale,
     )
     return item_id
+
+
+@pytest.mark.asyncio
+async def test_t154_update_briefs_skips_collection_after_recent_success(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    run_log_repo = RunLogRepository(conn=db.conn)
+    run_id = await run_log_repo.start_run("nightly_collection")
+    await run_log_repo.finish_run(
+        run_id,
+        "success",
+        {"items_collected": 1700, "items_inserted": 87, "items_updated": 1613},
+    )
+    runner = JobRunner(
+        subject_service=FakeSubjectService(),  # type: ignore[arg-type]
+        run_log_repo=run_log_repo,
+    )
+
+    async def forbidden_collection(*, score=True, progress_callback=None):
+        _ = score, progress_callback
+        raise AssertionError("recent successful nightly should skip duplicate collection")
+
+    async def fast_briefs(*, subject_ids=None, progress_callback=None):
+        _ = subject_ids, progress_callback
+        return {"briefs_sent": 3, "subjects_with_routes": 2}
+
+    runner.run_nightly_collection = forbidden_collection  # type: ignore[method-assign]
+    runner.run_smart_briefs = fast_briefs  # type: ignore[method-assign]
+
+    stats = await runner.update_briefs()
+
+    assert stats["collection"]["collection_skipped_recent"] is True
+    assert stats["collection"]["recent_nightly_collection"]["id"] == run_id
+    assert stats["briefs"]["briefs_sent"] == 3
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t155_scheduled_nightly_completion_sends_summary() -> None:
+    class FakePipeline:
+        async def run_nightly_collection(self, *, score=True, progress_callback=None):
+            _ = score, progress_callback
+            return {
+                "items_collected": 12,
+                "items_inserted": 4,
+                "items_updated": 8,
+                "subjects_active": 2,
+                "items_scored": 6,
+            }
+
+    class FakeTelegramSummary:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def send_nightly_completion_summary(self, *, stats, status="success", error_text=None):
+            self.calls.append({"stats": stats, "status": status, "error_text": error_text})
+
+    telegram = FakeTelegramSummary()
+    runner = JobRunner(
+        subject_service=FakeSubjectService(),  # type: ignore[arg-type]
+        pipeline_orchestrator=FakePipeline(),  # type: ignore[arg-type]
+        telegram_service=telegram,  # type: ignore[arg-type]
+    )
+    scheduler = AgentScheduler(
+        nightly_cron="0 1 * * *",
+        morning_cron="30 8 * * *",
+        timezone="UTC",
+        job_runner=runner,
+    )
+
+    stats = await scheduler._run_scheduled_nightly_collection()
+
+    assert stats["items_inserted"] == 4
+    assert telegram.calls == [
+        {
+            "stats": stats,
+            "status": "success",
+            "error_text": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -670,7 +759,7 @@ async def test_scheduled_morning_digest_runs_rescore_before_sending(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-async def test_smart_briefs_rescores_before_sending(tmp_path: Path) -> None:
+async def test_smart_briefs_delivers_existing_scores_without_rescore(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
     await db.initialize()
@@ -701,9 +790,8 @@ async def test_smart_briefs_rescores_before_sending(tmp_path: Path) -> None:
 
     stats = await runner.run_smart_briefs(subject_ids={subject.id})
 
-    assert fake_pipeline.rescore_calls == 1
-    assert fake_pipeline.rescore_subject_ids == [{subject.id}]
-    assert stats["pre_send_rescore"] == {"items_scored": 1}
+    assert fake_pipeline.rescore_calls == 0
+    assert "pre_send_rescore" not in stats
     assert stats["deliveries_sent"] == 1
 
     await db.close()
