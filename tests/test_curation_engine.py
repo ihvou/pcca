@@ -1,3 +1,5 @@
+import pytest
+
 from pcca.collectors.base import CollectedItem
 from pcca.pipeline.curation import CurationEngine
 
@@ -158,7 +160,8 @@ def test_t153_high_relevance_news_tweet_not_demoted_by_min_practicality() -> Non
         min_practicality=0.5,
     )
 
-    # News tweet: practicality is 0.25 (low) but relevance is 0.60 (strong) —
+    # News tweet: practicality is still below 0.5 but receives the short-form
+    # floor from T-161, and relevance is 0.60 (strong) —
     # the demote must NOT fire. Final score should be ~0.55 (formula value),
     # not 0.35 (formula - 0.20).
     assert news_scored.practicality_score < 0.5
@@ -173,3 +176,44 @@ def test_t153_high_relevance_news_tweet_not_demoted_by_min_practicality() -> Non
         f"Fluffy content got final_score={fluffy_scored.final_score}; T-153 "
         "preserves the demote when relevance is also weak (<0.55)"
     )
+
+
+def test_t161_x_tweet_with_strong_relevance_clears_floor_but_fluff_stays_low() -> None:
+    engine = CurationEngine()
+    useful_tweet = CollectedItem(
+        platform="x",
+        external_id="anthropic-news",
+        author="AnthropicAI",
+        url="https://x.com/AnthropicAI/status/1",
+        text="Claude Code adds higher usage limits for paid plans this week.",
+        transcript_text=None,
+        published_at=None,
+        metadata={},
+    )
+    fluff = CollectedItem(
+        platform="x",
+        external_id="fluff",
+        author="randomguru",
+        url="https://x.com/random/status/1",
+        text="big things coming soon",
+        transcript_text=None,
+        published_at=None,
+        metadata={},
+    )
+
+    useful = engine.score(
+        "AI Tools and Tips",
+        useful_tweet,
+        semantic_similarity=0.52,
+        min_practicality=0.5,
+    )
+    noisy = engine.score(
+        "AI Tools and Tips",
+        fluff,
+        semantic_similarity=0.20,
+        min_practicality=0.5,
+    )
+
+    assert useful.practicality_score == pytest.approx(0.40)
+    assert useful.final_score > 0.54
+    assert noisy.final_score < 0.35

@@ -452,6 +452,26 @@ class PipelineOrchestrator:
         metadata["embedding_not_warmed"] = bool(stats.get("embedding_not_warmed"))
         metadata["embedding_not_warmed_subjects"] = list(stats.get("embedding_not_warmed_subjects") or [])
 
+    async def _record_top_platform_mix(self, *, subjects: list, stats: dict, metadata: dict) -> None:
+        by_subject: dict[str, dict[str, int]] = {}
+        total: dict[str, int] = {}
+        for subject in subjects:
+            try:
+                candidates = await self.item_score_repo.top_candidates(subject_id=subject.id, limit=5)
+            except Exception:
+                logger.exception("Failed to compute top platform mix subject_id=%s", getattr(subject, "id", None))
+                continue
+            subject_mix: dict[str, int] = {}
+            for candidate in candidates:
+                platform = str(candidate.platform or "unknown")
+                subject_mix[platform] = subject_mix.get(platform, 0) + 1
+                total[platform] = total.get(platform, 0) + 1
+            by_subject[str(subject.id)] = subject_mix
+        stats["top5_platform_mix_by_subject"] = by_subject
+        stats["top5_platform_mix_total"] = total
+        metadata["top5_platform_mix_by_subject"] = by_subject
+        metadata["top5_platform_mix_total"] = total
+
     @staticmethod
     def _merge_count_map(target: dict, incoming: dict | None) -> None:
         if not isinstance(incoming, dict):
@@ -696,14 +716,10 @@ class PipelineOrchestrator:
             bool(subject_embedding is not None),
         )
 
-        batch_results = {}
-        batch_attempted = False
-        batch_rerank = getattr(self.model_router, "rerank_batch", None) if self.model_router is not None else None
-        single_rerank = getattr(self.model_router, "rerank", None) if self.model_router is not None else None
+        summary_results = {}
+        summarize_batch = getattr(self.model_router, "summarize_batch", None) if self.model_router is not None else None
         model_enabled = bool(self.model_router is not None and getattr(self.model_router, "enabled", True))
-        shortlist_used_embedding = any(used_embedding for _item_id, _item, _scored, used_embedding, _segment in shortlist_rows)
-        if callable(batch_rerank) and shortlist_used_embedding and model_enabled:
-            batch_attempted = True
+        if callable(summarize_batch) and model_enabled and shortlist_rows:
             candidates = [
                 ModelRerankCandidate(
                     item_id=item_id,
@@ -715,155 +731,34 @@ class PipelineOrchestrator:
                 )
                 for item_id, item, scored, _used_embedding, segment in shortlist_rows
             ]
-            batch_results = await batch_rerank(
+            summary_results = await summarize_batch(
                 subject_name=subject.name,
                 subject_description=subject_embedding_text,
                 candidates=candidates,
             )
-            stats["model_batch_rerank_calls"] += 1
-
-        per_item_results: dict[int, Any] = {}
-        if callable(single_rerank) and model_enabled:
-            batch_ids = set(batch_results.keys()) if isinstance(batch_results, dict) else set()
-            fallback_rows = [
-                row
-                for row in shortlist_rows
-                if (row[0] not in batch_ids if batch_attempted else True)
-            ]
-            if fallback_rows:
-                if batch_attempted:
-                    logger.warning(
-                        "Model batch rerank partial run_id=%s subject=%s shortlist=%d batch_results=%d missing=%d; falling back per item.",
-                        run_id,
-                        subject.name,
-                        len(shortlist_rows),
-                        len(batch_ids),
-                        len(fallback_rows),
-                    )
-                semaphore = asyncio.Semaphore(2)
-
-                async def rerank_one(row) -> tuple[int, Any | None]:
-                    item_id, item, scored, _used_embedding, segment = row
-                    async with semaphore:
-                        rerank = await single_rerank(
-                            subject_name=subject.name,
-                            text=self._model_candidate_text(item=item, segment=segment),
-                            heuristic_score=scored.final_score,
-                            item_id=item_id,
-                        )
-                        return item_id, rerank
-
-                results = await asyncio.gather(*(rerank_one(row) for row in fallback_rows))
-                per_item_results = {
-                    item_id: rerank
-                    for item_id, rerank in results
-                    if rerank is not None
-                }
-                recovered = len(per_item_results)
-                stats["items_model_reranked_per_item"] = int(stats.get("items_model_reranked_per_item", 0)) + recovered
-                if batch_attempted:
-                    stats["batch_truncation_recovered"] = int(stats.get("batch_truncation_recovered", 0)) + recovered
+            stats["model_summary_batch_calls"] = int(stats.get("model_summary_batch_calls", 0)) + 1
 
         adjusted_segment_scores: dict[int, Any] = {}
         item_key_messages: dict[int, str] = {}
         item_refined_segments: dict[int, str] = {}
-        # T-151: accumulate score_delta distribution across all subjects in
-        # this run so a single field surfaces whether the negative-bias
-        # regression has returned. Counts are run-wide (not per-subject) so
-        # the cost is constant; per-subject breakdown lives in model_router's
-        # log line.
-        score_delta_count = int(stats.get("score_delta_count", 0))
-        score_delta_neg = int(stats.get("score_delta_negative_count", 0))
-        score_delta_zero = int(stats.get("score_delta_zero_count", 0))
-        score_delta_pos = int(stats.get("score_delta_positive_count", 0))
-        score_delta_sum = float(stats.get("score_delta_sum", 0.0))
         for item_id, item, scored, _used_embedding, segment in scored_rows:
-            rerank = batch_results.get(item_id) if isinstance(batch_results, dict) else None
-            rerank_source = "model_batch"
-            if rerank is None and item_id in per_item_results:
-                rerank = per_item_results[item_id]
-                rerank_source = "model"
-            if rerank is not None:
-                delta = float(rerank.score_delta)
-                # T-151 escalation (2026-05-14, run_id=99 production audit):
-                # llama3.1:8b's score_delta is too unreliable to apply. Manual
-                # review of 39 freshly-collected items vs model output: top
-                # genuinely-on-topic items got -0.20 to -0.25 deltas with stock
-                # reason "mentions X but not directly related to the subject" —
-                # uniformly applied to obviously on-topic content. Examples:
-                #   - @ClaudeDevs "Claude Code limits +50%"  Pass-1 0.54 → 0.35
-                #   - @ClaudeDevs "Paid Claude plans API credit" Pass-1 0.60 → 0.38
-                #   - @bcherny "Anthropic Mythos cyber range"  Pass-1 0.58 → 0.32
-                #   - @soumithchintala "Interaction Models demos" Pass-1 0.59 → 0.32
-                # All four are direct AI-tools/Claude content for a subject
-                # whose description literally lists "Claude Code" and "leading
-                # AI companies." Pass-1 (embedding) was correct; Pass-2 destroyed
-                # the signal. T-151 prompt tuning (commit 77777c0) and T-152
-                # shortlist widening (commit ea365f8) did not help — the bias
-                # is in the model's judgment, not the prompt. Asymmetric clamp
-                # (-0.05) wouldn't save Pass-1=0.54 items either.
-                #
-                # Decision: stop applying score_delta. final_score = Pass-1
-                # score. Pass-2 still produces key_message and refined_segment
-                # (which it does well) so digest rendering is unaffected. The
-                # observed delta is still recorded in telemetry — if a future
-                # model (e.g., qwen2.5:14b, gpt-oss:20b) shows healthier deltas
-                # in stats_json, re-enable application with a feature flag.
-                #
-                # Rerank rationale is still appended so audits can see what
-                # the model thought; just not applied to the score.
-                scored.rationale = f"{scored.rationale}; {rerank_source}={rerank.rationale}"
-                score_delta_count += 1
-                score_delta_sum += delta
-                if delta < 0:
-                    score_delta_neg += 1
-                elif delta > 0:
-                    score_delta_pos += 1
+            summary = summary_results.get(item_id) if isinstance(summary_results, dict) else None
+            if summary is not None:
+                scored.rationale = f"{scored.rationale}; model_summary={summary.rationale}"
+                if getattr(summary, "is_low_content", False):
+                    item_key_messages[item_id] = "(low-content segment)"
+                    stats["items_model_summary_low_content"] = int(stats.get("items_model_summary_low_content", 0)) + 1
                 else:
-                    score_delta_zero += 1
-                key_message = getattr(rerank, "key_message", None)
-                if key_message:
-                    item_key_messages[item_id] = str(key_message)
-                refined_segment = getattr(rerank, "refined_segment", None)
-                if refined_segment:
-                    item_refined_segments[item_id] = str(refined_segment)[:1500]
-                if rerank_source == "model_batch":
-                    stats["items_model_reranked"] += 1
+                    brief_summary = getattr(summary, "brief_summary", None)
+                    detailed_summary = getattr(summary, "detailed_summary", None)
+                    if brief_summary:
+                        item_key_messages[item_id] = str(brief_summary)[:500]
+                    if detailed_summary:
+                        item_refined_segments[item_id] = str(detailed_summary)[:1500]
+                    if brief_summary and detailed_summary:
+                        stats["items_model_summarized"] = int(stats.get("items_model_summarized", 0)) + 1
             if segment is not None:
                 adjusted_segment_scores[segment.id] = scored
-        stats["score_delta_count"] = score_delta_count
-        stats["score_delta_negative_count"] = score_delta_neg
-        stats["score_delta_zero_count"] = score_delta_zero
-        stats["score_delta_positive_count"] = score_delta_pos
-        stats["score_delta_sum"] = round(score_delta_sum, 4)
-        if score_delta_count > 0:
-            stats["score_delta_mean"] = round(score_delta_sum / score_delta_count, 4)
-
-        refine_batch = getattr(self.model_router, "refine_batch", None) if self.model_router is not None else None
-        if callable(refine_batch) and model_enabled:
-            top_refine_rows = sorted(scored_rows, key=lambda row: row[2].final_score, reverse=True)[:5]
-            if top_refine_rows:
-                refined = await refine_batch(
-                    subject_name=subject.name,
-                    subject_description=subject_embedding_text,
-                    candidates=[
-                        ModelRerankCandidate(
-                            item_id=item_id,
-                            text=self._model_candidate_text(item=item, segment=segment),
-                            heuristic_score=scored.final_score,
-                            author=item.author,
-                            url=item.url,
-                            published_at=item.published_at,
-                        )
-                        for item_id, item, scored, _used_embedding, segment in top_refine_rows
-                    ],
-                    limit=5,
-                )
-                stats["model_refinement_batch_calls"] = int(stats.get("model_refinement_batch_calls", 0)) + 1
-                for item_id, refined_segment in refined.items():
-                    if refined_segment:
-                        item_refined_segments[int(item_id)] = str(refined_segment)[:1500]
-                stats["items_model_refined"] = int(stats.get("items_model_refined", 0)) + len(refined)
 
         for item_id, item, scored, _used_embedding, segment in scored_rows:
             await self.item_score_repo.upsert_score(
@@ -1094,6 +989,9 @@ class PipelineOrchestrator:
             "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
             "model_refinement_batch_calls": 0,
+            "items_model_summarized": 0,
+            "items_model_summary_low_content": 0,
+            "model_summary_batch_calls": 0,
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
@@ -1257,6 +1155,9 @@ class PipelineOrchestrator:
             "items_model_refined": 0,
             "model_batch_rerank_calls": 0,
             "model_refinement_batch_calls": 0,
+            "items_model_summarized": 0,
+            "items_model_summary_low_content": 0,
+            "model_summary_batch_calls": 0,
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
@@ -1746,6 +1647,8 @@ class PipelineOrchestrator:
                     platform_filter,
                 )
 
+            if score and not stats["cancelled"]:
+                await self._record_top_platform_mix(subjects=active_subjects, stats=stats, metadata=metadata)
             metadata["circuit_broken"] = sorted(circuit_broken)
             metadata["circuit_broken_reason"] = sorted(set(circuit_broken_reasons.values()))
             metadata["circuit_broken_reasons_by_platform"] = dict(sorted(circuit_broken_reasons.items()))

@@ -80,6 +80,19 @@ class SourceService:
     async def list_all_sources(self):
         return await self.source_repo.list_all()
 
+    async def list_orphan_sources(self):
+        return await self.source_repo.list_orphans()
+
+    async def disable_source(self, source_id: int) -> None:
+        await self.source_repo.mark_monitored(source_id, monitored=False)
+
+    async def adopt_source_to_subject(self, *, source_id: int, subject_id: int, priority: int = 0) -> None:
+        subject = await self.subject_repo.get_by_id(subject_id)
+        if subject is None:
+            raise ValueError(f"Subject not found: {subject_id}")
+        await self.source_repo.link_to_subject(subject_id=subject.id, source_id=source_id, priority=priority)
+        await self.source_repo.mark_monitored(source_id, monitored=True)
+
     async def list_inactive_source_ids_for_subject(self, subject_id: int) -> set[int]:
         return await self.source_repo.list_inactive_source_ids_for_subject(subject_id)
 

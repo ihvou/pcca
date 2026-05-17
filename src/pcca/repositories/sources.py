@@ -166,6 +166,11 @@ class SourceRepository:
         )
         await self.conn.commit()
 
+    async def delete_source(self, source_id: int) -> bool:
+        cursor = await self.conn.execute("DELETE FROM sources WHERE id = ?", (source_id,))
+        await self.conn.commit()
+        return int(cursor.rowcount or 0) > 0
+
     async def update_identity(
         self,
         *,
@@ -338,6 +343,24 @@ class SourceRepository:
                        last_crawled_at, is_monitored, metadata_json
                 FROM sources
                 ORDER BY platform ASC, display_name ASC
+                """
+            )
+        ).fetchall()
+        return [self._source_row(row) for row in rows]
+
+    async def list_orphans(self) -> list[SourceRow]:
+        rows = await (
+            await self.conn.execute(
+                """
+                SELECT id, platform, account_or_channel_id, display_name, follow_state,
+                       last_crawled_at, is_monitored, metadata_json
+                FROM sources s
+                WHERE NOT EXISTS (
+                  SELECT 1
+                  FROM subject_sources ss
+                  WHERE ss.source_id = s.id
+                )
+                ORDER BY s.platform ASC, s.follow_state ASC, s.display_name ASC
                 """
             )
         ).fetchall()

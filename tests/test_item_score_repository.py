@@ -55,6 +55,8 @@ async def test_top_unsent_candidates_filters_only_current_subject_digest_history
             noise_penalty=0.0,
             final_score=0.91,
             rationale="useful details",
+            key_message=f"Useful summary for {subject.name}.",
+            refined_segment=f"Detailed summary for {subject.name}.",
         )
 
     digest_repo = DigestRepository(conn=db.conn)
@@ -127,18 +129,12 @@ async def test_candidate_preserves_key_message_and_metadata(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_t152_top_candidates_prefers_items_with_key_message(tmp_path: Path) -> None:
-    """T-152: digest selector must prefer Pass-2-reranked items.
+async def test_t159_top_candidates_excludes_unprocessed_items(tmp_path: Path) -> None:
+    """T-159: digest selector must require unified Pass-2 summaries.
 
-    Live bug (2026-05-14): user reported Subject 5 brief at rank #3 showed
-    raw LinkedIn promotional text ("Hello community! I'd love to invite
-    you all to our upcoming webinar..."). Root cause: that item scored
-    above the relevance floor but was outside the Pass-2 shortlist of 20,
-    so `key_message` stayed NULL and the renderer fell back to raw
-    `segment_text`. The widened shortlist (orchestrator default 20 → 50)
-    makes this rare; this ordering ensures that even when a reranked item
-    has slightly lower final_score than an unreranked one, the user sees
-    curated text instead of raw promotional text.
+    A higher-scoring item without a generated brief_summary/detailed_summary
+    must not enter the digest at all, because the renderer no longer falls
+    back to raw source or transcript text.
     """
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
@@ -208,15 +204,12 @@ async def test_t152_top_candidates_prefers_items_with_key_message(tmp_path: Path
         refined_segment="Concise paraphrase of the segment.",
     )
 
-    # T-152: reranked item must come FIRST even though its final_score is
-    # lower. Without the CASE-WHEN, the unreranked promo would win by
-    # 0.70 > 0.65 and render as raw text.
     top = await score_repo.top_candidates(subject_id=subject.id, limit=5)
-    assert [c.item_id for c in top] == [reranked_id, unreranked_id]
+    assert [c.item_id for c in top] == [reranked_id]
     assert top[0].key_message == "Karpathy explains a concrete Claude Code workflow."
 
     unsent = await score_repo.top_unsent_candidates(subject_id=subject.id, limit=5)
-    assert [c.item_id for c in unsent] == [reranked_id, unreranked_id]
+    assert [c.item_id for c in unsent] == [reranked_id]
 
     await db.close()
 
@@ -264,7 +257,7 @@ async def test_t152_top_candidates_ties_broken_by_final_score_within_reranked(
             final_score=score,
             rationale="reranked by Pass-2",
             key_message=f"Curated message {item_id}.",
-            refined_segment=None,
+            refined_segment=f"Detailed summary for item {item_id}.",
         )
 
     top = await score_repo.top_candidates(subject_id=subject.id, limit=5)

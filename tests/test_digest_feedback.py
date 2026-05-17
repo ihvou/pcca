@@ -164,6 +164,8 @@ async def _seed_item_score(
         noise_penalty=0.0,
         final_score=score,
         rationale=rationale,
+        key_message=f"Curated summary for {external_id}.",
+        refined_segment=f"Detailed summary for {external_id}.",
     )
     return item_id
 
@@ -533,6 +535,8 @@ async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(t
         noise_penalty=0.0,
         final_score=0.2,
         rationale="downgraded",
+        key_message=fake_telegram.sent_messages[0]["brief"].short_text.splitlines()[0],
+        refined_segment="Detailed downgraded summary.",
     )
     await item_score_repo.upsert_score(
         item_id=second_item_id,
@@ -545,6 +549,8 @@ async def test_smart_briefs_rebuild_when_preferences_changed_without_new_items(t
         noise_penalty=0.0,
         final_score=0.99,
         rationale="now best",
+        key_message="Curated summary for the replacement item.",
+        refined_segment="Detailed summary for the replacement item.",
     )
     await db.conn.execute(
         """

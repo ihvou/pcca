@@ -186,6 +186,17 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
         source_row = await (
             await db.conn.execute("SELECT is_monitored FROM sources WHERE account_or_channel_id = '@openai'")
         ).fetchone()
+        link_row = await (
+            await db.conn.execute(
+                """
+                SELECT COUNT(*) AS c
+                FROM subject_sources ss
+                JOIN subjects sub ON sub.id = ss.subject_id
+                JOIN sources s ON s.id = ss.source_id
+                WHERE sub.name = 'Vibe Coding' AND s.account_or_channel_id = '@openai'
+                """
+            )
+        ).fetchone()
     finally:
         await db.close()
 
@@ -195,10 +206,11 @@ async def test_desktop_service_confirms_staged_sources_without_marking_complete(
     assert subject_row is not None
     assert source_row is not None
     assert int(source_row["is_monitored"]) == 1
+    assert int(link_row["c"]) == 1
 
 
 @pytest.mark.asyncio
-async def test_desktop_service_monitors_staged_sources_without_subject(tmp_path: Path) -> None:
+async def test_t160_desktop_service_requires_subject_to_monitor_staged_sources(tmp_path: Path) -> None:
     settings = make_settings(tmp_path)
     service = DesktopCommandService(settings_factory=lambda: settings)
     await service.init_db()
@@ -219,11 +231,11 @@ async def test_desktop_service_monitors_staged_sources_without_subject(tmp_path:
 
     result = await service.monitor_staged_sources()
 
-    assert result.ok is True
-    assert result.data["monitored_sources"] == 1
+    assert result.ok is False
+    assert result.data["requires_subject_id"] is True
     state = await service.get_state()
-    assert state["pending_staged_count"] == 0
-    assert state["staged_counts"] == {}
+    assert state["pending_staged_count"] == 1
+    assert state["staged_counts"] == {"youtube": 1}
 
     db = Database(path=settings.db_path)
     await db.connect()
@@ -236,8 +248,7 @@ async def test_desktop_service_monitors_staged_sources_without_subject(tmp_path:
     finally:
         await db.close()
 
-    assert source_row is not None
-    assert int(source_row["is_monitored"]) == 1
+    assert source_row is None
 
 
 @pytest.mark.asyncio

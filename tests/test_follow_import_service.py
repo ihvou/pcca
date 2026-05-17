@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
+from pcca.collectors.linkedin_utils import LINKEDIN_TIMELINE_SOURCE_ID
 from pcca.services.follow_import_service import FollowImportService, normalize_youtube_subscription_href
 from pcca.services.source_discovery_service import DiscoveredSource
 
@@ -117,6 +118,46 @@ async def test_import_linkedin_sources_preserves_display_name_metadata() -> None
 
     assert imported[0].account_or_channel_id == "in/andrej-karpathy"
     assert imported[0].display_name == "Andrej Karpathy"
+
+
+@pytest.mark.asyncio
+async def test_t156_linkedin_import_auto_adds_timeline_source() -> None:
+    class _Mouse:
+        async def wheel(self, _x: int, _y: int) -> None:
+            return None
+
+    class _Page:
+        url = "https://www.linkedin.com/feed/following/"
+        mouse = _Mouse()
+
+        async def goto(self, url: str, **_kwargs) -> None:
+            self.url = url
+
+        async def wait_for_timeout(self, _timeout_ms: int) -> None:
+            return None
+
+        async def evaluate(self, *_args):
+            return []
+
+        async def close(self) -> None:
+            return None
+
+    class _SessionManager:
+        async def new_page(self, platform: str) -> _Page:
+            assert platform == "linkedin"
+            return _Page()
+
+        async def capture_debug_snapshot(self, *_args, **_kwargs) -> None:
+            return None
+
+    service = FollowImportService(session_manager=_SessionManager(), source_service=FakeSourceService(calls=[]))  # type: ignore[arg-type]
+
+    raw = await service.import_linkedin_follows(limit=0)
+    imported = await service.import_sources(platform="linkedin", limit=0)
+
+    assert raw == [f"{LINKEDIN_TIMELINE_SOURCE_ID}|||LinkedIn timeline (your feed)"]
+    assert [source.account_or_channel_id for source in imported] == [LINKEDIN_TIMELINE_SOURCE_ID]
+    assert imported[0].display_name == "LinkedIn timeline (your feed)"
 
 
 @pytest.mark.asyncio

@@ -1176,10 +1176,11 @@ def build_parser() -> argparse.ArgumentParser:
     confirm_staged_parser.add_argument("--exclude", action="append", default=[], help="Exclude term (repeatable)")
     confirm_staged_parser.add_argument("--high-quality", required=False, help="High quality examples/notes")
 
-    sub.add_parser(
+    monitor_staged_parser = sub.add_parser(
         "monitor-staged-sources",
-        help="Confirm pending onboarding sources into the global monitored source list",
+        help="Confirm pending onboarding sources into a subject",
     )
+    monitor_staged_parser.add_argument("--subject-id", required=True, type=int, help="Subject id to link sources to")
 
     login_parser = sub.add_parser(
         "login",
@@ -1460,7 +1461,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         return
 
     if args.command == "monitor-staged-sources":
-        result = asyncio.run(DesktopCommandService().monitor_staged_sources())
+        result = asyncio.run(DesktopCommandService().monitor_staged_sources(subject_id=args.subject_id))
         print(result.message)
         return
 

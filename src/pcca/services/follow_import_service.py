@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.linkedin_utils import (
+    LINKEDIN_TIMELINE_SOURCE_ID,
     is_opaque_linkedin_member_id,
     linked_in_profile_url,
     normalize_linkedin_source_id,
@@ -194,9 +195,16 @@ class FollowImportService:
                 await page.mouse.wheel(0, 2600)
                 await page.wait_for_timeout(800)
             ids = await self._resolve_linkedin_import_ids(page, ids)
+            ids.setdefault(LINKEDIN_TIMELINE_SOURCE_ID, "LinkedIn timeline (your feed)")
+            timeline = [(LINKEDIN_TIMELINE_SOURCE_ID, ids[LINKEDIN_TIMELINE_SOURCE_ID])]
+            followed = [
+                (source_id, display_name)
+                for source_id, display_name in sorted(ids.items())
+                if source_id != LINKEDIN_TIMELINE_SOURCE_ID
+            ]
             out = [
                 f"{source_id}{RAW_SOURCE_DISPLAY_SEPARATOR}{display_name}"
-                for source_id, display_name in sorted(ids.items())[:limit]
+                for source_id, display_name in (timeline + followed[:limit])
             ]
             logger.info("Follow import finished platform=linkedin count=%d", len(out))
             return out
@@ -604,7 +612,11 @@ class FollowImportService:
         display = display_override or source_value
         if platform == "linkedin":
             source_value = normalize_linkedin_source_id(source_value)
-            display = display_override or re.sub(r"^(in|company)/", "", source_value)
+            display = display_override or (
+                "LinkedIn timeline (your feed)"
+                if source_value == LINKEDIN_TIMELINE_SOURCE_ID
+                else re.sub(r"^(in|company)/", "", source_value)
+            )
         return [
             ImportedFollowSource(
                 platform=platform,

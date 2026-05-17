@@ -597,6 +597,7 @@ class DesktopCommandService:
             chats = await routing_service.list_registered_chats()
             reauth_sources = await source_service.list_sources_needing_reauth()
             monitored_sources = await source_service.list_all_sources()
+            orphan_sources = await source_service.list_orphan_sources()
             run_log_rows = await (
                 await db.conn.execute(
                     """
@@ -697,6 +698,8 @@ class DesktopCommandService:
                 },
                 "staged_sources": [asdict(row) for row in staged],
                 "monitored_sources": [asdict(row) for row in monitored_sources],
+                "orphan_sources": [asdict(row) for row in orphan_sources],
+                "orphan_source_count": len(orphan_sources),
                 "staged_counts": staged_counts,
                 "pending_staged_count": len(pending_staged),
                 "reauth_sources": [asdict(row) for row in reauth_sources],
@@ -1016,7 +1019,13 @@ class DesktopCommandService:
             return CommandResult(True, "Route moved.")
         return CommandResult(True, "Route already points there.")
 
-    async def monitor_staged_sources(self) -> CommandResult:
+    async def monitor_staged_sources(self, *, subject_id: int | None = None) -> CommandResult:
+        if subject_id is None or subject_id <= 0:
+            return CommandResult(
+                False,
+                "Choose a subject before confirming staged sources. Sources should not be imported as unowned orphans.",
+                {"requires_subject_id": True},
+            )
         settings = self.settings()
         settings.ensure_dirs()
         db = Database(path=settings.db_path)
@@ -1026,6 +1035,7 @@ class DesktopCommandService:
             if db.conn is None:
                 raise RuntimeError("Database connection unavailable.")
             subject_repo = SubjectRepository(conn=db.conn)
+            subject = await subject_repo.get_by_id(subject_id)
             source_service = SourceService(
                 source_repo=SourceRepository(conn=db.conn),
                 subject_repo=subject_repo,
@@ -1033,7 +1043,8 @@ class DesktopCommandService:
             onboarding_repo = OnboardingRepository(conn=db.conn)
             staged = await onboarding_repo.list_sources(status="pending")
             for row in staged:
-                await source_service.monitor_source(
+                await source_service.add_source_to_subject(
+                    subject_name=subject.name,
                     platform=row.platform,
                     account_or_channel_id=row.account_or_channel_id,
                     display_name=row.display_name,
@@ -1043,11 +1054,11 @@ class DesktopCommandService:
                 await onboarding_repo.update_state(current_step="sources_reviewed")
         finally:
             await db.close()
-        self.log(f"Now monitoring {len(staged)} staged source(s).")
+        self.log(f"Linked {len(staged)} staged source(s) to subject_id={subject_id}.")
         return CommandResult(
             True,
-            f"Now monitoring {len(staged)} source(s). Run Read Content to collect; results will be checked for all subjects.",
-            {"monitored_sources": len(staged)},
+            f"Linked {len(staged)} source(s) to {subject.name}. Run Get Content to collect.",
+            {"monitored_sources": len(staged), "subject_id": subject_id, "subject": subject.name},
         )
 
     async def confirm_staged_sources(
@@ -1087,7 +1098,8 @@ class DesktopCommandService:
             onboarding_repo = OnboardingRepository(conn=db.conn)
             staged = await onboarding_repo.list_sources(status="pending")
             for row in staged:
-                await source_service.monitor_source(
+                await source_service.add_source_to_subject(
+                    subject_name=created.name,
                     platform=row.platform,
                     account_or_channel_id=row.account_or_channel_id,
                     display_name=row.display_name,
@@ -1123,6 +1135,43 @@ class DesktopCommandService:
             f"Created subject '{subject_name}' and monitored {len(staged)} staged source(s).",
             {"subject": subject_name, "monitored_sources": len(staged), "new_routes": new_routes},
         )
+
+    async def adopt_orphan_source(self, *, source_id: int, subject_id: int) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            source_service = SourceService(
+                source_repo=SourceRepository(conn=db.conn),
+                subject_repo=SubjectRepository(conn=db.conn),
+            )
+            await source_service.adopt_source_to_subject(source_id=source_id, subject_id=subject_id)
+        finally:
+            await db.close()
+        self.log(f"Adopted orphan source_id={source_id} into subject_id={subject_id}.")
+        return CommandResult(True, "Source added to subject.", {"source_id": source_id, "subject_id": subject_id})
+
+    async def disable_source(self, *, source_id: int) -> CommandResult:
+        settings = self.settings()
+        settings.ensure_dirs()
+        db = Database(path=settings.db_path)
+        await db.connect()
+        await db.initialize()
+        try:
+            if db.conn is None:
+                raise RuntimeError("Database connection unavailable.")
+            await SourceService(
+                source_repo=SourceRepository(conn=db.conn),
+                subject_repo=SubjectRepository(conn=db.conn),
+            ).disable_source(source_id)
+        finally:
+            await db.close()
+        self.log(f"Disabled source_id={source_id}.")
+        return CommandResult(True, "Source disabled; collection will skip it.", {"source_id": source_id})
 
     async def draft_subject(self, *, text: str, subject_id: int | None = None) -> CommandResult:
         normalized = " ".join(text.split()).strip()

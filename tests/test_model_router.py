@@ -7,8 +7,7 @@ import pytest
 from pcca.services.model_router import (
     ModelRerankCandidate,
     ModelRouter,
-    REFINE_BATCH_RESPONSE_SCHEMA,
-    RERANK_BATCH_RESPONSE_SCHEMA,
+    SUMMARY_BATCH_RESPONSE_SCHEMA,
     build_preference_extraction_prompt,
     parse_model_json_response,
 )
@@ -38,7 +37,7 @@ def test_parse_model_json_response_strips_markdown_fence() -> None:
 
 
 @pytest.mark.asyncio
-async def test_model_router_batch_rerank_uses_configured_timeout_and_key_messages() -> None:
+async def test_t159_model_router_summarize_batch_produces_both_outputs() -> None:
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -49,12 +48,13 @@ async def test_model_router_batch_rerank_uses_configured_timeout_and_key_message
             json={
                 "response": json.dumps(
                     {
-                        "ranked": [
+                        "summaries": [
                             {
                                 "item_id": 1,
-                                "score_delta": 0.1,
+                                "brief_summary": "Claude Code introduced a better handoff workflow for implementation reviews.",
+                                "detailed_summary": "The item says Claude Code introduced a better handoff workflow. It frames the change around implementation reviews. The summary stays within the candidate text.",
+                                "is_low_content": False,
                                 "reason": "practical details",
-                                "key_message": "The useful point is clear.",
                             }
                         ]
                     }
@@ -70,7 +70,7 @@ async def test_model_router_batch_rerank_uses_configured_timeout_and_key_message
             timeout_seconds=180.0,
             http_client=client,
         )
-        results = await router.rerank_batch(
+        results = await router.summarize_batch(
             subject_name="AI Tools",
             subject_description="Practical Claude Code updates.",
             candidates=[
@@ -83,30 +83,22 @@ async def test_model_router_batch_rerank_uses_configured_timeout_and_key_message
         )
 
     assert seen["path"] == "/api/generate"
-    assert seen["payload"]["format"] == RERANK_BATCH_RESPONSE_SCHEMA
+    assert seen["payload"]["format"] == SUMMARY_BATCH_RESPONSE_SCHEMA
     prompt = seen["payload"]["prompt"]
-    assert "refined_segment" not in prompt
+    assert "brief_summary" in prompt
+    assert "detailed_summary" in prompt
     assert "Use only content present in the candidate text" in prompt
     assert "Do not introduce names, claims, products, companies, or context" in prompt
     assert "15-30 words" in prompt
-    # T-151: prompt must use "balanced" framing (not "strict") and must
-    # establish 0.00 as the DEFAULT score_delta. Without these, the LLM
-    # systematically biases negative and drags healthy items below the
-    # relevance floor — see model_router.rerank_batch for the full history.
-    assert "balanced curator" in prompt
-    assert "strict curator" not in prompt
-    assert "0.00 — DEFAULT" in prompt
-    assert "If you have to reach for a reason to lower the score, return 0.0 instead." in prompt
-    # T-151: heuristic_score must NOT be visible to the model — it anchored
-    # downward corrections.
+    assert "Your job is NOT to score it" in prompt
     assert "heuristic_score" not in prompt
-    assert results[1].score_delta == pytest.approx(0.1)
-    assert results[1].key_message == "The useful point is clear."
-    assert results[1].refined_segment is None
+    assert results[1].brief_summary.startswith("Claude Code introduced")
+    assert results[1].detailed_summary.startswith("The item says")
+    assert results[1].is_low_content is False
 
 
 @pytest.mark.asyncio
-async def test_model_router_refinement_batch_is_separate_top_n_call() -> None:
+async def test_t159_model_router_summarize_batch_handles_low_content() -> None:
     seen = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -116,10 +108,13 @@ async def test_model_router_refinement_batch_is_separate_top_n_call() -> None:
             json={
                 "response": json.dumps(
                     {
-                        "refined": [
+                        "summaries": [
                             {
                                 "item_id": 2,
-                                "refined_segment": "Cleaned up practical explanation.",
+                                "brief_summary": "",
+                                "detailed_summary": "",
+                                "is_low_content": True,
+                                "reason": "transition filler",
                             }
                         ]
                     }
@@ -134,22 +129,21 @@ async def test_model_router_refinement_batch_is_separate_top_n_call() -> None:
             ollama_model="qwen2.5:7b",
             http_client=client,
         )
-        results = await router.refine_batch(
+        results = await router.summarize_batch(
             subject_name="AI Tools",
             subject_description="Practical Claude Code updates.",
             candidates=[
                 ModelRerankCandidate(item_id=2, text="uh Claude Code can help", heuristic_score=0.9),
                 ModelRerankCandidate(item_id=3, text="not selected", heuristic_score=0.8),
             ],
-            limit=1,
         )
 
-    assert "refined_segment" in seen["payload"]["prompt"]
-    assert "paraphrasing only literal claims present in the candidate text" in seen["payload"]["prompt"]
+    assert "detailed_summary" in seen["payload"]["prompt"]
     assert "Do not introduce names, claims, products, companies, or context" in seen["payload"]["prompt"]
-    assert seen["payload"]["format"] == REFINE_BATCH_RESPONSE_SCHEMA
-    assert "not selected" not in seen["payload"]["prompt"]
-    assert results == {2: "Cleaned up practical explanation."}
+    assert seen["payload"]["format"] == SUMMARY_BATCH_RESPONSE_SCHEMA
+    assert results[2].is_low_content is True
+    assert results[2].brief_summary is None
+    assert results[2].detailed_summary is None
 
 
 @pytest.mark.asyncio
@@ -158,7 +152,7 @@ async def test_model_router_batch_rerank_gracefully_handles_wrong_structured_sha
 ) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.read().decode())
-        assert payload["format"] == RERANK_BATCH_RESPONSE_SCHEMA
+        assert payload["format"] == SUMMARY_BATCH_RESPONSE_SCHEMA
         return httpx.Response(
             200,
             json={
@@ -185,40 +179,32 @@ async def test_model_router_batch_rerank_gracefully_handles_wrong_structured_sha
             http_client=client,
         )
         with caplog.at_level(logging.WARNING):
-            results = await router.rerank_batch(
+            results = await router.summarize_batch(
                 subject_name="AI Jobs",
                 subject_description="Impact of AI on IT labor market.",
                 candidates=[ModelRerankCandidate(item_id=1, text="AI jobs analysis", heuristic_score=0.7)],
             )
 
     assert results == {}
-    assert "returned no ranked items" in caplog.text
+    assert "returned no summary items" in caplog.text
     assert "articles" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_t151_batch_rerank_log_line_reports_delta_distribution(
+async def test_t159_summary_batch_log_line_reports_summary_counts(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Per-batch telemetry: mean/neg/zero/pos surfaced in INFO log.
-
-    T-151 (2026-05-14): without these counters in the log line, ops have no
-    way to spot a returning negative-bias regression without re-running a DB
-    audit. With them, a single grep on `mean_delta=` and `neg=` per run shows
-    the trend.
-    """
-
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
             json={
                 "response": json.dumps(
                     {
-                        "ranked": [
-                            {"item_id": 1, "score_delta": 0.20, "reason": "strong", "key_message": "A strong point."},
-                            {"item_id": 2, "score_delta": 0.00, "reason": "neutral", "key_message": "A neutral point."},
-                            {"item_id": 3, "score_delta": -0.10, "reason": "weak", "key_message": "A weak point."},
-                            {"item_id": 4, "score_delta": -0.05, "reason": "weak", "key_message": "Another weak."},
+                        "summaries": [
+                            {"item_id": 1, "brief_summary": "A strong practical point is summarized clearly.", "detailed_summary": "Detailed summary one. More detail. Final detail.", "is_low_content": False},
+                            {"item_id": 2, "brief_summary": "A second useful point is summarized clearly.", "detailed_summary": "Detailed summary two. More detail. Final detail.", "is_low_content": False},
+                            {"item_id": 3, "brief_summary": "", "detailed_summary": "", "is_low_content": True},
+                            {"item_id": 4, "brief_summary": "Another usable point is summarized clearly.", "detailed_summary": "Detailed summary four. More detail. Final detail.", "is_low_content": False},
                         ]
                     }
                 )
@@ -233,7 +219,7 @@ async def test_t151_batch_rerank_log_line_reports_delta_distribution(
             http_client=client,
         )
         with caplog.at_level(logging.INFO, logger="pcca.services.model_router"):
-            await router.rerank_batch(
+            await router.summarize_batch(
                 subject_name="AI Tools",
                 subject_description="Practical Claude Code updates.",
                 candidates=[
@@ -244,11 +230,9 @@ async def test_t151_batch_rerank_log_line_reports_delta_distribution(
                 ],
             )
 
-    # mean = (0.20 + 0.00 - 0.10 - 0.05) / 4 = 0.0125
-    assert "mean_delta=+0.013" in caplog.text or "mean_delta=+0.012" in caplog.text
-    assert "neg=2" in caplog.text
-    assert "zero=1" in caplog.text
-    assert "pos=1" in caplog.text
+    assert "brief_count=3" in caplog.text
+    assert "detailed_count=3" in caplog.text
+    assert "low_content=1" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -312,7 +296,7 @@ async def test_model_router_logs_malformed_json_preview(caplog: pytest.LogCaptur
             http_client=client,
         )
         with caplog.at_level(logging.WARNING):
-            results = await router.rerank_batch(
+            results = await router.summarize_batch(
                 subject_name="AI Tools",
                 subject_description="Practical Claude Code updates.",
                 candidates=[ModelRerankCandidate(item_id=1, text="Claude Code", heuristic_score=0.7)],

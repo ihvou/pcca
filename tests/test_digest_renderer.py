@@ -138,6 +138,8 @@ async def test_telegram_renderer_uses_per_subject_full_text_cap() -> None:
         published_at="2026-04-29",
         final_score=0.9,
         rationale="matched",
+        key_message="Long form source provides a detailed curated update for this subject.",
+        refined_segment="A" * 3200,
     )
 
     payload = await TelegramDigestRenderer().render(
@@ -151,8 +153,9 @@ async def test_telegram_renderer_uses_per_subject_full_text_cap() -> None:
         ),
     )
 
-    assert "A" * 3000 in payload.briefs[0].full_text
-    assert "\n\n..." not in payload.briefs[0].full_text
+    assert "A" * 1400 in payload.briefs[0].full_text
+    assert "A" * 1800 not in payload.briefs[0].full_text
+    assert "\n\n\\.\\.\\." in payload.briefs[0].full_text
 
 
 @pytest.mark.asyncio
@@ -174,7 +177,8 @@ async def test_telegram_renderer_clamps_full_text_cap() -> None:
         final_score=0.9,
         rationale="matched",
         segment_text="B" * 600,
-        key_message="Short summary.",
+        key_message="Tiny source provides a concise curated update for this subject.",
+        refined_segment="B" * 600,
     )
 
     payload = await TelegramDigestRenderer().render(
@@ -237,7 +241,7 @@ async def test_telegram_renderer_deep_links_youtube_matched_segment() -> None:
     assert "📺 Anthropic — _Anthropic\\_release \\*interview\\*_" in brief.short_text
     assert "\\[01:32\\-02:53\\] · 1:00:00 · 3 days ago" in brief.short_text
     assert "#AITools" in brief.short_text
-    assert "Full segment:" in brief.full_text
+    assert "Detailed summary:" in brief.full_text
     assert "Why this matched:" in brief.full_text
     assert "Whole episode description" not in brief.full_text
 
@@ -281,14 +285,14 @@ async def test_telegram_renderer_uses_refined_segment_for_more_text() -> None:
     )
 
     full_text = payload.briefs[0].full_text
-    assert "Refined segment:" in full_text
+    assert "Detailed summary:" in full_text
     assert "standardize team handoffs" in full_text
     assert "uh so you know" not in full_text
     assert "Why this matched:" in full_text
 
 
 @pytest.mark.asyncio
-async def test_telegram_renderer_falls_back_when_key_message_is_low_content() -> None:
+async def test_t159_telegram_renderer_does_not_fallback_to_raw_text_when_key_message_is_low_content() -> None:
     subject = Subject(
         id=1,
         name="AI Tools",
@@ -320,7 +324,8 @@ async def test_telegram_renderer_falls_back_when_key_message_is_low_content() ->
     )
 
     assert "Those are the most common ones" not in payload.briefs[0].short_text
-    assert "Anthropic shows a concrete workflow" in payload.briefs[0].short_text
+    assert "Anthropic shows a concrete workflow" not in payload.briefs[0].short_text
+    assert "Curated summary unavailable" in payload.briefs[0].short_text
 
 
 @pytest.mark.asyncio
@@ -381,6 +386,8 @@ async def test_telegram_renderer_prefixes_apple_podcasts_timestamp_without_deepl
         segment_text="The useful part explains how the team evaluates agent changes.",
         segment_start_seconds=872.0,
         segment_end_seconds=1028.0,
+        key_message="The podcast segment explains how the team evaluates agent changes in practical detail.",
+        refined_segment="The useful part explains how the team evaluates agent changes.",
     )
 
     payload = await TelegramDigestRenderer().render(
@@ -397,4 +404,4 @@ async def test_telegram_renderer_prefixes_apple_podcasts_timestamp_without_deepl
     assert "https://podcasts.apple.com/us/podcast/demo/id123?i=456" in brief.short_text
     assert "?t=" not in brief.short_text
     assert "\\[14:32\\-17:08\\]" in brief.short_text
-    assert "The useful part explains" in brief.short_text
+    assert "team evaluates agent changes" in brief.short_text

@@ -89,6 +89,9 @@ class CurationEngine:
 
         practical_hits = sum(1 for term in self.practical_terms if term in text)
         practicality = min(1.0, practical_hits / 4.0)
+        practicality_floor = self._practicality_floor_for_platform(item.platform, text)
+        if practicality_floor is not None:
+            practicality = max(practicality, practicality_floor)
 
         novelty = 0.8
         if any(term in text for term in ("introduction", "overview", "top 10", "beginner")):
@@ -157,13 +160,16 @@ class CurationEngine:
         # below the 0.55 floor — even though the tweet IS exactly what a
         # subject titled "AI Tools & Tips" wants. Same pattern on @bcherny
         # Anthropic Mythos and @soumithchintala. New behavior: the demote only
-        # fires when relevance is ALSO weak (< 0.55) — that's the actual
-        # "fluffy" signal we want to filter. Strong-relevance news content
-        # passes through at its formula score.
+        # T-161 extends that guard for short-form: X posts get a small
+        # practicality floor because a 280-char product announcement rarely
+        # contains long-form practicality keywords. The demote now fires only
+        # when relevance is also weak (< 0.50), which is the actual "fluffy"
+        # signal we want to filter. Strong-relevance news content passes
+        # through at its formula score.
         if (
             min_practicality is not None
             and practicality < min_practicality
-            and relevance < 0.55
+            and relevance < 0.50
         ):
             # Both signals weak → genuine low-value content. Demote.
             final_score -= 0.2
@@ -187,3 +193,11 @@ class CurationEngine:
             final_score=final_score,
             rationale=rationale,
         )
+
+    @staticmethod
+    def _practicality_floor_for_platform(platform: str | None, text: str) -> float | None:
+        if platform == "x":
+            return 0.40
+        if platform == "reddit" and len(text) < 500:
+            return 0.35
+        return None

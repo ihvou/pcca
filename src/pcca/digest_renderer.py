@@ -276,8 +276,8 @@ def _brief_full_text(
     full_text_chars: int,
 ) -> str:
     refined = _refined_segment_body(candidate, limit=full_text_chars)
-    segment_label = "Refined segment:" if refined is not None else "Full segment:"
-    full_segment = refined if refined is not None else _segment_body(candidate, limit=full_text_chars)
+    segment_label = "Detailed summary:"
+    full_segment = refined if refined is not None else "Detailed summary unavailable. Rebuild Briefs to regenerate this item."
     return "\n".join(
         [
             _brief_short_text(candidate, subject_hashtag=subject_hashtag, run_date=run_date),
@@ -291,25 +291,10 @@ def _brief_full_text(
 
 
 def _key_message(candidate: CandidateItem) -> str:
-    has_key_message = bool(candidate.key_message and candidate.key_message.strip())
-    if has_key_message and not is_low_content_key_message(candidate.key_message):
-        return candidate.key_message.strip()
-    # If Pass-2 produced a throwaway key message, avoid promoting raw transcript
-    # filler into the Brief header. Prefer literal cleaned/segment text when it
-    # has enough substance; otherwise fall back to the source title.
-    fallbacks = (
-        [candidate.refined_segment, candidate.segment_text, candidate.title_or_text]
-        if has_key_message
-        else [candidate.segment_text, candidate.refined_segment, candidate.title_or_text]
-    )
-    for index, body in enumerate(fallbacks):
-        normalized = " ".join((body or "").split())
-        if not normalized:
-            continue
-        is_title_fallback = index == len(fallbacks) - 1
-        if is_title_fallback or _is_usable_fallback_body(normalized):
-            return normalized[:260].rstrip() + ("..." if len(normalized) > 260 else "")
-    return "Useful update detected for this subject."
+    normalized = " ".join((candidate.key_message or "").split()).strip()
+    if normalized and not is_low_content_key_message(normalized):
+        return normalized
+    return "Curated summary unavailable. Rebuild Briefs to regenerate this item."
 
 
 def is_low_content_key_message(message: str | None) -> bool:

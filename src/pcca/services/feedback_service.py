@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 
 from pcca.repositories.digests import DigestBriefViewRow, DigestButtonRow, DigestItemDeliveryRow, DigestRepository
 from pcca.repositories.feedback import FeedbackRepository
 from pcca.repositories.preferences import SubjectPreferenceRepository
 from pcca.repositories.subjects import SubjectRepository
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -32,7 +35,7 @@ class FeedbackService:
             comment_text=comment_text,
             item_id=item_id,
         )
-        await self._append_feedback_to_subject_description(
+        await self._record_feedback_learning_signal(
             subject_id=subject.id,
             feedback_type=feedback_type,
             comment_text=comment_text,
@@ -52,13 +55,13 @@ class FeedbackService:
             comment_text=comment_text,
             item_id=item_id,
         )
-        await self._append_feedback_to_subject_description(
+        await self._record_feedback_learning_signal(
             subject_id=subject_id,
             feedback_type=feedback_type,
             comment_text=comment_text,
         )
 
-    async def _append_feedback_to_subject_description(
+    async def _record_feedback_learning_signal(
         self,
         *,
         subject_id: int,
@@ -70,11 +73,13 @@ class FeedbackService:
         normalized = " ".join((comment_text or "").split()).strip()
         if not normalized or feedback_type not in {"button_macro", "reply_text"}:
             return
-        existing_description = await self.subject_repo.get_description_text(subject_id)
         memory = f"User feedback ({feedback_type}): {normalized}"
-        updated_description = "\n".join(part for part in (existing_description, memory) if part)
-        await self.subject_repo.update_description(subject_id, updated_description)
         await self.preference_repo.append_rules(subject_id=subject_id, quality_notes=memory)
+        logger.info(
+            "Feedback learning signal recorded subject_id=%s feedback_type=%s description_mutated=false",
+            subject_id,
+            feedback_type,
+        )
 
     async def get_digest_button(self, token: str) -> DigestButtonRow | None:
         if self.digest_repo is None:

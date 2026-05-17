@@ -8,6 +8,7 @@ import pytest
 
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import SessionChallengedError, SourceNotFoundError
+from pcca.collectors.linkedin_utils import LINKEDIN_TIMELINE_SOURCE_ID
 from pcca.config import Settings
 from pcca.db import Database
 from pcca.pipeline.orchestrator import PipelineOrchestrator
@@ -245,10 +246,22 @@ class FakeModelRouter:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
-        _ = text, heuristic_score, item_id
-        self.calls.append(subject_name)
-        return None
+    async def summarize_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+        _ = subject_description
+        self.calls.extend(subject_name for _candidate in candidates)
+        return {
+            candidate.item_id: type(
+                "Summary",
+                (),
+                {
+                    "brief_summary": f"Summary for item {candidate.item_id}.",
+                    "detailed_summary": f"Detailed summary for item {candidate.item_id}.",
+                    "is_low_content": False,
+                    "rationale": "summary",
+                },
+            )()
+            for candidate in candidates
+        }
 
 
 class FakeEmbeddingService:
@@ -290,11 +303,10 @@ class FailingEmbeddingService:
 
 class FakeBatchModelRouter:
     def __init__(self) -> None:
-        self.batch_calls: list[dict] = []
-        self.refine_calls: list[dict] = []
+        self.summary_calls: list[dict] = []
 
-    async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
-        self.batch_calls.append(
+    async def summarize_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+        self.summary_calls.append(
             {
                 "subject_name": subject_name,
                 "subject_description": subject_description,
@@ -304,48 +316,34 @@ class FakeBatchModelRouter:
         )
         return {
             candidate.item_id: type(
-                "Rerank",
+                "Summary",
                 (),
                 {
-                    "score_delta": 0.01,
                     "rationale": "batch considered full description",
-                    "key_message": f"Useful key message for item {candidate.item_id}.",
+                    "brief_summary": f"Useful key message for item {candidate.item_id}.",
+                    "detailed_summary": f"Refined segment for item {candidate.item_id}.",
+                    "is_low_content": False,
                 },
             )()
             for candidate in candidates
         }
 
-    async def refine_batch(self, *, subject_name: str, subject_description: str, candidates: list, limit: int = 5):
-        self.refine_calls.append(
-            {
-                "subject_name": subject_name,
-                "subject_description": subject_description,
-                "candidate_count": len(candidates),
-                "limit": limit,
-                "candidate_texts": [candidate.text for candidate in candidates],
-            }
-        )
-        return {
-            candidate.item_id: f"Refined segment for item {candidate.item_id}."
-            for candidate in candidates[:limit]
-        }
-
     async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
         _ = item_id
-        raise AssertionError("embedding path should use batch rerank")
+        raise AssertionError("summary path should not use single rerank")
 
 
 class EmptyBatchModelRouter:
     enabled = True
 
     def __init__(self) -> None:
-        self.batch_calls = 0
+        self.summary_calls = 0
         self.single_calls = 0
         self.single_item_ids: list[int | None] = []
 
-    async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+    async def summarize_batch(self, *, subject_name: str, subject_description: str, candidates: list):
         _ = subject_name, subject_description, candidates
-        self.batch_calls += 1
+        self.summary_calls += 1
         return {}
 
     async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
@@ -1451,12 +1449,101 @@ async def test_pipeline_embedding_scorer_uses_subject_description_semantics(tmp_
     )
 
     stats = await orchestrator.run_nightly_collection()
-    candidates = await ItemScoreRepository(conn=db.conn).top_candidates(subject_id=1, limit=2)
+    candidates = await (
+        await db.conn.execute(
+            """
+            SELECT i.canonical_url AS url, s.rationale_json AS rationale_json
+            FROM item_scores s
+            JOIN items i ON i.id = s.item_id
+            WHERE s.subject_id = 1
+            ORDER BY s.final_score DESC
+            LIMIT 2
+            """
+        )
+    ).fetchall()
 
     assert stats["embedding_items_scored"] == 2
-    assert candidates[0].url == "https://example.com/ukraine"
-    assert "semantic_similarity=" in candidates[0].rationale
-    assert "keyword_shadow_final=" in candidates[0].rationale
+    assert candidates[0]["url"] == "https://example.com/ukraine"
+    rationale = json.loads(candidates[0]["rationale_json"])["reason"]
+    assert "semantic_similarity=" in rationale
+    assert "keyword_shadow_final=" in rationale
+
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t156_timeline_post_routes_to_matching_subject_via_embedding(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    source_repo = SourceRepository(conn=db.conn)
+    subject_service = SubjectService(repository=subject_repo)
+    source_service = SourceService(source_repo=source_repo, subject_repo=subject_repo)
+
+    await subject_service.create_subject(
+        "Ukraine War News",
+        include_terms=["frontline"],
+        description_text="Ukraine war news, Kyiv frontline analysis, Russia updates.",
+    )
+    await subject_service.create_subject(
+        "AI Tools & Tips",
+        include_terms=["claude code"],
+        description_text="Claude Code product updates, AI tools, practical developer workflows.",
+    )
+    await source_service.monitor_source(
+        platform="linkedin",
+        account_or_channel_id=LINKEDIN_TIMELINE_SOURCE_ID,
+        display_name="LinkedIn timeline (your feed)",
+    )
+
+    class TimelineCollector:
+        platform = "linkedin"
+
+        async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+            assert source_id == LINKEDIN_TIMELINE_SOURCE_ID
+            return [
+                CollectedItem(
+                    platform="linkedin",
+                    external_id="timeline:claude-update",
+                    author="LinkedIn Connection",
+                    url="https://www.linkedin.com/feed/update/urn:li:activity:claude/",
+                    text="Claude Code added a new handoff workflow for agentic coding teams.",
+                    transcript_text=None,
+                    published_at=None,
+                    metadata={"linkedin_timeline": True, "source_id": LINKEDIN_TIMELINE_SOURCE_ID},
+                )
+            ]
+
+    orchestrator = PipelineOrchestrator(
+        subject_service=subject_service,
+        source_service=source_service,
+        item_repo=ItemRepository(conn=db.conn),
+        item_score_repo=ItemScoreRepository(conn=db.conn),
+        run_log_repo=RunLogRepository(conn=db.conn),
+        embedding_service=FakeEmbeddingService(),  # type: ignore[arg-type]
+        collectors={"linkedin": TimelineCollector()},
+        scorer="embedding",
+    )
+
+    stats = await orchestrator.run_nightly_collection()
+    rows = await (
+        await db.conn.execute(
+            """
+            SELECT subjects.name AS subject_name, item_scores.final_score
+            FROM item_scores
+            JOIN subjects ON subjects.id = item_scores.subject_id
+            ORDER BY item_scores.final_score DESC
+            """
+        )
+    ).fetchall()
+
+    assert stats["items_collected"] == 1
+    assert stats["embedding_items_scored"] == 2
+    assert rows[0]["subject_name"] == "AI Tools & Tips"
+    assert rows[0]["final_score"] > rows[1]["final_score"]
 
     await db.close()
 
@@ -1517,25 +1604,14 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
 
     stats = await orchestrator.run_nightly_collection()
 
-    assert stats["model_batch_rerank_calls"] == 1
-    assert stats["model_refinement_batch_calls"] == 1
-    assert stats["items_model_reranked"] == 3
-    assert stats["items_model_refined"] == 3
-    # T-151 telemetry: score_delta distribution surfaced in stats so a
-    # returning negative-bias regression shows up in run_logs.stats_json
-    # without needing a DB audit. Each of the 3 items got delta=+0.01 from
-    # FakeBatchModelRouter, so the distribution is 3 positive / 0 zero / 0 negative.
-    assert stats["score_delta_count"] == 3
-    assert stats["score_delta_positive_count"] == 3
-    assert stats["score_delta_zero_count"] == 0
-    assert stats["score_delta_negative_count"] == 0
-    assert stats["score_delta_mean"] == pytest.approx(0.01)
-    assert model_router.batch_calls[0]["subject_name"] == "AI Tools & Tips"
-    assert "leading AI companies" in model_router.batch_calls[0]["subject_description"]
-    assert "Include:" not in model_router.batch_calls[0]["subject_description"]
-    assert "Avoid:" not in model_router.batch_calls[0]["subject_description"]
-    assert model_router.batch_calls[0]["candidate_count"] == 3
-    assert model_router.refine_calls[0]["candidate_count"] == 3
+    assert stats["model_summary_batch_calls"] == 1
+    assert stats["items_model_summarized"] == 3
+    assert stats["items_model_summary_low_content"] == 0
+    assert model_router.summary_calls[0]["subject_name"] == "AI Tools & Tips"
+    assert "leading AI companies" in model_router.summary_calls[0]["subject_description"]
+    assert "Include:" not in model_router.summary_calls[0]["subject_description"]
+    assert "Avoid:" not in model_router.summary_calls[0]["subject_description"]
+    assert model_router.summary_calls[0]["candidate_count"] == 3
     rows = await (
         await db.conn.execute("SELECT rationale_json FROM item_segment_scores ORDER BY item_id")
     ).fetchall()
@@ -1549,7 +1625,7 @@ async def test_pipeline_embedding_path_uses_batch_rerank_with_full_description(t
 
 
 @pytest.mark.asyncio
-async def test_pipeline_falls_back_to_per_item_rerank_after_empty_batch(tmp_path: Path) -> None:
+async def test_t159_pipeline_does_not_fallback_after_empty_summary_batch(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
     await db.initialize()
@@ -1604,25 +1680,17 @@ async def test_pipeline_falls_back_to_per_item_rerank_after_empty_batch(tmp_path
 
     stats = await orchestrator.run_nightly_collection()
 
-    assert stats["model_batch_rerank_calls"] == 1
-    assert stats["items_model_reranked"] == 0
-    assert stats["items_model_reranked_per_item"] == 20
-    assert stats["batch_truncation_recovered"] == 20
-    # T-151 telemetry: per-item fallback path also feeds the score_delta
-    # counters. Each of the 20 fallback items got delta=+0.02 from
-    # EmptyBatchModelRouter, so all 20 land in score_delta_positive_count.
-    assert stats["score_delta_count"] == 20
-    assert stats["score_delta_positive_count"] == 20
-    assert stats["score_delta_negative_count"] == 0
-    assert stats["score_delta_mean"] == pytest.approx(0.02)
-    assert model_router.batch_calls == 1
-    assert model_router.single_calls == 20
-    assert len(model_router.single_item_ids) == 20
+    assert stats["model_summary_batch_calls"] == 1
+    assert stats["items_model_summarized"] == 0
+    assert stats["items_model_reranked_per_item"] == 0
+    assert stats["batch_truncation_recovered"] == 0
+    assert model_router.summary_calls == 1
+    assert model_router.single_calls == 0
     rows = await (
         await db.conn.execute("SELECT rationale_json FROM item_scores ORDER BY item_id")
     ).fetchall()
     assert len(rows) == 20
-    assert all(json.loads(row["rationale_json"])["key_message"].startswith("Per-item key message") for row in rows)
+    assert all(json.loads(row["rationale_json"])["key_message"] is None for row in rows)
 
     await db.close()
 
@@ -1670,36 +1738,31 @@ async def test_t151_escalation_score_delta_recorded_but_not_applied(tmp_path: Pa
     )
 
     class HostileNegativeDeltaRouter:
-        """Returns -0.20 for every item — the production bias pattern."""
-
         enabled = True
 
         def __init__(self) -> None:
-            self.batch_calls = 0
+            self.summary_calls = 0
 
-        async def rerank_batch(self, *, subject_name: str, subject_description: str, candidates: list):
+        async def summarize_batch(self, *, subject_name: str, subject_description: str, candidates: list):
             _ = subject_name, subject_description
-            self.batch_calls += 1
+            self.summary_calls += 1
             return {
                 candidate.item_id: type(
-                    "Rerank",
+                    "Summary",
                     (),
                     {
-                        "score_delta": -0.20,
                         "rationale": "mentions Claude but not directly related to the subject",
-                        "key_message": f"Curated message {candidate.item_id}.",
+                        "brief_summary": f"Curated message {candidate.item_id}.",
+                        "detailed_summary": f"Refined {candidate.item_id}.",
+                        "is_low_content": False,
                     },
                 )()
                 for candidate in candidates
             }
 
-        async def refine_batch(self, *, subject_name: str, subject_description: str, candidates: list, limit: int = 5):
-            _ = subject_name, subject_description, limit
-            return {candidate.item_id: f"Refined {candidate.item_id}." for candidate in candidates}
-
         async def rerank(self, *, subject_name: str, text: str, heuristic_score: float, item_id: int | None = None):
             _ = subject_name, text, heuristic_score, item_id
-            raise AssertionError("embedding path should use batch rerank only")
+            raise AssertionError("summary path should not use single rerank")
 
     class AICollector:
         platform = "rss"
@@ -1734,13 +1797,8 @@ async def test_t151_escalation_score_delta_recorded_but_not_applied(tmp_path: Pa
 
     stats = await orchestrator.run_nightly_collection()
 
-    # Telemetry still records the observed deltas so a healthier future
-    # model can be detected — but the score wasn't dragged down.
-    assert stats["score_delta_count"] == 3
-    assert stats["score_delta_negative_count"] == 3
-    assert stats["score_delta_zero_count"] == 0
-    assert stats["score_delta_positive_count"] == 0
-    assert stats["score_delta_mean"] == pytest.approx(-0.20)
+    assert stats["model_summary_batch_calls"] == 1
+    assert stats["items_model_summarized"] == 3
 
     # Most important assertion: final_score must NOT be diminished by -0.20.
     # Before T-151 escalation: 3 items × -0.20 delta = Pass-1 - 0.20 each.
@@ -1758,14 +1816,12 @@ async def test_t151_escalation_score_delta_recorded_but_not_applied(tmp_path: Pa
         # delta application, these scores would be 0.20 lower and likely
         # below 0.5 — assert the floor.
         assert row["final_score"] > 0.3, (
-            f"final_score={row['final_score']} suggests delta was applied — "
-            "T-151 escalation requires delta to be observed but not applied"
+            f"final_score={row['final_score']} suggests a removed score_delta path is back"
         )
         rationale = json.loads(row["rationale_json"])
-        # Pass-2 outputs (key_message, refined_segment) ARE still used.
         assert rationale["key_message"].startswith("Curated message")
-        # Rerank reasoning still appended to rationale string for audits.
-        assert "model_batch=mentions Claude" in rationale["reason"]
+        assert rationale["refined_segment"].startswith("Refined")
+        assert "model_summary=mentions Claude" in rationale["reason"]
 
     await db.close()
 
@@ -2095,7 +2151,33 @@ async def test_nightly_upgrades_legacy_item_scores_to_segment_level_ranking(tmp_
     )
 
     stats = await orchestrator.run_nightly_collection()
-    candidates = await item_score_repo.top_candidates(subject_id=subject.id, limit=2)
+    candidate_rows = await (
+        await db.conn.execute(
+            """
+            SELECT
+              i.id AS item_id,
+              s.final_score,
+              seg.segment_text,
+              seg.start_offset_seconds
+            FROM item_scores s
+            JOIN items i ON i.id = s.item_id
+            LEFT JOIN item_segment_scores iss_best
+              ON iss_best.id = (
+                SELECT iss.id
+                FROM item_segment_scores iss
+                WHERE iss.item_id = i.id
+                  AND iss.subject_id = s.subject_id
+                ORDER BY iss.final_score DESC, iss.id ASC
+                LIMIT 1
+              )
+            LEFT JOIN item_segments seg ON seg.id = iss_best.segment_id
+            WHERE s.subject_id = ?
+            ORDER BY s.final_score DESC
+            LIMIT 2
+            """,
+            (subject.id,),
+        )
+    ).fetchall()
     segment_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_segments")).fetchone()
     score_count = await (await db.conn.execute("SELECT COUNT(*) AS c FROM item_segment_scores")).fetchone()
     max_segment_score = await (
@@ -2108,13 +2190,13 @@ async def test_nightly_upgrades_legacy_item_scores_to_segment_level_ranking(tmp_
     assert stats["segments_scored"] >= 4
     assert segment_count["c"] >= 4
     assert score_count["c"] >= 4
-    assert candidates[0].item_id == anthropic_id
-    assert candidates[1].item_id == darth_id
-    assert candidates[0].final_score - candidates[1].final_score >= 0.05
-    assert candidates[0].segment_text is not None
-    assert "Claude Code release" in candidates[0].segment_text
-    assert candidates[0].segment_start_seconds == 180.0
-    assert candidates[0].final_score == pytest.approx(float(max_segment_score["s"]))
+    assert candidate_rows[0]["item_id"] == anthropic_id
+    assert candidate_rows[1]["item_id"] == darth_id
+    assert float(candidate_rows[0]["final_score"]) - float(candidate_rows[1]["final_score"]) >= 0.05
+    assert candidate_rows[0]["segment_text"] is not None
+    assert "Claude Code release" in candidate_rows[0]["segment_text"]
+    assert float(candidate_rows[0]["start_offset_seconds"]) == 180.0
+    assert float(candidate_rows[0]["final_score"]) == pytest.approx(float(max_segment_score["s"]))
 
     await db.close()
 

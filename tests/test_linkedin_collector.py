@@ -15,10 +15,12 @@ import pytest
 from pcca.collectors.errors import BotShapedError
 from pcca.collectors.linkedin_collector import (
     LinkedInCollector,
+    LinkedInTimelineCollector,
     _detect_empty_page_reason,
     _detect_bot_shaped_signal,
     _linkedin_collection_urls,
 )
+from pcca.collectors.linkedin_utils import LINKEDIN_TIMELINE_SOURCE_ID, normalize_linkedin_source_id
 
 
 class _FakePage:
@@ -102,6 +104,11 @@ def test_linkedin_collection_urls_include_creator_posts_fallbacks() -> None:
         "https://www.linkedin.com/in/lennyrachitsky/posts/",
         "https://www.linkedin.com/in/lennyrachitsky/detail/recent-activity/shares/",
     ]
+
+
+def test_t156_linkedin_timeline_alias_normalizes_to_my_timeline() -> None:
+    assert normalize_linkedin_source_id("linkedin:my-timeline") == LINKEDIN_TIMELINE_SOURCE_ID
+    assert normalize_linkedin_source_id("https://www.linkedin.com/feed/") == LINKEDIN_TIMELINE_SOURCE_ID
 
 
 @pytest.mark.asyncio
@@ -283,3 +290,69 @@ async def test_linkedin_collector_tries_posts_route_after_empty_activity_route()
     assert items[0].author == "Lenny Rachitsky"
     assert items[0].published_at == "2026-05-12T00:00:00.000Z"
     assert items[0].metadata["reaction_count"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_t156_linkedin_timeline_collector_extracts_posts_from_feed_dom() -> None:
+    class _Mouse:
+        async def wheel(self, _x: int, _y: int) -> None:
+            return None
+
+    class _SessionManagerSpy:
+        async def new_page(self, _platform: str) -> Any:
+            page = _FakePage(url="https://www.linkedin.com/feed/")
+            page.mouse = _Mouse()  # type: ignore[attr-defined]
+            return page
+
+        async def capture_empty_result_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            raise AssertionError("timeline should not be empty")
+
+        async def capture_debug_snapshot(self, *_args: Any, **_kwargs: Any) -> None:
+            return None
+
+    visited: list[str] = []
+
+    async def _fake_goto(url: str, **_kwargs: Any) -> None:
+        visited.append(url)
+        page.url = url
+
+    async def _fake_wait_for_timeout(_ms: int) -> None:
+        return None
+
+    async def _fake_evaluate(_js: str, _max_items: int) -> list:
+        return [
+            {
+                "external_id": "123",
+                "author": "Connection Author",
+                "url": "https://www.linkedin.com/feed/update/urn:li:activity:123/",
+                "text": "Connection-driven post with practical AI PM lesson.",
+                "published_at": "2026-05-17T00:00:00.000Z",
+                "reaction_count": 10,
+                "comment_count": 2,
+                "repost_count": 1,
+            }
+        ]
+
+    async def _fake_close() -> None:
+        return None
+
+    spy = _SessionManagerSpy()
+    page = await spy.new_page("linkedin")
+    page.goto = _fake_goto  # type: ignore[attr-defined]
+    page.wait_for_timeout = _fake_wait_for_timeout  # type: ignore[attr-defined]
+    page.evaluate = _fake_evaluate  # type: ignore[attr-defined]
+    page.close = _fake_close  # type: ignore[attr-defined]
+
+    async def _new_page_returning_spy(_platform: str) -> Any:
+        return page
+
+    spy.new_page = _new_page_returning_spy  # type: ignore[method-assign]
+
+    collector = LinkedInTimelineCollector(session_manager=spy, max_items=5, scroll_iterations=1)  # type: ignore[arg-type]
+    items = await collector.collect_from_source("linkedin:my-timeline")
+
+    assert visited == ["https://www.linkedin.com/feed/"]
+    assert len(items) == 1
+    assert items[0].external_id == "timeline:123"
+    assert items[0].author == "Connection Author"
+    assert items[0].metadata["linkedin_timeline"] is True

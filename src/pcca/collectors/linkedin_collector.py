@@ -7,6 +7,7 @@ from pcca.browser.session_manager import BrowserSessionManager
 from pcca.collectors.base import CollectedItem
 from pcca.collectors.errors import BotShapedError, SessionChallengedError
 from pcca.collectors.linkedin_utils import (
+    LINKEDIN_TIMELINE_SOURCE_ID,
     build_linkedin_activity_url,
     is_opaque_linkedin_member_id,
     linked_in_profile_url,
@@ -229,6 +230,106 @@ _LINKEDIN_POST_EXTRACTION_SCRIPT = """
 
 
 @dataclass
+class LinkedInTimelineCollector:
+    session_manager: BrowserSessionManager
+    max_items: int = 120
+    platform: str = "linkedin"
+    scroll_iterations: int = 8
+
+    async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        normalized = normalize_linkedin_source_id(source_id)
+        if normalized != LINKEDIN_TIMELINE_SOURCE_ID:
+            raise ValueError(f"LinkedInTimelineCollector only supports {LINKEDIN_TIMELINE_SOURCE_ID}.")
+        page = await self.session_manager.new_page(self.platform)
+        raw_items: list[dict] = []
+        try:
+            await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60000)
+            await page.wait_for_timeout(3500)
+            current_url = page.url
+            if "linkedin.com/login" in current_url or "linkedin.com/uas/login" in current_url:
+                raise SessionChallengedError(
+                    platform=self.platform,
+                    source_id=source_id,
+                    current_url=current_url,
+                    challenge_kind="login_redirect",
+                )
+            seen: dict[str, dict] = {}
+            for iteration in range(max(1, self.scroll_iterations)):
+                batch = await page.evaluate(_LINKEDIN_POST_EXTRACTION_SCRIPT, self.max_items)
+                for item in batch or []:
+                    key = str(item.get("external_id") or item.get("url") or "")
+                    if not key:
+                        continue
+                    seen.setdefault(key, item)
+                logger.debug(
+                    "LinkedIn timeline scroll source=%s iteration=%d batch=%d total=%d",
+                    source_id,
+                    iteration + 1,
+                    len(batch or []),
+                    len(seen),
+                )
+                if len(seen) >= self.max_items:
+                    break
+                await page.mouse.wheel(0, 3000)
+                await page.wait_for_timeout(900)
+            raw_items = list(seen.values())[: self.max_items]
+            if not raw_items:
+                await self.session_manager.capture_empty_result_snapshot(
+                    page,
+                    platform=self.platform,
+                    source_id=source_id,
+                    sample_rate=1.0,
+                    label="timeline_empty",
+                    html_file_chars=30000,
+                    include_source_in_filename=True,
+                )
+                signal = _detect_bot_shaped_signal(page)
+                if signal is not None:
+                    raise BotShapedError(
+                        platform=self.platform,
+                        source_id=source_id,
+                        signal=signal,
+                        current_url=getattr(page, "url", None),
+                    )
+        except Exception as exc:
+            await self.session_manager.capture_debug_snapshot(page, "linkedin_timeline_collect_failed", error=exc)
+            logger.exception("LinkedIn timeline collection failed for source=%s", source_id)
+            raise
+        finally:
+            await page.close()
+
+        out: list[CollectedItem] = []
+        for item in raw_items:
+            text = item.get("text")
+            metadata = mark_low_quality_metadata(
+                {
+                    "source_id": LINKEDIN_TIMELINE_SOURCE_ID,
+                    "resolved_source_id": LINKEDIN_TIMELINE_SOURCE_ID,
+                    "linkedin_timeline": True,
+                    "reaction_count": item.get("reaction_count"),
+                    "comment_count": item.get("comment_count"),
+                    "repost_count": item.get("repost_count"),
+                    "like_count": item.get("reaction_count"),
+                },
+                text,
+            )
+            out.append(
+                CollectedItem(
+                    platform=self.platform,
+                    external_id=f"timeline:{item['external_id']}",
+                    author=item.get("author"),
+                    url=item.get("url"),
+                    text=text,
+                    transcript_text=None,
+                    published_at=item.get("published_at"),
+                    metadata=metadata,
+                )
+            )
+        logger.info("LinkedIn timeline collection succeeded source=%s items=%d", source_id, len(out))
+        return out
+
+
+@dataclass
 class LinkedInCollector:
     session_manager: BrowserSessionManager
     max_items: int = 20
@@ -236,6 +337,8 @@ class LinkedInCollector:
 
     async def resolve_source_identifier(self, source_id: str) -> str | None:
         normalized = normalize_linkedin_source_id(source_id)
+        if normalized == LINKEDIN_TIMELINE_SOURCE_ID:
+            return LINKEDIN_TIMELINE_SOURCE_ID
         if not is_opaque_linkedin_member_id(normalized):
             return normalized
         page = await self.session_manager.new_page(self.platform)
@@ -245,6 +348,13 @@ class LinkedInCollector:
             await page.close()
 
     async def collect_from_source(self, source_id: str) -> list[CollectedItem]:
+        source_normalized = normalize_linkedin_source_id(source_id)
+        if source_normalized == LINKEDIN_TIMELINE_SOURCE_ID:
+            return await LinkedInTimelineCollector(
+                session_manager=self.session_manager,
+                max_items=max(self.max_items, 80),
+                platform=self.platform,
+            ).collect_from_source(source_normalized)
         page = await self.session_manager.new_page(self.platform)
         raw_items: list[dict] = []
         try:

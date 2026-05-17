@@ -13,7 +13,7 @@ from pcca.services.subject_service import SubjectService
 
 
 @pytest.mark.asyncio
-async def test_feedback_appends_subject_description_and_versions_preferences(tmp_path: Path) -> None:
+async def test_feedback_versions_preferences_without_mutating_description(tmp_path: Path) -> None:
     db = Database(path=tmp_path / "pcca.db")
     await db.connect()
     await db.initialize()
@@ -42,11 +42,30 @@ async def test_feedback_appends_subject_description_and_versions_preferences(tmp
 
     description = await subject_repo.get_description_text(subject.id)
     after = await pref_repo.get_latest(subject.id)
-    assert description is not None
-    assert "Track practical AI tool updates." in description
-    assert "User feedback (reply_text): less hype like this" in description
+    assert description == "Track practical AI tool updates."
     assert after is not None
     assert after.version == before.version + 1
     assert after.quality_rules["notes"] == "User feedback (reply_text): less hype like this"
 
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t157_feedback_macros_cannot_overwrite_description(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_repo = SubjectRepository(conn=db.conn)
+    subject = await SubjectService(repository=subject_repo).create_subject(
+        "AI PM Success Stories",
+        include_terms=["ai pm"],
+        description_text="Track concrete AI PM success stories.",
+    )
+
+    with pytest.raises(ValueError):
+        await subject_repo.update_description(subject.id, "User feedback (button_macro): less like this")
+
+    assert await subject_repo.get_description_text(subject.id) == "Track concrete AI PM success stories."
     await db.close()

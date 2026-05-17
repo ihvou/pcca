@@ -11,25 +11,29 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
-RERANK_BATCH_RESPONSE_SCHEMA: dict = {
+SUMMARY_BATCH_RESPONSE_SCHEMA: dict = {
     "type": "object",
     "properties": {
-        "ranked": {
+        "summaries": {
             "type": "array",
             "items": {
                 "type": "object",
                 "properties": {
                     "item_id": {"type": "integer"},
-                    "score_delta": {"type": "number"},
+                    "brief_summary": {"type": "string"},
+                    "detailed_summary": {"type": "string"},
+                    "is_low_content": {"type": "boolean"},
                     "reason": {"type": "string"},
-                    "key_message": {"type": "string"},
                 },
-                "required": ["item_id", "score_delta", "reason", "key_message"],
+                "required": ["item_id", "brief_summary", "detailed_summary", "is_low_content"],
             },
         }
     },
-    "required": ["ranked"],
+    "required": ["summaries"],
 }
+
+
+RERANK_BATCH_RESPONSE_SCHEMA: dict = SUMMARY_BATCH_RESPONSE_SCHEMA
 
 
 REFINE_BATCH_RESPONSE_SCHEMA: dict = {
@@ -72,6 +76,14 @@ class ModelRerankResult:
 
 
 @dataclass
+class ModelSummaryResult:
+    brief_summary: str | None
+    detailed_summary: str | None
+    is_low_content: bool = False
+    rationale: str = "model summary"
+
+
+@dataclass
 class ModelRerankCandidate:
     item_id: int
     text: str
@@ -111,21 +123,17 @@ class ModelRouter:
         response.raise_for_status()
         return response.json()
 
-    async def rerank_batch(
+    async def summarize_batch(
         self,
         *,
         subject_name: str,
         subject_description: str,
         candidates: list[ModelRerankCandidate],
-    ) -> dict[int, ModelRerankResult]:
+    ) -> dict[int, ModelSummaryResult]:
         if not self.enabled or not candidates:
-            logger.debug("Model batch rerank skipped: disabled_or_empty subject=%s", subject_name)
+            logger.debug("Model summary batch skipped: disabled_or_empty subject=%s", subject_name)
             return {}
         started_at = time.monotonic()
-        # T-151: do NOT pass heuristic_score in the payload. Showing the model
-        # a number to "score against" anchored it toward downward corrections
-        # (median delta -0.05, 0% zero-deltas). With the anchor removed and the
-        # "default to 0.0" rule below, borderline items pass through unchanged.
         compact_candidates = [
             {
                 "item_id": candidate.item_id,
@@ -136,38 +144,19 @@ class ModelRouter:
             }
             for candidate in candidates[:20]
         ]
-        # T-151: prompt reworked 2026-05-14 to remove systematic downward bias.
-        # Previous "strict curator" framing + no zero-anchor produced ~60%
-        # negative deltas across runs (verified on run_id=94 and Subject 5,
-        # which had 12 consecutive negative deltas dragging top item 0.897
-        # → 0.642). Revised prompt:
-        #   1. "balanced" replaces "strict" — removes priming.
-        #   2. Explicit DEFAULT=0.0 with concrete triggers for +/- adjustment.
-        #   3. "If you have to reach for a reason to lower, return 0.0" rule.
-        # Live A/B (3 runs × 5 candidates against llama3.1:8b): median moves
-        # -0.05 → 0.00, %negative 60 → 47, %zero 0 → 20. See /tmp/t151_repro.py.
         prompt = (
-            "You are a balanced curator. Score candidate items for one user's subject.\n"
-            "Each item already passed an earlier relevance filter. Your job is to ADJUST that "
-            "filtered score only when you have clear evidence the earlier score was wrong. "
-            "Most adjustments should be small or zero.\n\n"
-            "Return JSON only with field ranked: an array of objects with item_id, score_delta, reason, key_message.\n"
-            "score_delta must be between -0.25 and 0.25. Include every candidate item exactly once.\n\n"
-            "How to choose score_delta:\n"
-            "- 0.00 — DEFAULT. Use this when the item is on-topic and you have no clear, specific "
-            "evidence the earlier score was wrong. Most items belong here.\n"
-            "- Positive (up to +0.25) — only when the item is an unusually strong match: directly "
-            "addresses the subject with specific, concrete claims from a credible source, AND adds "
-            "novelty or practical value.\n"
-            "- Negative (down to -0.25) — only when the item is clearly off-topic, promotional filler, "
-            "low-content, or hits a stated anti-signal. If you have to reach for a reason to lower "
-            "the score, return 0.0 instead.\n\n"
+            "You prepare candidate content for one user's Brief.\n"
+            "Each candidate already passed a relevance filter. Your job is NOT to score it; your job is "
+            "to produce clean user-facing summaries or reject low-content candidates.\n\n"
+            "Return JSON only with field summaries: an array of objects with item_id, brief_summary, "
+            "detailed_summary, is_low_content, and optional reason. Include every candidate item exactly once.\n\n"
             "Content rules:\n"
             "- Use only content present in the candidate text. Do not introduce names, claims, products, companies, or context from the subject description.\n"
-            "- key_message must be one complete sentence, 15-30 words, no direct quotes, summarizing the speaker's specific point.\n"
-            "- If the candidate is ambiguous, say it briefly mentions the topic without elaborating; do not fill gaps; return score_delta=0.0.\n"
+            "- brief_summary must be one complete sentence, 15-30 words, no direct quotes, summarizing the speaker's specific point.\n"
+            "- detailed_summary must be 3-5 concise sentences paraphrasing literal claims from the candidate text, with speaker/source context when clear.\n"
+            "- If the candidate is ambiguous, say it briefly mentions the topic without elaborating; do not fill gaps.\n"
             "- Name the speaker/source when clear from author or title; avoid generic 'the author' or 'the speaker'.\n"
-            "- If the candidate is filler, ad read, transition, greeting, or low-content, set key_message to \"(low-content segment)\" and use a negative score_delta.\n"
+            "- If the candidate is filler, ad read, transition, greeting, or low-content, set is_low_content=true and return empty summaries.\n"
             "- Do not include biography, hype, or internal scoring details.\n\n"
             f"SUBJECT TITLE: {subject_name}\n"
             f"FULL SUBJECT DESCRIPTION:\n{subject_description[:4000]}\n\n"
@@ -182,27 +171,27 @@ class ModelRouter:
         }
         try:
             logger.debug(
-                "Model batch rerank started subject=%s model=%s candidates=%d",
+                "Model summary batch started subject=%s model=%s candidates=%d",
                 subject_name,
                 self.ollama_model,
                 len(compact_candidates),
             )
-            data = await self._post_generate(payload, schema=RERANK_BATCH_RESPONSE_SCHEMA)
+            data = await self._post_generate(payload, schema=SUMMARY_BATCH_RESPONSE_SCHEMA)
             raw = data.get("response", "")
-            parsed = parse_model_json_response(raw, context=f"batch rerank subject={subject_name}") or {}
-            ranked = parsed.get("ranked", [])
-            if not isinstance(ranked, list) or not ranked:
+            parsed = parse_model_json_response(raw, context=f"summary batch subject={subject_name}") or {}
+            summaries = parsed.get("summaries", [])
+            if not isinstance(summaries, list) or not summaries:
                 logger.warning(
-                    "Model batch rerank returned no ranked items subject=%s model=%s top_k_count=%d response_preview=%s",
+                    "Model summary batch returned no summary items subject=%s model=%s top_k_count=%d response_preview=%s",
                     subject_name,
                     self.ollama_model,
                     len(compact_candidates),
                     _preview(raw),
                 )
                 return {}
-            out: dict[int, ModelRerankResult] = {}
+            out: dict[int, ModelSummaryResult] = {}
             allowed_ids = {candidate.item_id for candidate in candidates}
-            for row in ranked:
+            for row in summaries:
                 if not isinstance(row, dict):
                     continue
                 try:
@@ -211,42 +200,38 @@ class ModelRouter:
                     continue
                 if item_id not in allowed_ids:
                     continue
-                delta = max(-0.25, min(0.25, float(row.get("score_delta", 0.0) or 0.0)))
-                reason = str(row.get("reason") or "model batch rerank").strip()
-                key_message = str(row.get("key_message") or "").strip() or None
-                out[item_id] = ModelRerankResult(
-                    score_delta=delta,
+                brief_summary = str(row.get("brief_summary") or "").strip() or None
+                detailed_summary = str(row.get("detailed_summary") or "").strip() or None
+                is_low_content = bool(row.get("is_low_content"))
+                reason = str(row.get("reason") or "model summary").strip()
+                if is_low_content:
+                    brief_summary = None
+                    detailed_summary = None
+                out[item_id] = ModelSummaryResult(
+                    brief_summary=brief_summary,
+                    detailed_summary=detailed_summary,
+                    is_low_content=is_low_content,
                     rationale=reason,
-                    key_message=key_message,
                 )
-            key_message_count = sum(1 for result in out.values() if result.key_message)
-            # T-151: per-batch score_delta telemetry so the orchestrator and
-            # ops can see if the negative-bias regression returns. Mean ~0
-            # and roughly balanced neg/zero/pos counts indicate a healthy
-            # prompt; consistently negative means the bias is back.
-            deltas = [result.score_delta for result in out.values()]
-            mean_delta = sum(deltas) / len(deltas) if deltas else 0.0
-            negative_count = sum(1 for d in deltas if d < 0)
-            zero_count = sum(1 for d in deltas if d == 0)
-            positive_count = sum(1 for d in deltas if d > 0)
+            brief_count = sum(1 for result in out.values() if result.brief_summary)
+            detailed_count = sum(1 for result in out.values() if result.detailed_summary)
+            low_content_count = sum(1 for result in out.values() if result.is_low_content)
             logger.info(
-                "Model batch rerank finished subject=%s model=%s top_k_count=%d results=%d "
-                "key_message_count=%d mean_delta=%+.3f neg=%d zero=%d pos=%d duration_ms=%d",
+                "Model summary batch finished subject=%s model=%s top_k_count=%d results=%d "
+                "brief_count=%d detailed_count=%d low_content=%d duration_ms=%d",
                 subject_name,
                 self.ollama_model,
                 len(compact_candidates),
                 len(out),
-                key_message_count,
-                mean_delta,
-                negative_count,
-                zero_count,
-                positive_count,
+                brief_count,
+                detailed_count,
+                low_content_count,
                 int((time.monotonic() - started_at) * 1000),
             )
             return out
         except Exception as exc:
             logger.warning(
-                "Model batch rerank failed subject=%s model=%s candidates=%d duration_ms=%d error=%s",
+                "Model summary batch failed subject=%s model=%s candidates=%d duration_ms=%d error=%s",
                 subject_name,
                 self.ollama_model,
                 len(compact_candidates),
@@ -255,6 +240,28 @@ class ModelRouter:
                 exc_info=True,
             )
             return {}
+
+    async def rerank_batch(
+        self,
+        *,
+        subject_name: str,
+        subject_description: str,
+        candidates: list[ModelRerankCandidate],
+    ) -> dict[int, ModelRerankResult]:
+        summaries = await self.summarize_batch(
+            subject_name=subject_name,
+            subject_description=subject_description,
+            candidates=candidates,
+        )
+        return {
+            item_id: ModelRerankResult(
+                score_delta=0.0,
+                rationale=result.rationale,
+                key_message="(low-content segment)" if result.is_low_content else result.brief_summary,
+                refined_segment=result.detailed_summary,
+            )
+            for item_id, result in summaries.items()
+        }
 
     async def refine_batch(
         self,

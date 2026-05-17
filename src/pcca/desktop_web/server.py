@@ -196,7 +196,8 @@ INDEX_HTML = r"""
               <label>Filter platform <select id="sourceFilter" onchange="renderSources(lastState)"><option value="">All</option></select></label>
               <label>Status <select id="statusFilter" onchange="renderSources(lastState)"><option value="">All</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="removed">Removed</option><option value="active">Active</option><option value="inactive">Inactive</option><option value="needs_reauth">Needs re-login</option></select></label>
             </div>
-            <div class="actions" style="margin-top:10px"><button class="secondary" onclick="monitorSources()">Monitor Pending Sources</button></div>
+            <div class="actions" style="margin-top:10px"><button class="secondary" onclick="monitorSources()">Add Pending To Selected Subject</button></div>
+            <p class="fine">Orphan sources are monitored sources not linked to a subject. Adopt them into the selected subject or disable them so collection skips them.</p>
             <div class="list" id="sourcesBox" style="margin-top:12px"></div>
           </div>
         </div>
@@ -506,8 +507,22 @@ async function backfillEmbeddings() {
     notice('sourceStatus', err.message, 'bad');
   }
 }
-async function monitorSources() { return postAction('/api/staged-sources/monitor'); }
+async function monitorSources() {
+  if (!selectedSubjectId) {
+    notice('sourceStatus', 'Select a subject in the Use tab before confirming staged sources.', 'bad');
+    return null;
+  }
+  return postAction('/api/staged-sources/monitor', {subject_id: selectedSubjectId});
+}
 async function removeSource(id) { return postAction('/api/staged-sources/remove', {id}); }
+async function adoptOrphanSource(id) {
+  if (!selectedSubjectId) {
+    notice('sourceStatus', 'Select a subject in the Use tab before adopting an orphan source.', 'bad');
+    return null;
+  }
+  return postAction('/api/sources/orphan/adopt', {source_id: id, subject_id: selectedSubjectId});
+}
+async function disableSource(id) { return postAction('/api/sources/disable', {source_id: id}); }
 async function getBrief(subjectId) {
   try {
     const data = await longAction('/api/briefs', {subject_id: subjectId}, {actionKey:'get_briefs', statusId:'useStatus', startedText:'Getting Briefs...'});
@@ -743,7 +758,12 @@ function renderSources(state) {
   const platformValue = sourceFilter.value;
   const statusValue = statusFilter.value;
   const stagedRows = (state.staged_sources || []).map(r => ({...r, source_kind: 'staged', effective_status: r.status || 'pending'}));
-  const monitoredRows = (state.monitored_sources || []).map(r => ({...r, source_kind: 'monitored', effective_status: r.follow_state || 'active'}));
+  const orphanIds = new Set((state.orphan_sources || []).map(r => Number(r.id)));
+  const monitoredRows = (state.monitored_sources || []).map(r => ({
+    ...r,
+    source_kind: orphanIds.has(Number(r.id)) ? 'orphan' : 'monitored',
+    effective_status: r.follow_state || 'active'
+  }));
   const rows = [...stagedRows, ...monitoredRows].filter(r => (!platformValue || r.platform === platformValue) && (!statusValue || r.effective_status === statusValue));
   sourcesBox.innerHTML = rows.length ? '' : '<div class="notice">No sources match this filter yet.</div>';
   for (const row of rows) {
@@ -753,7 +773,8 @@ function renderSources(state) {
     const hint = row.effective_status === 'inactive'
       ? '<small>Channel not found. Re-run Get Sources to re-add it, or leave it inactive so collection skips it.</small>'
       : '';
-    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.source_kind} · ${row.effective_status}${inactiveReason}</small><small>${row.account_or_channel_id}</small>${hint}</div><div class="actions"></div>`;
+    const orphanHint = row.source_kind === 'orphan' ? '<small>Orphan: not linked to any subject.</small>' : '';
+    div.innerHTML = `<div><strong>${row.display_name}</strong><small>${row.platform} · ${row.source_kind} · ${row.effective_status}${inactiveReason}</small><small>${row.account_or_channel_id}</small>${hint}${orphanHint}</div><div class="actions"></div>`;
     if (row.source_kind === 'staged' && row.status === 'pending') {
       const btn = document.createElement('button');
       btn.className = 'secondary';
@@ -761,10 +782,23 @@ function renderSources(state) {
       btn.onclick = () => removeSource(row.id);
       div.querySelector('.actions').appendChild(btn);
     }
+    if (row.source_kind === 'orphan') {
+      const adopt = document.createElement('button');
+      adopt.className = 'secondary';
+      adopt.textContent = 'Add to selected subject';
+      adopt.onclick = () => adoptOrphanSource(row.id);
+      div.querySelector('.actions').appendChild(adopt);
+      const disable = document.createElement('button');
+      disable.className = 'secondary';
+      disable.textContent = 'Disable';
+      disable.onclick = () => disableSource(row.id);
+      div.querySelector('.actions').appendChild(disable);
+    }
     sourcesBox.appendChild(div);
   }
   const counts = Object.entries(state.staged_counts || {}).sort().map(([k, v]) => `${k}: ${v}`).join('\n');
-  sourceCounts.textContent = counts || 'No pending imports.';
+  const orphanCount = Number(state.orphan_source_count || 0);
+  sourceCounts.textContent = [counts || 'No pending imports.', `orphans: ${orphanCount}`].join('\n');
 }
 function renderRoutes(rows=[]) {
   routesBox.innerHTML = rows.length ? '' : '<div class="notice">No Telegram routes yet.</div>';
@@ -1185,7 +1219,29 @@ class DesktopWebServer:
 
         async def monitor_staged_sources(request):
             assert self.service is not None
-            return await run_result(lambda _p: self.service.monitor_staged_sources(), request)
+            return await run_result(
+                lambda p: self.service.monitor_staged_sources(
+                    subject_id=int(p.get("subject_id") or 0) if p.get("subject_id") else None,
+                ),
+                request,
+            )
+
+        async def adopt_orphan_source(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.adopt_orphan_source(
+                    source_id=int(p.get("source_id") or 0),
+                    subject_id=int(p.get("subject_id") or 0),
+                ),
+                request,
+            )
+
+        async def disable_source(request):
+            assert self.service is not None
+            return await run_result(
+                lambda p: self.service.disable_source(source_id=int(p.get("source_id") or 0)),
+                request,
+            )
 
         async def confirm_staged_sources(request):
             assert self.service is not None
@@ -1336,6 +1392,8 @@ class DesktopWebServer:
             Route("/api/subjects/cancel-draft", cancel_subject_draft, methods=["POST"]),
             Route("/api/staged-sources/remove", remove_staged_source, methods=["POST"]),
             Route("/api/staged-sources/monitor", monitor_staged_sources, methods=["POST"]),
+            Route("/api/sources/orphan/adopt", adopt_orphan_source, methods=["POST"]),
+            Route("/api/sources/disable", disable_source, methods=["POST"]),
             Route("/api/confirm-staged-sources", confirm_staged_sources, methods=["POST"]),
             Route("/api/smoke", smoke, methods=["POST"]),
             Route("/api/content/read", read_content, methods=["POST"]),

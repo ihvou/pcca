@@ -2,12 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass
 
 import aiosqlite
 
 from pcca.models import Subject
+
+logger = logging.getLogger(__name__)
+
+
+def looks_like_feedback_description(text: str | None) -> bool:
+    normalized = " ".join(str(text or "").split()).strip().lower()
+    if not normalized:
+        return False
+    return normalized.startswith("user feedback (") or "button_macro" in normalized
 
 
 @dataclass
@@ -27,6 +37,7 @@ class SubjectRepository:
         telegram_hashtag: str | None = None,
         min_relevance_threshold: float | None = None,
     ) -> Subject:
+        self._validate_description_text(description_text)
         hashtag = telegram_hashtag or self._to_camel_hashtag(name)
         cursor = await self.conn.execute(
             """
@@ -65,6 +76,7 @@ class SubjectRepository:
         return await self.get_by_id(created_id)
 
     async def update_description(self, subject_id: int, description_text: str | None) -> None:
+        self._validate_description_text(description_text)
         await self.conn.execute(
             """
             UPDATE subjects
@@ -78,6 +90,16 @@ class SubjectRepository:
             ((description_text or "").strip(), subject_id),
         )
         await self.conn.commit()
+
+    @staticmethod
+    def _validate_description_text(description_text: str | None) -> None:
+        if not looks_like_feedback_description(description_text):
+            return
+        logger.warning(
+            "Rejected subject description write containing feedback macro content.",
+            stack_info=True,
+        )
+        raise ValueError("Subject description cannot be replaced with feedback macro content.")
 
     async def update_status(self, subject_id: int, status: str) -> Subject:
         normalized = status.strip().lower()
