@@ -57,6 +57,51 @@ def _has_filter(target: logging.Filterer, filter_type: type[logging.Filter]) -> 
     return any(isinstance(existing, filter_type) for existing in target.filters)
 
 
+def _install_file_handler(*, log_file: Path, level: int, formatter: logging.Formatter, redaction_filter: logging.Filter) -> None:
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    resolved_log_file = str(log_file.resolve())
+    root = logging.getLogger()
+    for handler in root.handlers:
+        if getattr(handler, "_pcca_log_file", None) == resolved_log_file:
+            handler.setLevel(level)
+            return
+
+    file_handler = RotatingFileHandler(
+        log_file,
+        maxBytes=1_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+    file_handler.addFilter(redaction_filter)
+    file_handler._pcca_log_file = resolved_log_file  # type: ignore[attr-defined]
+    root.addHandler(file_handler)
+
+
+def add_log_file(log_file: Path, level: int = logging.INFO) -> None:
+    """Attach an extra redacted rotating file handler.
+
+    Used by one-shot jobs that need a dedicated per-run log while still keeping
+    the normal app log configured by ``configure_logging``.
+    """
+    raw_level = os.getenv("PCCA_LOG_LEVEL")
+    if raw_level:
+        level = getattr(logging, raw_level.strip().upper(), level)
+    formatter = logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    root = logging.getLogger()
+    root.setLevel(level)
+    redaction_filter = SecretRedactionFilter()
+    if not _has_filter(root, SecretRedactionFilter):
+        root.addFilter(redaction_filter)
+    _install_file_handler(
+        log_file=log_file,
+        level=level,
+        formatter=formatter,
+        redaction_filter=redaction_filter,
+    )
+
+
 def configure_logging(level: int = logging.INFO) -> None:
     _load_dotenv_for_logging()
     raw_level = os.getenv("PCCA_LOG_LEVEL")
@@ -83,21 +128,9 @@ def configure_logging(level: int = logging.INFO) -> None:
     log_file = _configured_log_file()
     if log_file is None:
         return
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    resolved_log_file = str(log_file.resolve())
-    for handler in root.handlers:
-        if getattr(handler, "_pcca_log_file", None) == resolved_log_file:
-            handler.setLevel(level)
-            return
-
-    file_handler = RotatingFileHandler(
-        log_file,
-        maxBytes=1_000_000,
-        backupCount=5,
-        encoding="utf-8",
+    _install_file_handler(
+        log_file=log_file,
+        level=level,
+        formatter=formatter,
+        redaction_filter=redaction_filter,
     )
-    file_handler.setLevel(level)
-    file_handler.setFormatter(formatter)
-    file_handler.addFilter(redaction_filter)
-    file_handler._pcca_log_file = resolved_log_file  # type: ignore[attr-defined]
-    root.addHandler(file_handler)

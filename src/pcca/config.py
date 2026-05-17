@@ -68,6 +68,7 @@ class Settings:
     auto_backfill_embeddings: bool = True
     youtube_transcript_backfill_concurrency: int = 2
     min_brief_relevance_score: float = 0.55
+    in_process_nightly_enabled: bool = False
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -93,6 +94,8 @@ class Settings:
         # morning_cron auto-send for users who have a stable nightly+morning routine.
         digest_auto_send_raw = (_env("PCCA_DIGEST_AUTO_SEND", "false") or "false").strip().lower()
         digest_auto_send = digest_auto_send_raw in {"1", "true", "yes", "on"}
+        in_process_nightly_raw = (_env("PCCA_IN_PROCESS_NIGHTLY", "false") or "false").strip().lower()
+        in_process_nightly_enabled = in_process_nightly_raw in {"1", "true", "yes", "on"}
         try:
             model_router_timeout_seconds = int(_env("PCCA_MODEL_ROUTER_TIMEOUT_SECONDS", "180") or "180")
         except ValueError:
@@ -151,6 +154,7 @@ class Settings:
             timezone=_env("PCCA_TIMEZONE", "UTC") or "UTC",
             nightly_cron=_env("PCCA_NIGHTLY_CRON", "0 1 * * *") or "0 1 * * *",
             morning_cron=_env("PCCA_MORNING_CRON", "30 8 * * *") or "30 8 * * *",
+            in_process_nightly_enabled=in_process_nightly_enabled,
             digest_auto_send=digest_auto_send,
             data_dir=data_dir,
             db_path=db_path,

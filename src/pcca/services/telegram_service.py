@@ -68,6 +68,7 @@ class TelegramService:
     rebuild_digest_action: SubjectScopedAction | None = None
     update_briefs_action: SubjectScopedAction | None = None
     cancel_update_action: ManualAction | None = None
+    _polling_started: bool = field(default=False, init=False)
     _manual_action_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _pending_subject_edits: dict[str, PendingSubjectEdit] = field(default_factory=dict, init=False)
     _progress_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
@@ -88,36 +89,41 @@ class TelegramService:
         self.update_briefs_action = update_briefs_action
         self.cancel_update_action = cancel_update_action
 
-    async def start(self) -> None:
+    async def start(self, *, polling: bool = True) -> None:
         started_at = time.monotonic()
-        logger.info("Telegram service starting.")
+        logger.info("Telegram service starting polling=%s.", polling)
         app = ApplicationBuilder().token(self.bot_token).build()
-        app.add_handler(CommandHandler("start", self._on_start))
-        app.add_handler(CommandHandler("help", self._on_help))
-        app.add_handler(CommandHandler("settings", self._on_settings))
-        app.add_handler(CommandHandler("setup", self._on_setup))
-        app.add_handler(CommandHandler("onboard", self._on_setup))
-        app.add_handler(CommandHandler("read_content", self._on_read_content_command))
-        app.add_handler(CommandHandler("briefs", self._on_briefs_command))
-        app.add_handler(CommandHandler("update_briefs", self._on_update_briefs_command))
-        app.add_handler(CommandHandler("rebuild_briefs", self._on_rebuild_briefs_command))
-        app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
-        app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
-        app.add_handler(CommandHandler("cancel", self._on_cancel_command))
-        app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
-        app.add_handler(CallbackQueryHandler(self._on_more_callback, pattern=r"^more:"))
-        app.add_handler(CallbackQueryHandler(self._on_route_subject_callback, pattern=r"^route:"))
-        app.add_handler(CallbackQueryHandler(self._on_run_subject_callback, pattern=r"^run_subject:"))
-        app.add_handler(CallbackQueryHandler(self._on_subject_manage_callback, pattern=r"^subject_manage:"))
-        app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
-        app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
-        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+        if polling:
+            app.add_handler(CommandHandler("start", self._on_start))
+            app.add_handler(CommandHandler("help", self._on_help))
+            app.add_handler(CommandHandler("settings", self._on_settings))
+            app.add_handler(CommandHandler("setup", self._on_setup))
+            app.add_handler(CommandHandler("onboard", self._on_setup))
+            app.add_handler(CommandHandler("read_content", self._on_read_content_command))
+            app.add_handler(CommandHandler("briefs", self._on_briefs_command))
+            app.add_handler(CommandHandler("update_briefs", self._on_update_briefs_command))
+            app.add_handler(CommandHandler("rebuild_briefs", self._on_rebuild_briefs_command))
+            app.add_handler(CommandHandler("get_digest", self._on_get_digest_command))
+            app.add_handler(CommandHandler("rebuild_digest", self._on_rebuild_digest_command))
+            app.add_handler(CommandHandler("cancel", self._on_cancel_command))
+            app.add_handler(CallbackQueryHandler(self._on_feedback_callback, pattern=r"^fb:"))
+            app.add_handler(CallbackQueryHandler(self._on_more_callback, pattern=r"^more:"))
+            app.add_handler(CallbackQueryHandler(self._on_route_subject_callback, pattern=r"^route:"))
+            app.add_handler(CallbackQueryHandler(self._on_run_subject_callback, pattern=r"^run_subject:"))
+            app.add_handler(CallbackQueryHandler(self._on_subject_manage_callback, pattern=r"^subject_manage:"))
+            app.add_handler(CallbackQueryHandler(self._on_run_callback, pattern=r"^run:"))
+            app.add_handler(MessageHandler(filters.VOICE, self._on_voice))
+            app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
         await app.initialize()
         await app.start()
-        if app.updater is None:
-            raise RuntimeError("Telegram updater is not available.")
-        await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        if polling:
+            if app.updater is None:
+                raise RuntimeError("Telegram updater is not available.")
+            await app.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+            self._polling_started = True
+        else:
+            self._polling_started = False
         self.application = app
         logger.info("Telegram service started duration_ms=%d", int((time.monotonic() - started_at) * 1000))
 
@@ -128,7 +134,9 @@ class TelegramService:
         logger.info("Telegram service stopping.")
         app = self.application
         self.application = None
-        if app.updater is not None:
+        polling_started = self._polling_started
+        self._polling_started = False
+        if polling_started and app.updater is not None:
             await app.updater.stop()
         await app.stop()
         await app.shutdown()

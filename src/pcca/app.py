@@ -64,12 +64,19 @@ class PCCAApp:
     embedding_service: EmbeddingService = field(init=False)
     telegram_service: TelegramService | None = field(default=None, init=False)
 
-    async def start(self, *, with_scheduler: bool = True, with_telegram: bool = True) -> None:
+    async def start(
+        self,
+        *,
+        with_scheduler: bool = True,
+        with_telegram: bool = True,
+        with_telegram_polling: bool = True,
+    ) -> None:
         started_at = time.monotonic()
         logger.info(
-            "PCCA app starting scheduler=%s telegram=%s db=%s data_dir=%s",
+            "PCCA app starting scheduler=%s telegram=%s telegram_polling=%s db=%s data_dir=%s",
             with_scheduler,
             with_telegram,
+            with_telegram_polling,
             self.settings.db_path,
             self.settings.data_dir,
         )
@@ -176,7 +183,7 @@ class PCCAApp:
                 voice_transcriber=VoiceTranscriptionService(),
                 item_score_repo=ItemScoreRepository(conn=self.db.conn),
             )
-            await self.telegram_service.start()
+            await self.telegram_service.start(polling=with_telegram_polling)
         elif with_telegram:
             logger.warning("PCCA_TELEGRAM_BOT_TOKEN is not set. Telegram service will be disabled.")
 
@@ -185,6 +192,7 @@ class PCCAApp:
             morning_cron=self.settings.morning_cron,
             timezone=self.settings.timezone,
             digest_auto_send=self.settings.digest_auto_send,
+            nightly_enabled=self.settings.in_process_nightly_enabled,
             job_runner=JobRunner(
                 subject_service=self.subject_service,
                 routing_service=self.routing_service,
@@ -199,7 +207,7 @@ class PCCAApp:
         if with_scheduler:
             self.scheduler.start()
 
-        if self.telegram_service is not None:
+        if self.telegram_service is not None and with_telegram_polling:
             self.telegram_service.attach_manual_actions(
                 read_content_action=self.scheduler.job_runner.run_nightly_collection,
                 get_digest_action=self.scheduler.job_runner.run_smart_briefs,
@@ -249,6 +257,26 @@ class PCCAApp:
                 progress_callback=progress_callback,
             )
             logger.info("PCCA one-shot nightly finished duration_ms=%d stats=%s", int((time.monotonic() - started_at) * 1000), stats)
+            return stats
+        finally:
+            await self.stop()
+
+    async def run_launchd_nightly_once(self) -> dict:
+        """Run the scheduled nightly job once, including completion delivery.
+
+        This is the launchd entry point: no HTTP server and no in-process
+        scheduler, but Telegram is started so T-155 completion notifications
+        still work before the process exits.
+        """
+        started_at = time.monotonic()
+        await self.start(with_scheduler=False, with_telegram=True, with_telegram_polling=False)
+        try:
+            stats = await self.scheduler._run_scheduled_nightly_collection()
+            logger.info(
+                "PCCA launchd nightly finished duration_ms=%d stats=%s",
+                int((time.monotonic() - started_at) * 1000),
+                stats,
+            )
             return stats
         finally:
             await self.stop()
@@ -313,7 +341,7 @@ class PCCAApp:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         started_at = time.monotonic()
-        await self.start(with_scheduler=False, with_telegram=True)
+        await self.start(with_scheduler=False, with_telegram=True, with_telegram_polling=False)
         try:
             stats = await self.scheduler.job_runner.run_smart_briefs(
                 subject_ids=subject_ids,
@@ -352,7 +380,7 @@ class PCCAApp:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict:
         started_at = time.monotonic()
-        await self.start(with_scheduler=False, with_telegram=True)
+        await self.start(with_scheduler=False, with_telegram=True, with_telegram_polling=False)
         try:
             stats = await self.scheduler.job_runner.send_generated_briefs(
                 subject_ids=subject_ids,
@@ -365,7 +393,7 @@ class PCCAApp:
 
     async def rebuild_briefs_once(self, *, subject_ids: set[int] | None = None) -> dict:
         started_at = time.monotonic()
-        await self.start(with_scheduler=False, with_telegram=True)
+        await self.start(with_scheduler=False, with_telegram=True, with_telegram_polling=False)
         try:
             stats = await self.scheduler.job_runner.rebuild_todays_digest(subject_ids=subject_ids)
             logger.info(

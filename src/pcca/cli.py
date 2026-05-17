@@ -17,7 +17,8 @@ from pcca.config import Settings
 from pcca.content_quality import EXCLUDED_FROM_BRIEFS_KEY, is_low_quality
 from pcca.db import Database
 from pcca.dependency_doctor import check_runtime_dependencies, format_dependency_report
-from pcca.logging_utils import configure_logging
+from pcca.launchd import install_launchd, nightly_log_path, uninstall_launchd
+from pcca.logging_utils import add_log_file, configure_logging
 from pcca.repositories.routing import RoutingRepository
 from pcca.repositories.onboarding import OnboardingRepository
 from pcca.repositories.item_segments import ItemSegmentRepository
@@ -1216,23 +1217,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Browser to read from. Defaults to first browser with required cookies.",
     )
 
+    def add_nightly_once_args(target: argparse.ArgumentParser) -> None:
+        target.add_argument(
+            "--no-backfill",
+            action="store_true",
+            help="Skip automatic embedding warm-up after collection.",
+        )
+        target.add_argument(
+            "--no-score",
+            dest="score",
+            action="store_false",
+            default=True,
+            help=(
+                "Skip the per-subject scoring phase after collection. By default "
+                "nightly runs score newly-collected items so they become Brief "
+                "candidates; pass --no-score for read-content-only runs."
+            ),
+        )
+
     nightly_parser = sub.add_parser("run-nightly-once", help="Run nightly collection pipeline once")
-    nightly_parser.add_argument(
-        "--no-backfill",
-        action="store_true",
-        help="Skip automatic embedding warm-up after collection.",
+    add_nightly_once_args(nightly_parser)
+    launchd_nightly_parser = sub.add_parser(
+        "nightly-once",
+        help="Run scheduled nightly collection once and exit (launchd entry point)",
     )
-    nightly_parser.add_argument(
-        "--no-score",
-        dest="score",
-        action="store_false",
-        default=True,
-        help=(
-            "Skip the per-subject scoring phase after collection. By default "
-            "nightly runs score newly-collected items so they become Brief "
-            "candidates; pass --no-score for read-content-only runs."
-        ),
-    )
+    add_nightly_once_args(launchd_nightly_parser)
+    sub.add_parser("install-launchd", help="Install macOS launchd nightly wake schedule")
+    sub.add_parser("uninstall-launchd", help="Uninstall macOS launchd nightly wake schedule")
     embed_backfill_parser = sub.add_parser(
         "embed-backfill",
         help="Warm missing Ollama embedding cache and optionally rescore existing items",
@@ -1512,6 +1523,23 @@ def main(argv: Sequence[str] | None = None) -> None:
         app = PCCAApp(settings=settings)
         stats = asyncio.run(app.run_nightly_once(auto_backfill=not args.no_backfill, score=args.score))
         print(f"Nightly run completed: {stats}")
+        return
+
+    if args.command == "nightly-once":
+        add_log_file(nightly_log_path(settings))
+        app = PCCAApp(settings=settings)
+        stats = asyncio.run(app.run_launchd_nightly_once())
+        print(f"Nightly run completed: {stats}")
+        return
+
+    if args.command == "install-launchd":
+        result = install_launchd(settings=settings)
+        print(result.message)
+        return
+
+    if args.command == "uninstall-launchd":
+        result = uninstall_launchd()
+        print(result.message)
         return
 
     if args.command == "embed-backfill":

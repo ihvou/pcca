@@ -69,6 +69,30 @@ def test_run_nightly_once_no_score_flag_skips_scoring(monkeypatch: pytest.Monkey
     assert calls == [{"auto_backfill": True, "score": False}]
 
 
+def test_t162_nightly_once_executes_scheduled_path(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
+    _isolate_env(monkeypatch, tmp_path)
+    calls: list[str] = []
+
+    class FakePCCAApp:
+        def __init__(self, *, settings):
+            self.settings = settings
+
+        async def run_launchd_nightly_once(self):
+            calls.append("launchd_nightly")
+            return {"ok": True}
+
+        async def run_nightly_once(self, **_kwargs):
+            raise AssertionError("nightly-once must not use the legacy direct pipeline path")
+
+    monkeypatch.setattr(cli, "PCCAApp", FakePCCAApp)
+    monkeypatch.setattr(cli, "add_log_file", lambda _path: None)
+
+    cli.main(["nightly-once"])
+
+    assert calls == ["launchd_nightly"]
+    assert "Nightly run completed" in capsys.readouterr().out
+
+
 def test_doctor_command_reports_dependency_health(monkeypatch: pytest.MonkeyPatch, tmp_path, capsys) -> None:
     _isolate_env(monkeypatch, tmp_path)
 

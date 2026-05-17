@@ -667,21 +667,23 @@ class AgentScheduler:
     timezone: str
     job_runner: JobRunner
     digest_auto_send: bool = False
+    nightly_enabled: bool = False
     scheduler: AsyncIOScheduler = field(init=False)
 
     def __post_init__(self) -> None:
         self.scheduler = AsyncIOScheduler(timezone=self.timezone)
 
     def start(self) -> None:
-        self.scheduler.add_job(
-            self._run_scheduled_nightly_collection,
-            trigger=CronTrigger.from_crontab(self.nightly_cron, timezone=self.timezone),
-            id="nightly_collection",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-            misfire_grace_time=3600,
-        )
+        if self.nightly_enabled:
+            self.scheduler.add_job(
+                self._run_scheduled_nightly_collection,
+                trigger=CronTrigger.from_crontab(self.nightly_cron, timezone=self.timezone),
+                id="nightly_collection",
+                replace_existing=True,
+                max_instances=1,
+                coalesce=True,
+                misfire_grace_time=3600,
+            )
         if self.digest_auto_send:
             self.scheduler.add_job(
                 self.job_runner.run_morning_digest,
@@ -695,7 +697,7 @@ class AgentScheduler:
         self.scheduler.start()
         logger.info(
             "Scheduler started. nightly=%s morning=%s digest_auto_send=%s",
-            self.nightly_cron,
+            self.nightly_cron if self.nightly_enabled else "(launchd/on-demand)",
             self.morning_cron if self.digest_auto_send else "(on-demand only)",
             self.digest_auto_send,
         )

@@ -116,8 +116,11 @@ The wizard wraps these; you only need them for headless / debug use.
 
 ```bash
 pcca run-desktop              # PyWebView wizard (default entry point)
-pcca run-agent                # long-lived agent (Telegram bot + scheduler)
-pcca run-nightly-once         # one-shot collection
+pcca run-agent                # long-lived agent (Telegram bot + non-nightly scheduler)
+pcca nightly-once             # scheduled one-shot collection (launchd entry point)
+pcca run-nightly-once         # manual/debug one-shot collection
+pcca install-launchd          # macOS: schedule nightly-once with wake support
+pcca uninstall-launchd        # macOS: remove nightly launchd schedule
 pcca run-briefs-once          # one-shot Brief delivery
 pcca rebuild-briefs-once      # force-recompute today's Briefs
 pcca capture-session --platform x [--browser auto|chrome|arc|brave|edge]
@@ -143,6 +146,7 @@ PCCA_TELEGRAM_BOT_TOKEN=          # from @BotFather
 PCCA_TIMEZONE=UTC
 PCCA_NIGHTLY_CRON=0 1 * * *       # nightly content collection
 PCCA_MORNING_CRON=30 8 * * *      # only used when DIGEST_AUTO_SEND=true
+PCCA_IN_PROCESS_NIGHTLY=false     # default off; use launchd on macOS instead
 PCCA_DIGEST_AUTO_SEND=false       # default off — Briefs are on-demand via /briefs
 PCCA_MIN_BRIEF_RELEVANCE=0.55     # send no-Briefs notice below this top score
 
@@ -164,6 +168,30 @@ PCCA_OLLAMA_BASE_URL=http://localhost:11434
 PCCA_LOG_LEVEL=INFO               # DEBUG for verbose
 PCCA_LOG_FILE=                    # default .pcca/logs/pcca.log; "off" to disable
 PCCA_STRICT_DEPS=false            # true = fail startup if pyproject deps are missing
+```
+
+### Scheduling on macOS
+
+The desktop app uses an in-process scheduler for lightweight/non-nightly jobs,
+but Python cannot wake a sleeping laptop. For reliable overnight collection on
+macOS, install the launchd schedule:
+
+```bash
+pcca install-launchd
+launchctl list | grep com.pcca.nightly
+```
+
+This writes `~/Library/LaunchAgents/com.pcca.nightly.plist` and schedules
+`pcca nightly-once` using your `PCCA_NIGHTLY_CRON` hour/minute. The plist sets
+`Wake=true`, so macOS may wake the machine for the job. In practice, keep the
+laptop on AC power; closed-lid or battery-only standby can still skip wake
+events depending on macOS power settings.
+
+Dedicated launchd run logs are written under `.pcca/logs/nightly-YYYY-MM-DD.log`.
+To remove the schedule:
+
+```bash
+pcca uninstall-launchd
 ```
 
 ### Where things live
