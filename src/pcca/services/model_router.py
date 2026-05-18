@@ -157,6 +157,7 @@ class ModelRouter:
             "- If the candidate is ambiguous, say it briefly mentions the topic without elaborating; do not fill gaps.\n"
             "- Name the speaker/source when clear from author or title; avoid generic 'the author' or 'the speaker'.\n"
             "- If the candidate is filler, ad read, transition, greeting, or low-content, set is_low_content=true and return empty summaries.\n"
+            "- For every non-low-content candidate, return BOTH brief_summary and detailed_summary. Do not return only one of them.\n"
             "- Do not include biography, hype, or internal scoring details.\n\n"
             f"SUBJECT TITLE: {subject_name}\n"
             f"FULL SUBJECT DESCRIPTION:\n{subject_description[:4000]}\n\n"

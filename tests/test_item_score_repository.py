@@ -215,6 +215,153 @@ async def test_t159_top_candidates_excludes_unprocessed_items(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_t163_selector_accepts_items_with_only_key_message(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    subject = await subject_service.create_subject("AI Jobs", include_terms=["ai jobs"])
+    item_repo = ItemRepository(conn=db.conn)
+    item_id = (
+        await item_repo.upsert_many(
+            [
+                CollectedItem(
+                    platform="linkedin",
+                    external_id="only-key",
+                    author="Eduardo",
+                    url="https://linkedin.com/feed/update/only-key",
+                    text="Story points are dead. Sprint velocity is dead. AI changes software cost models.",
+                    transcript_text=None,
+                    published_at="2026-05-18T07:00:00",
+                    metadata={},
+                )
+            ]
+        )
+    )["item_ids"][0]
+
+    score_repo = ItemScoreRepository(conn=db.conn)
+    await score_repo.upsert_score(
+        item_id=item_id,
+        subject_id=subject.id,
+        pass1_score=0.8,
+        pass2_score=0.8,
+        practicality_score=0.7,
+        novelty_score=0.7,
+        trust_score=0.7,
+        noise_penalty=0.0,
+        final_score=0.8,
+        rationale="curated brief only",
+        key_message="AI is changing how software teams estimate, budget, and staff delivery work.",
+        refined_segment=None,
+    )
+
+    assert [c.item_id for c in await score_repo.top_candidates(subject_id=subject.id)] == [item_id]
+    assert [c.item_id for c in await score_repo.top_unsent_candidates(subject_id=subject.id)] == [item_id]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t163_selector_accepts_items_with_only_refined_segment(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    subject = await subject_service.create_subject("AI Careers", include_terms=["ai careers"])
+    item_repo = ItemRepository(conn=db.conn)
+    item_id = (
+        await item_repo.upsert_many(
+            [
+                CollectedItem(
+                    platform="linkedin",
+                    external_id="only-refined",
+                    author="Elena",
+                    url="https://linkedin.com/feed/update/only-refined",
+                    text="AI gives ICs enough leverage to cover more PM, design, and engineering tasks.",
+                    transcript_text=None,
+                    published_at="2026-05-18T08:00:00",
+                    metadata={},
+                )
+            ]
+        )
+    )["item_ids"][0]
+
+    score_repo = ItemScoreRepository(conn=db.conn)
+    await score_repo.upsert_score(
+        item_id=item_id,
+        subject_id=subject.id,
+        pass1_score=0.79,
+        pass2_score=0.79,
+        practicality_score=0.7,
+        novelty_score=0.7,
+        trust_score=0.7,
+        noise_penalty=0.0,
+        final_score=0.79,
+        rationale="curated detail only",
+        key_message=None,
+        refined_segment=(
+            "The post argues that AI increases individual contributor leverage "
+            "across product, design, marketing, and engineering tasks."
+        ),
+    )
+
+    assert [c.item_id for c in await score_repo.top_candidates(subject_id=subject.id)] == [item_id]
+    assert [c.item_id for c in await score_repo.top_unsent_candidates(subject_id=subject.id)] == [item_id]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_t163_selector_still_rejects_items_with_both_empty(tmp_path: Path) -> None:
+    db = Database(path=tmp_path / "pcca.db")
+    await db.connect()
+    await db.initialize()
+    assert db.conn is not None
+
+    subject_service = SubjectService(repository=SubjectRepository(conn=db.conn))
+    subject = await subject_service.create_subject("AI Careers", include_terms=["ai careers"])
+    item_repo = ItemRepository(conn=db.conn)
+    item_id = (
+        await item_repo.upsert_many(
+            [
+                CollectedItem(
+                    platform="linkedin",
+                    external_id="empty-both",
+                    author="Creator",
+                    url="https://linkedin.com/feed/update/empty-both",
+                    text="Raw source text should never become a Brief when no curated summary exists.",
+                    transcript_text=None,
+                    published_at="2026-05-18T08:30:00",
+                    metadata={},
+                )
+            ]
+        )
+    )["item_ids"][0]
+
+    score_repo = ItemScoreRepository(conn=db.conn)
+    await score_repo.upsert_score(
+        item_id=item_id,
+        subject_id=subject.id,
+        pass1_score=0.9,
+        pass2_score=0.9,
+        practicality_score=0.7,
+        novelty_score=0.7,
+        trust_score=0.7,
+        noise_penalty=0.0,
+        final_score=0.9,
+        rationale="no curated output",
+        key_message=None,
+        refined_segment=None,
+    )
+
+    assert await score_repo.top_candidates(subject_id=subject.id) == []
+    assert await score_repo.top_unsent_candidates(subject_id=subject.id) == []
+    await db.close()
+
+
+@pytest.mark.asyncio
 async def test_t152_top_candidates_ties_broken_by_final_score_within_reranked(
     tmp_path: Path,
 ) -> None:

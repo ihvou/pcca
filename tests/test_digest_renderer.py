@@ -177,7 +177,7 @@ async def test_telegram_renderer_clamps_full_text_cap() -> None:
         final_score=0.9,
         rationale="matched",
         segment_text="B" * 600,
-        key_message="Tiny source provides a concise curated update for this subject.",
+        key_message="Tiny source provides a concise curated update with enough detail for this subject.",
         refined_segment="B" * 600,
     )
 
@@ -326,6 +326,43 @@ async def test_t159_telegram_renderer_does_not_fallback_to_raw_text_when_key_mes
     assert "Those are the most common ones" not in payload.briefs[0].short_text
     assert "Anthropic shows a concrete workflow" not in payload.briefs[0].short_text
     assert "Curated summary unavailable" in payload.briefs[0].short_text
+
+
+@pytest.mark.asyncio
+async def test_t163_telegram_renderer_can_use_refined_segment_as_curated_header() -> None:
+    subject = Subject(
+        id=1,
+        name="AI Careers",
+        telegram_thread_id=None,
+        status="active",
+        created_at="2026-05-18 00:00:00",
+    )
+    candidate = CandidateItem(
+        item_id=1,
+        title_or_text="Raw source title that should not be promoted",
+        url=None,
+        author="Elena",
+        published_at="2026-05-18",
+        final_score=0.82,
+        rationale="matched",
+        platform="linkedin",
+        segment_text="Raw transcript/source text should not appear as the summary.",
+        key_message=None,
+        refined_segment="AI gives ICs broader leverage across PM, design, marketing, and engineering work.",
+    )
+
+    payload = await TelegramDigestRenderer().render(
+        subject=subject,
+        ranked_items=[candidate],
+        context=DigestRenderContext(
+            digest_id=1,
+            run_date=__import__("datetime").date(2026, 5, 18),
+            create_button_token=_token_factory,
+        ),
+    )
+
+    assert payload.briefs[0].short_text.startswith("AI gives ICs broader leverage")
+    assert "Raw transcript/source text" not in payload.briefs[0].short_text
 
 
 @pytest.mark.asyncio

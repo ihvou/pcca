@@ -189,16 +189,18 @@ class ItemScoreRepository:
                 ) sent ON sent.item_id = i.id
                 WHERE s.subject_id = ?
                   AND sent.item_id IS NULL
-                  AND COALESCE(
-                    json_extract(iss_best.rationale_json, '$.key_message'),
-                    json_extract(s.rationale_json, '$.key_message'),
-                    ''
-                  ) NOT IN ('', '(low-content segment)')
-                  AND COALESCE(
-                    json_extract(iss_best.rationale_json, '$.refined_segment'),
-                    json_extract(s.rationale_json, '$.refined_segment'),
-                    ''
-                  ) <> ''
+                  AND (
+                    COALESCE(
+                      json_extract(iss_best.rationale_json, '$.key_message'),
+                      json_extract(s.rationale_json, '$.key_message'),
+                      ''
+                    ) NOT IN ('', '(low-content segment)')
+                    OR COALESCE(
+                      json_extract(iss_best.rationale_json, '$.refined_segment'),
+                      json_extract(s.rationale_json, '$.refined_segment'),
+                      ''
+                    ) <> ''
+                  )
                 ORDER BY
                   s.final_score DESC
                 LIMIT ?
@@ -242,16 +244,18 @@ class ItemScoreRepository:
                   )
                 LEFT JOIN item_segments seg ON seg.id = iss_best.segment_id
                 WHERE s.subject_id = ?
-                  AND COALESCE(
-                    json_extract(iss_best.rationale_json, '$.key_message'),
-                    json_extract(s.rationale_json, '$.key_message'),
-                    ''
-                  ) NOT IN ('', '(low-content segment)')
-                  AND COALESCE(
-                    json_extract(iss_best.rationale_json, '$.refined_segment'),
-                    json_extract(s.rationale_json, '$.refined_segment'),
-                    ''
-                  ) <> ''
+                  AND (
+                    COALESCE(
+                      json_extract(iss_best.rationale_json, '$.key_message'),
+                      json_extract(s.rationale_json, '$.key_message'),
+                      ''
+                    ) NOT IN ('', '(low-content segment)')
+                    OR COALESCE(
+                      json_extract(iss_best.rationale_json, '$.refined_segment'),
+                      json_extract(s.rationale_json, '$.refined_segment'),
+                      ''
+                    ) <> ''
+                  )
                 ORDER BY
                   s.final_score DESC
                 LIMIT ?

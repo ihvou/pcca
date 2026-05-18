@@ -294,6 +294,9 @@ def _key_message(candidate: CandidateItem) -> str:
     normalized = " ".join((candidate.key_message or "").split()).strip()
     if normalized and not is_low_content_key_message(normalized):
         return normalized
+    refined = " ".join((candidate.refined_segment or "").split()).strip()
+    if refined:
+        return refined
     return "Curated summary unavailable. Rebuild Briefs to regenerate this item."
 
 
