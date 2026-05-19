@@ -20,6 +20,9 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     monkeypatch.delenv("PCCA_SCORER", raising=False)
     monkeypatch.delenv("PCCA_EMBEDDING_MODEL", raising=False)
     monkeypatch.delenv("PCCA_AUTO_BACKFILL", raising=False)
+    monkeypatch.delenv("PCCA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("PCCA_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("PCCA_LLM_MODEL", raising=False)
     monkeypatch.setenv("PCCA_OLLAMA_ENABLED", "false")
 
     settings = Settings.from_env()
@@ -37,6 +40,22 @@ def test_settings_loads_local_dotenv_without_overriding_environment(tmp_path, mo
     assert settings.embedding_model == "nomic-embed-text:v1.5"
     assert settings.model_router_timeout_seconds == 180
     assert settings.auto_backfill_embeddings is True
+    assert settings.llm_provider == "ollama"
+    assert settings.llm_model == "llama3.1:8b"
+
+
+def test_t164_gemini_key_switches_default_llm_provider(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("PCCA_GEMINI_API_KEY=secret-key\n", encoding="utf-8")
+    monkeypatch.delenv("PCCA_GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("PCCA_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("PCCA_LLM_MODEL", raising=False)
+
+    settings = Settings.from_env()
+
+    assert settings.gemini_api_key == "secret-key"
+    assert settings.llm_provider == "gemini"
+    assert settings.llm_model == "gemini-2.5-flash"
 
 
 def test_browser_channel_can_use_bundled_chromium(tmp_path, monkeypatch) -> None:

@@ -668,6 +668,8 @@ class AgentScheduler:
     job_runner: JobRunner
     digest_auto_send: bool = False
     nightly_enabled: bool = False
+    llm_provider: str = "ollama"
+    llm_model: str = ""
     scheduler: AsyncIOScheduler = field(init=False)
 
     def __post_init__(self) -> None:
@@ -696,10 +698,12 @@ class AgentScheduler:
             )
         self.scheduler.start()
         logger.info(
-            "Scheduler started. nightly=%s morning=%s digest_auto_send=%s",
+            "Scheduler started. nightly=%s morning=%s digest_auto_send=%s llm_provider=%s model=%s",
             self.nightly_cron if self.nightly_enabled else "(launchd/on-demand)",
             self.morning_cron if self.digest_auto_send else "(on-demand only)",
             self.digest_auto_send,
+            self.llm_provider,
+            self.llm_model or "(default)",
         )
 
     def shutdown(self) -> None:

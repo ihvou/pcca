@@ -54,6 +54,9 @@ class Settings:
     ollama_base_url: str
     ollama_model: str
     telegram_bot_token: str | None
+    llm_provider: str = "ollama"
+    llm_model: str = "llama3.1:8b"
+    gemini_api_key: str | None = None
     model_router_timeout_seconds: int = 180
     session_refresh_enabled: bool = True
     session_refresh_cooldown_seconds: int = 1800
@@ -87,6 +90,17 @@ class Settings:
         browser_channel = _env("PCCA_BROWSER_CHANNEL", "chrome")
         if browser_channel is not None:
             browser_channel = browser_channel.strip().lower() or None
+        gemini_api_key = _env("PCCA_GEMINI_API_KEY", None)
+        llm_provider_raw = _env("PCCA_LLM_PROVIDER", None)
+        llm_provider = (
+            llm_provider_raw.strip().lower()
+            if llm_provider_raw
+            else ("gemini" if gemini_api_key else "ollama")
+        )
+        if llm_provider not in {"gemini", "openai", "ollama"}:
+            llm_provider = "ollama"
+        default_llm_model = "gemini-2.5-flash" if llm_provider == "gemini" else "llama3.1:8b"
+        llm_model = _env("PCCA_LLM_MODEL", default_llm_model) or default_llm_model
         ollama_enabled_raw = (_env("PCCA_OLLAMA_ENABLED", "false") or "false").strip().lower()
         ollama_enabled = ollama_enabled_raw in {"1", "true", "yes", "on"}
         # Default OFF: in v1 daily Brief delivery is on-demand via the Telegram bot's
@@ -164,7 +178,10 @@ class Settings:
             browser_channel=browser_channel,
             ollama_enabled=ollama_enabled,
             ollama_base_url=_env("PCCA_OLLAMA_BASE_URL", "http://localhost:11434") or "http://localhost:11434",
-            ollama_model=_env("PCCA_OLLAMA_MODEL", "qwen2.5:7b") or "qwen2.5:7b",
+            ollama_model=_env("PCCA_OLLAMA_MODEL", "llama3.1:8b") or "llama3.1:8b",
+            llm_provider=llm_provider,
+            llm_model=llm_model,
+            gemini_api_key=gemini_api_key,
             model_router_timeout_seconds=max(1, model_router_timeout_seconds),
             telegram_bot_token=_env("PCCA_TELEGRAM_BOT_TOKEN"),
             session_refresh_enabled=session_refresh_enabled,

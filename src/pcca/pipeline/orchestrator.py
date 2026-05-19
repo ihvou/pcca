@@ -737,6 +737,21 @@ class PipelineOrchestrator:
                 candidates=candidates,
             )
             stats["model_summary_batch_calls"] = int(stats.get("model_summary_batch_calls", 0)) + 1
+            stats["summarize_batch_calls"] = int(stats.get("summarize_batch_calls", 0)) + 1
+            stats["summarize_batch_duration_ms_total"] = int(
+                stats.get("summarize_batch_duration_ms_total", 0)
+            ) + int(getattr(self.model_router, "last_summary_duration_ms", 0) or 0)
+            provider = str(getattr(self.model_router, "last_summary_provider", "") or "unknown")
+            provider_counts = dict(stats.get("summarize_batch_provider_counts") or {})
+            provider_counts[provider] = int(provider_counts.get(provider, 0)) + 1
+            stats["summarize_batch_provider_counts"] = provider_counts
+            usage = getattr(self.model_router, "last_summary_usage", {}) or {}
+            if isinstance(usage, dict):
+                token_total = int(usage.get("totalTokenCount") or usage.get("total_tokens") or 0)
+                if token_total:
+                    stats["summarize_batch_token_count_total"] = int(
+                        stats.get("summarize_batch_token_count_total", 0)
+                    ) + token_total
 
         adjusted_segment_scores: dict[int, Any] = {}
         item_key_messages: dict[int, str] = {}
@@ -992,6 +1007,10 @@ class PipelineOrchestrator:
             "items_model_summarized": 0,
             "items_model_summary_low_content": 0,
             "model_summary_batch_calls": 0,
+            "summarize_batch_calls": 0,
+            "summarize_batch_duration_ms_total": 0,
+            "summarize_batch_token_count_total": 0,
+            "summarize_batch_provider_counts": {},
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,
@@ -1158,6 +1177,10 @@ class PipelineOrchestrator:
             "items_model_summarized": 0,
             "items_model_summary_low_content": 0,
             "model_summary_batch_calls": 0,
+            "summarize_batch_calls": 0,
+            "summarize_batch_duration_ms_total": 0,
+            "summarize_batch_token_count_total": 0,
+            "summarize_batch_provider_counts": {},
             "embedding_items_scored": 0,
             "embedding_fallback_items": 0,
             "embedding_degraded": False,

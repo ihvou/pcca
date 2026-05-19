@@ -97,10 +97,16 @@ class PCCAApp:
         run_log_repo = RunLogRepository(conn=self.db.conn)
         subject_draft_repo = SubjectDraftRepository(conn=self.db.conn)
         lookup_cache_repo = LookupCacheRepository(conn=self.db.conn)
+        model_router_enabled = self.settings.ollama_enabled or (
+            self.settings.llm_provider == "gemini" and bool(self.settings.gemini_api_key)
+        )
         model_router = ModelRouter(
-            enabled=self.settings.ollama_enabled,
+            enabled=model_router_enabled,
             ollama_base_url=self.settings.ollama_base_url,
             ollama_model=self.settings.ollama_model,
+            llm_provider=self.settings.llm_provider,
+            llm_model=self.settings.llm_model,
+            gemini_api_key=self.settings.gemini_api_key,
             timeout_seconds=self.settings.model_router_timeout_seconds,
         )
         embedding_service = EmbeddingService(
@@ -193,6 +199,8 @@ class PCCAApp:
             timezone=self.settings.timezone,
             digest_auto_send=self.settings.digest_auto_send,
             nightly_enabled=self.settings.in_process_nightly_enabled,
+            llm_provider=self.settings.llm_provider,
+            llm_model=self.settings.llm_model,
             job_runner=JobRunner(
                 subject_service=self.subject_service,
                 routing_service=self.routing_service,

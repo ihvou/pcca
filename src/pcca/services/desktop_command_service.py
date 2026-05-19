@@ -454,10 +454,16 @@ class DesktopCommandService:
 
     def preference_extractor(self) -> PreferenceExtractionService:
         settings = self.settings()
+        model_router_enabled = settings.ollama_enabled or (
+            settings.llm_provider == "gemini" and bool(settings.gemini_api_key)
+        )
         model_router = ModelRouter(
-            enabled=settings.ollama_enabled,
+            enabled=model_router_enabled,
             ollama_base_url=settings.ollama_base_url,
             ollama_model=settings.ollama_model,
+            llm_provider=settings.llm_provider,
+            llm_model=settings.llm_model,
+            gemini_api_key=settings.gemini_api_key,
             timeout_seconds=settings.model_router_timeout_seconds,
         )
         return PreferenceExtractionService(model_router=model_router)
@@ -683,6 +689,9 @@ class DesktopCommandService:
                     "platform_circuit_threshold": settings.platform_circuit_threshold,
                     "platform_empty_threshold": settings.platform_empty_threshold,
                     "scorer": settings.scorer,
+                    "llm_provider": settings.llm_provider,
+                    "llm_model": settings.llm_model,
+                    "gemini_configured": bool(settings.gemini_api_key),
                     "embedding_model": settings.embedding_model,
                 },
                 "onboarding": {

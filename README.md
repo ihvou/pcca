@@ -159,9 +159,14 @@ PCCA_SESSION_REFRESH_ENABLED=true
 PCCA_SESSION_REFRESH_COOLDOWN_SECONDS=1800
 PCCA_SESSION_REFRESH_BROWSER=     # chrome|arc|brave|edge; empty = auto
 
-# Optional local LLM rerank
+# Pass-2 summaries / Brief quality
+PCCA_GEMINI_API_KEY=              # from https://aistudio.google.com/apikey
+PCCA_LLM_PROVIDER=                # empty = gemini if key exists, else ollama
+PCCA_LLM_MODEL=                   # empty = gemini-2.5-flash or llama3.1:8b
+
+# Ollama local fallback
 PCCA_OLLAMA_ENABLED=false
-PCCA_OLLAMA_MODEL=qwen2.5:7b
+PCCA_OLLAMA_MODEL=llama3.1:8b
 PCCA_OLLAMA_BASE_URL=http://localhost:11434
 
 # Logging
@@ -188,6 +193,10 @@ laptop on AC power; closed-lid or battery-only standby can still skip wake
 events depending on macOS power settings.
 
 Dedicated launchd run logs are written under `.pcca/logs/nightly-YYYY-MM-DD.log`.
+For best Brief quality, set `PCCA_GEMINI_API_KEY` from
+[Google AI Studio](https://aistudio.google.com/apikey). When that key is
+present and `PCCA_LLM_PROVIDER` is empty, PCCA uses `gemini-2.5-flash` for
+Pass-2 summaries and falls back to Ollama if Gemini is unavailable.
 To remove the schedule:
 
 ```bash
@@ -229,12 +238,13 @@ contain logged-in page content. `pcca debug-bundle` redacts them on export.
 
 ### Multilingual scoring
 
-Heuristic scoring is Cyrillic-aware (English / Ukrainian / Russian). The
-optional Ollama rerank lane is language-agnostic — set `PCCA_OLLAMA_ENABLED=true`
-and pull a multilingual model:
+Heuristic scoring is Cyrillic-aware (English / Ukrainian / Russian). Gemini
+Pass-2 summaries also handle Ukrainian/Russian well in current testing. If you
+want a fully local fallback, set `PCCA_OLLAMA_ENABLED=true` and pull a
+multilingual model:
 
 ```bash
-ollama pull qwen2.5:7b
+ollama pull llama3.1:8b
 ```
 
 ### Linux

@@ -147,6 +147,125 @@ async def test_t159_model_router_summarize_batch_handles_low_content() -> None:
 
 
 @pytest.mark.asyncio
+async def test_t164_model_router_dispatches_to_gemini_provider() -> None:
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["payload"] = json.loads(request.read().decode())
+        return httpx.Response(
+            200,
+            json={
+                "candidates": [
+                    {
+                        "content": {
+                            "parts": [
+                                {
+                                    "text": json.dumps(
+                                        {
+                                            "summaries": [
+                                                {
+                                                    "item_id": 1,
+                                                    "brief_summary": "Gemini summarizes the concrete AI product-management outcome.",
+                                                    "detailed_summary": "Gemini keeps the source-specific claim. It explains the PM outcome without adding outside context. It returns the required detailed field.",
+                                                    "is_low_content": False,
+                                                    "reason": "on subject",
+                                                }
+                                            ]
+                                        }
+                                    )
+                                }
+                            ]
+                        }
+                    }
+                ],
+                "usageMetadata": {"totalTokenCount": 123},
+            },
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = ModelRouter(
+            enabled=True,
+            ollama_base_url="http://ollama.test",
+            ollama_model="llama3.1:8b",
+            llm_provider="gemini",
+            llm_model="gemini-2.5-flash",
+            gemini_api_key="gemini-key",
+            http_client=client,
+        )
+        results = await router.summarize_batch(
+            subject_name="AI PM Success Stories",
+            subject_description="Only concrete PM outcomes.",
+            candidates=[ModelRerankCandidate(item_id=1, text="PM team saved time with AI.", heuristic_score=0.8)],
+        )
+
+    assert "/v1beta/models/gemini-2.5-flash:generateContent" in seen["url"]
+    assert "key=gemini-key" in seen["url"]
+    payload = seen["payload"]
+    assert payload["contents"][0]["parts"][0]["text"]
+    assert payload["generationConfig"]["responseMimeType"] == "application/json"
+    assert payload["generationConfig"]["responseSchema"] == SUMMARY_BATCH_RESPONSE_SCHEMA
+    assert results[1].brief_summary.startswith("Gemini summarizes")
+    assert results[1].detailed_summary.startswith("Gemini keeps")
+    assert router.last_summary_provider == "gemini"
+    assert router.last_summary_model == "gemini-2.5-flash"
+    assert router.last_summary_usage["totalTokenCount"] == 123
+
+
+@pytest.mark.asyncio
+async def test_t164_summarize_batch_falls_back_to_ollama_on_gemini_failure() -> None:
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if "generativelanguage.googleapis.com" in str(request.url):
+            return httpx.Response(500, json={"error": "quota"}, request=request)
+        payload = json.loads(request.read().decode())
+        assert payload["model"] == "llama3.1:8b"
+        assert payload["format"] == SUMMARY_BATCH_RESPONSE_SCHEMA
+        return httpx.Response(
+            200,
+            json={
+                "response": json.dumps(
+                    {
+                        "summaries": [
+                            {
+                                "item_id": 1,
+                                "brief_summary": "Ollama fallback summarizes the same candidate after Gemini fails.",
+                                "detailed_summary": "The fallback keeps PCCA resilient. It returns the detailed field after the Gemini call fails. The item remains usable.",
+                                "is_low_content": False,
+                                "reason": "fallback",
+                            }
+                        ]
+                    }
+                )
+            },
+            request=request,
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        router = ModelRouter(
+            enabled=True,
+            ollama_base_url="http://ollama.test",
+            ollama_model="llama3.1:8b",
+            llm_provider="gemini",
+            llm_model="gemini-2.5-flash",
+            gemini_api_key="gemini-key",
+            http_client=client,
+        )
+        results = await router.summarize_batch(
+            subject_name="AI Tools",
+            subject_description="Practical AI tool updates.",
+            candidates=[ModelRerankCandidate(item_id=1, text="Claude Code update.", heuristic_score=0.8)],
+        )
+
+    assert paths == ["/v1beta/models/gemini-2.5-flash:generateContent", "/api/generate"]
+    assert results[1].brief_summary.startswith("Ollama fallback")
+    assert router.last_summary_provider == "ollama"
+    assert router.last_summary_model == "llama3.1:8b"
+
+
+@pytest.mark.asyncio
 async def test_model_router_batch_rerank_gracefully_handles_wrong_structured_shape(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

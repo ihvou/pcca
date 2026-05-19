@@ -107,9 +107,41 @@ class ModelRouter:
     ollama_base_url: str
     ollama_model: str
     timeout_seconds: float = 180.0
+    llm_provider: str = "ollama"
+    llm_model: str | None = None
+    gemini_api_key: str | None = None
+    gemini_base_url: str = "https://generativelanguage.googleapis.com"
     http_client: httpx.AsyncClient | None = field(default=None, repr=False)
+    last_summary_duration_ms: int = field(default=0, init=False)
+    last_summary_provider: str = field(default="", init=False)
+    last_summary_model: str = field(default="", init=False)
+    last_summary_usage: dict = field(default_factory=dict, init=False)
+
+    def __post_init__(self) -> None:
+        provider = (self.llm_provider or "ollama").strip().lower()
+        if provider not in {"gemini", "openai", "ollama"}:
+            provider = "ollama"
+        self.llm_provider = provider
+        if not self.llm_model:
+            self.llm_model = "gemini-2.5-flash" if provider == "gemini" else self.ollama_model
 
     async def _post_generate(self, payload: dict, *, schema: dict | None = None) -> dict:
+        if self.llm_provider == "gemini":
+            try:
+                data = await self._call_gemini(prompt=str(payload.get("prompt") or ""), schema=schema)
+                self.last_summary_provider = "gemini"
+                self.last_summary_model = str(self.llm_model or "gemini-2.5-flash")
+                self.last_summary_usage = data.get("_pcca_usage", {}) if isinstance(data, dict) else {}
+                return data
+            except Exception:
+                logger.warning(
+                    "Gemini model call failed; falling back to Ollama model=%s",
+                    self.ollama_model,
+                    exc_info=True,
+                )
+                self.last_summary_provider = "ollama"
+                self.last_summary_model = self.ollama_model
+                self.last_summary_usage = {}
         # All model calls, including subject creation/rebuild, share this
         # timeout so PCCA_MODEL_ROUTER_TIMEOUT_SECONDS has one meaning.
         request_payload = dict(payload)
@@ -121,7 +153,44 @@ class ModelRouter:
             async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
                 response = await client.post(f"{self.ollama_base_url}/api/generate", json=request_payload)
         response.raise_for_status()
+        self.last_summary_provider = "ollama"
+        self.last_summary_model = self.ollama_model
+        self.last_summary_usage = {}
         return response.json()
+
+    async def _call_gemini(self, *, prompt: str, schema: dict | None = None) -> dict:
+        if not self.gemini_api_key:
+            raise RuntimeError("PCCA_GEMINI_API_KEY is required for Gemini LLM provider.")
+        model_name = str(self.llm_model or "gemini-2.5-flash").strip()
+        model_path = model_name if model_name.startswith("models/") else f"models/{model_name}"
+        url = f"{self.gemini_base_url.rstrip('/')}/v1beta/{model_path}:generateContent?key={self.gemini_api_key}"
+        generation_config: dict = {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+        }
+        if schema is not None:
+            generation_config["responseSchema"] = schema
+        request_payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": generation_config,
+        }
+        if self.http_client is not None:
+            response = await self.http_client.post(url, json=request_payload)
+        else:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                response = await client.post(url, json=request_payload)
+        response.raise_for_status()
+        data = response.json()
+        raw = _extract_gemini_text(data)
+        return {
+            "response": raw,
+            "_pcca_usage": data.get("usageMetadata", {}),
+        }
 
     async def summarize_batch(
         self,
@@ -170,11 +239,14 @@ class ModelRouter:
             "format": "json",
             "options": {"temperature": 0.1},
         }
+        provider_label = self.llm_provider
+        model_label = str(self.llm_model or self.ollama_model)
         try:
             logger.debug(
-                "Model summary batch started subject=%s model=%s candidates=%d",
+                "Model summary batch started subject=%s provider=%s model=%s candidates=%d",
                 subject_name,
-                self.ollama_model,
+                provider_label,
+                model_label,
                 len(compact_candidates),
             )
             data = await self._post_generate(payload, schema=SUMMARY_BATCH_RESPONSE_SCHEMA)
@@ -182,10 +254,12 @@ class ModelRouter:
             parsed = parse_model_json_response(raw, context=f"summary batch subject={subject_name}") or {}
             summaries = parsed.get("summaries", [])
             if not isinstance(summaries, list) or not summaries:
+                self.last_summary_duration_ms = int((time.monotonic() - started_at) * 1000)
                 logger.warning(
-                    "Model summary batch returned no summary items subject=%s model=%s top_k_count=%d response_preview=%s",
+                    "Model summary batch returned no summary items subject=%s provider=%s model=%s top_k_count=%d response_preview=%s",
                     subject_name,
-                    self.ollama_model,
+                    self.last_summary_provider or provider_label,
+                    self.last_summary_model or model_label,
                     len(compact_candidates),
                     _preview(raw),
                 )
@@ -217,26 +291,31 @@ class ModelRouter:
             brief_count = sum(1 for result in out.values() if result.brief_summary)
             detailed_count = sum(1 for result in out.values() if result.detailed_summary)
             low_content_count = sum(1 for result in out.values() if result.is_low_content)
+            duration_ms = int((time.monotonic() - started_at) * 1000)
+            self.last_summary_duration_ms = duration_ms
             logger.info(
-                "Model summary batch finished subject=%s model=%s top_k_count=%d results=%d "
+                "Model summary batch finished subject=%s provider=%s model=%s top_k_count=%d results=%d "
                 "brief_count=%d detailed_count=%d low_content=%d duration_ms=%d",
                 subject_name,
-                self.ollama_model,
+                self.last_summary_provider or provider_label,
+                self.last_summary_model or model_label,
                 len(compact_candidates),
                 len(out),
                 brief_count,
                 detailed_count,
                 low_content_count,
-                int((time.monotonic() - started_at) * 1000),
+                duration_ms,
             )
             return out
         except Exception as exc:
+            self.last_summary_duration_ms = int((time.monotonic() - started_at) * 1000)
             logger.warning(
-                "Model summary batch failed subject=%s model=%s candidates=%d duration_ms=%d error=%s",
+                "Model summary batch failed subject=%s provider=%s model=%s candidates=%d duration_ms=%d error=%s",
                 subject_name,
-                self.ollama_model,
+                self.last_summary_provider or provider_label,
+                self.last_summary_model or model_label,
                 len(compact_candidates),
-                int((time.monotonic() - started_at) * 1000),
+                self.last_summary_duration_ms,
                 exc,
                 exc_info=True,
             )
@@ -571,6 +650,16 @@ def parse_model_json_response(raw: str, *, context: str) -> dict | None:
         _preview(text),
     )
     return None
+
+
+def _extract_gemini_text(data: dict) -> str:
+    candidates = data.get("candidates", []) if isinstance(data, dict) else []
+    if not candidates or not isinstance(candidates[0], dict):
+        return ""
+    content = candidates[0].get("content", {})
+    parts = content.get("parts", []) if isinstance(content, dict) else []
+    texts = [str(part.get("text") or "") for part in parts if isinstance(part, dict)]
+    return "\n".join(text for text in texts if text).strip()
 
 
 def _extract_first_json_object(text: str) -> str | None:
