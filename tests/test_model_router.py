@@ -92,6 +92,13 @@ async def test_t159_model_router_summarize_batch_produces_both_outputs() -> None
     assert "15-30 words" in prompt
     assert "Your job is NOT to score it" in prompt
     assert "heuristic_score" not in prompt
+    # T-165 (2026-05-20): prompt must include the off-topic rejection rule.
+    # User stated preference 2026-05-20: empty digest is OK; off-topic content
+    # in delivered briefs is NOT. The clause "the user prefers an empty digest
+    # over off-topic content" is the contract — keep it intact.
+    assert "off-topic for this subject" in prompt
+    assert "the user prefers an empty digest over off-topic content" in prompt.lower() or \
+           "User prefers an empty digest over off-topic content" in prompt
     assert results[1].brief_summary.startswith("Claude Code introduced")
     assert results[1].detailed_summary.startswith("The item says")
     assert results[1].is_low_content is False
